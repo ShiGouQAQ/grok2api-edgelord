@@ -1,49 +1,97 @@
-# 构建阶段
-FROM python:3.11-slim AS builder
-
-WORKDIR /build
-
-# 安装依赖到独立目录
-COPY requirements.txt .
-RUN pip install --no-cache-dir --only-binary=:all: --prefix=/install -r requirements.txt && \
-    find /install -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
-    find /install -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true && \
-    find /install -type d -name "test" -exec rm -rf {} + 2>/dev/null || true && \
-    find /install -type d -name "*.dist-info" -exec sh -c 'rm -f "$1"/RECORD "$1"/INSTALLER' _ {} \; && \
-    find /install -type f -name "*.pyc" -delete && \
-    find /install -type f -name "*.pyo" -delete && \
-    find /install -name "*.so" -exec strip --strip-unneeded {} \; 2>/dev/null || true
-
-# 运行阶段 - 使用最小镜像
-FROM python:3.11-slim
+# ============================================
+# Stage 1: Build dependencies with uv
+# ============================================
+FROM debian:bookworm-slim AS builder
 
 WORKDIR /app
 
-# 清理基础镜像中的冗余文件
-RUN rm -rf /usr/share/doc/* \
-    /usr/share/man/* \
-    /usr/share/locale/* \
-    /var/cache/apt/* \
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Copy dependency files
+COPY pyproject.toml uv.lock ./
+
+# Create virtual environment and install dependencies using copy mode for portability
+ENV UV_LINK_MODE=copy
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Install Camoufox from git
+RUN uv pip install --no-cache \
+    'git+https://github.com/coryking/camoufox.git@v142.0.1-bluetaka.25#subdirectory=pythonlib'
+
+# ============================================
+# Stage 2: Runtime
+# ============================================
+FROM ghcr.io/linuxserver/baseimage-selkies:ubuntunoble
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    git && \
+    apt-get autoclean && \
+    rm -rf \
     /var/lib/apt/lists/* \
-    /tmp/* \
-    /var/tmp/*
+    /var/tmp/* \
+    /tmp/*
 
-# 从构建阶段复制已安装的包
-COPY --from=builder /install /usr/local
+# Copy virtual environment from builder
+COPY --from=builder /app/.venv /app/.venv
 
-# 创建必要的目录和文件
-RUN mkdir -p /app/logs /app/data/temp/image /app/data/temp/video && \
-    echo '{"ssoNormal": {}, "ssoSuper": {}}' > /app/data/token.json
+# Install uv and Python
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
-# 复制应用代码
+# Install Patchright system dependencies only (no browsers)
+RUN uv run -m patchright install-deps && \
+    apt-get autoclean && \
+    rm -rf \
+    /var/lib/apt/lists/* \
+    /var/tmp/* \
+    /tmp/*
+
+# Pre-fetch Camoufox browser during build to avoid runtime network issues
+RUN mkdir -p /config/.cache && \
+    uv run python -m camoufox fetch || (echo "ERROR: Failed to fetch Camoufox browser. Build aborted." && exit 1) && \
+    chown -R abc:abc /config/.cache
+
+# Copy application code
 COPY app/ ./app/
 COPY main.py .
 COPY data/setting.toml ./data/
 
-# 删除 Python 字节码和缓存
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+# Copy root filesystem (includes autostart)
+COPY /root /
 
-EXPOSE 8000
+# Create necessary directories with proper permissions for abc user
+RUN mkdir -p /app/logs /app/data/temp/image /app/data/temp/video /config/.cache && \
+    echo '{"ssoNormal": {}, "ssoSuper": {}}' > /app/data/token.json && \
+    chmod +x /defaults/autostart && \
+    chown -R abc:abc /app /config/.cache
 
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Set environment variables
+ENV TITLE="Grok2API" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DISPLAY=:99 \
+    PATH="/app/.venv/bin:$PATH" \
+    VIRTUAL_ENV=/app/.venv
+
+# Expose ports
+EXPOSE 8000 3001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/ || exit 1
