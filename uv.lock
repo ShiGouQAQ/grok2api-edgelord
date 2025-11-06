@@ -3,6 +3,20 @@ revision = 3
 requires-python = ">=3.14"
 
 [[package]]
+name = "2captcha-python-async"
+version = "1.5.1"
+source = { registry = "https://mirrors.cernet.edu.cn/pypi/web/simple/" }
+dependencies = [
+    { name = "aiofiles" },
+    { name = "httpx" },
+    { name = "requests" },
+]
+sdist = { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/b4/b0/667b5e7d345c4765a4b75dce8a6e50b2e5c4fb46f70a8752319a7938edd7/2captcha_python_async-1.5.1.tar.gz", hash = "sha256:c9d5b73ddac23a8bcdc1b96b075f7165945c0d79836f8370d3802d9c58ab3236" }
+wheels = [
+    { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/c4/d9/c0dda42c84c87f592dc853d0dfaedd30cc66800b6f104003db02364581aa/2captcha_python_async-1.5.1-py3-none-any.whl", hash = "sha256:44ee4d3f8152831c6f1b6103acdb8c2d59f0cc9bbc5ddb7e389adf66359d638f" },
+]
+
+[[package]]
 name = "aiofiles"
 version = "25.1.0"
 source = { registry = "https://mirrors.cernet.edu.cn/pypi/web/simple/" }
@@ -622,6 +636,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "fastmcp" },
     { name = "patchright" },
+    { name = "playwright-captcha" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "quart" },
@@ -651,6 +666,7 @@ requires-dist = [
     { name = "fastapi", specifier = "==0.121.0" },
     { name = "fastmcp", specifier = "==2.13.0.2" },
     { name = "patchright", specifier = ">=1.55.2" },
+    { name = "playwright-captcha", specifier = ">=0.1.1" },
     { name = "pydantic", specifier = "==2.12.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
@@ -1245,6 +1261,18 @@ wheels = [
     { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/06/2e/9db64518aebcb3d6ef6cd6d4d01da741aff912c3f0314dadb61226c6a96a/playwright-1.55.0-py3-none-win32.whl", hash = "sha256:29e6d1558ad9d5b5c19cbec0a72f6a2e35e6353cd9f262e22148685b86759f90" },
     { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/46/4f/9ba607fa94bb9cee3d4beb1c7b32c16efbfc9d69d5037fa85d10cafc618b/playwright-1.55.0-py3-none-win_amd64.whl", hash = "sha256:7eb5956473ca1951abb51537e6a0da55257bb2e25fc37c2b75af094a5c93736c" },
     { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/21/98/5ca173c8ec906abde26c28e1ecb34887343fd71cc4136261b90036841323/playwright-1.55.0-py3-none-win_arm64.whl", hash = "sha256:012dc89ccdcbd774cdde8aeee14c08e0dd52ddb9135bf10e9db040527386bd76" },
+]
+
+[[package]]
+name = "playwright-captcha"
+version = "0.1.1"
+source = { registry = "https://mirrors.cernet.edu.cn/pypi/web/simple/" }
+dependencies = [
+    { name = "2captcha-python-async" },
+]
+sdist = { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/f2/c5/db6523f102bbf069746e7b6a47803cbc7f56a7e34635a504165844c09fc1/playwright_captcha-0.1.1.tar.gz", hash = "sha256:e8f2ec7e7dab84bbba5053d56aadcc1030fe76c1a5314625cd254cd009a5b9d7" }
+wheels = [
+    { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/ec/4f/af153778ca11f7b273e4d2b40265ff1000dada009128dd661430962246fb/playwright_captcha-0.1.1-py3-none-any.whl", hash = "sha256:edcca33c2e09fd9f51ca98ef753f949c3f8ecbe38abecb4b8a30c3b79ad79f4c" },
 ]
 
 [[package]]

@@ -201,27 +201,20 @@ class CFClearanceManager:
     async def _try_refresh_once(self) -> bool:
         """单次刷新尝试"""
         try:
-            # Use integrated Turnstile Solver
             from app.services.turnstile.manager import turnstile_manager
             
             target_url = "https://grok.com"
-            sitekey = "0x4AAAAAABSXp6OOe7EVGPnR"
             
-            logger.info(f"[CFClearance] 使用集成Turnstile Solver求解验证码")
+            logger.info(f"[CFClearance] 使用playwright-captcha求解验证码")
             
-            # Solve using integrated solver
-            clearance = await turnstile_manager.solve_turnstile(
-                url=target_url,
-                sitekey=sitekey,
-                action="verify"
-            )
+            clearance = await turnstile_manager.solve_cloudflare(url=target_url)
             
             if clearance:
                 await setting.save(grok_config={"cf_clearance": clearance})
                 logger.info(f"[CFClearance] 已更新cf_clearance")
                 return True
             
-            logger.error(f"[CFClearance] Turnstile求解失败")
+            logger.error(f"[CFClearance] 求解失败")
             return False
 
         except Exception as e:

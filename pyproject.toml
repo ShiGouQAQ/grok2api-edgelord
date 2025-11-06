@@ -23,6 +23,7 @@ dependencies = [
     "patchright>=1.55.2",
     "camoufox[geoip]>=0.4.0",
     "rich>=14.2.0",
+    "playwright-captcha>=0.1.1",
 ]
 
 [project.optional-dependencies]
