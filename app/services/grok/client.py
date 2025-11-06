@@ -23,6 +23,8 @@ IMPERSONATE_BROWSER = "chrome133a"
 MAX_RETRY = 3  # 最大重试次数
 
 
+from app.services.grok.cf_clearance import cf_clearance_manager
+
 class GrokClient:
     """Grok API 客户端"""
 
@@ -50,6 +52,9 @@ class GrokClient:
     @staticmethod
     async def _try(model: str, content: str, image_urls: List[str], model_name: str, model_mode: str, is_video: bool, stream: bool):
         """带重试的请求执行"""
+        # 确保cf_clearance有效
+        await cf_clearance_manager.ensure_valid_clearance()
+        
         last_err = None
         
         for i in range(MAX_RETRY):
@@ -89,7 +94,7 @@ class GrokClient:
                 
                 if i < MAX_RETRY - 1:
                     logger.warning(f"[Client] 请求失败(状态码:{status}), 重试 {i+1}/{MAX_RETRY}")
-                    await asyncio.sleep(0.5)  # 短暂延迟
+                    await asyncio.sleep(0.5)
                 else:
                     logger.error(f"[Client] 重试{MAX_RETRY}次后仍失败")
         
@@ -199,7 +204,8 @@ class GrokClient:
             headers = GrokClient._build_headers(auth_token)
             if model == "grok-imagine-0.9":
                 # 传入会话ID
-                referer_id = post_id if post_id else payload.get("fileAttachments", [""])[0]
+                file_attachments = payload.get("fileAttachments", [])
+                referer_id = post_id if post_id else (file_attachments[0] if file_attachments else "")
                 if referer_id:
                     headers["Referer"] = f"https://grok.com/imagine/{referer_id}"
             
@@ -258,12 +264,19 @@ class GrokClient:
     @staticmethod
     def _handle_error(response, auth_token: str):
         """处理错误响应"""
-        try:
-            error_data = response.json()
-            error_message = str(error_data)
-        except Exception as e:
-            error_data = response.text
-            error_message = error_data[:200] if error_data else e
+        # 处理 403 错误
+        if response.status_code == 403:
+            error_message = "服务器IP被Block，请尝试 1. 更换服务器IP 2. 使用代理IP 3. 服务器登陆Grok.com，过盾后F12找到CF值填入后台设置"
+            error_data = {"cf_blocked": True, "status": 403}
+            logger.warning(f"[Client] {error_message}")
+        else:
+            # 其他错误尝试解析 JSON
+            try:
+                error_data = response.json()
+                error_message = str(error_data)
+            except Exception as e:
+                error_data = response.text
+                error_message = error_data[:200] if error_data else str(e)
 
         # 记录Token失败
         asyncio.create_task(token_manager.record_failure(auth_token, response.status_code, error_message))
