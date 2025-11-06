@@ -10,15 +10,15 @@ def test_config_has_cf_clearance_fields():
     assert hasattr(setting, 'grok_config')
 
     # 验证可以获取配置值
-    enabled = setting.grok_config.get("cf_clearance_enabled", None)
-    api_url = setting.grok_config.get("turnstile_api_url", None)
+    turnstile_enabled = setting.grok_config.get("turnstile_enabled", None)
+    turnstile_host = setting.grok_config.get("turnstile_host", None)
 
     # 这些字段应该存在（即使是默认值）
-    assert enabled is not None or enabled == False
-    assert api_url is not None or api_url == ""
+    assert turnstile_enabled is not None or turnstile_enabled == False
+    assert turnstile_host is not None or turnstile_host == ""
 
 
 def test_config_cf_clearance_default_disabled():
-    """测试CF Clearance默认禁用"""
-    enabled = setting.grok_config.get("cf_clearance_enabled", False)
+    """测试Turnstile Solver默认禁用"""
+    enabled = setting.grok_config.get("turnstile_enabled", False)
     assert enabled is False

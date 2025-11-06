@@ -371,12 +371,18 @@ class GrokTokenManager:
             error_message: 错误信息
         """
         try:
-            # 403错误是服务器IP被Block，不是Token问题
+            # 403错误是服务器IP被Block，尝试自动求解CF Clearance
             if status_code == STATSIG_INVALID_CODE:
-                logger.warning(
-                    f"[Token] 服务器IP被Block (403)，请 1. 更换服务器IP 2. 使用代理IP "
-                    f"3. 服务器登陆Grok.com，过盾后F12找到CF值填入后台设置"
-                )
+                logger.warning(f"[Token] 服务器IP被Block (403)，尝试自动求解CF Clearance")
+                from app.services.grok.cf_clearance import cf_clearance_manager
+                success = await cf_clearance_manager.ensure_valid_clearance(force=True)
+                if success:
+                    logger.info(f"[Token] CF Clearance自动求解成功")
+                else:
+                    logger.warning(
+                        f"[Token] CF Clearance自动求解失败，请 1. 启用Turnstile Solver 2. 更换服务器IP "
+                        f"3. 使用代理IP 4. 手动登陆Grok.com过盾后填入CF值"
+                    )
                 return
 
             sso_value = self._extract_sso(auth_token)

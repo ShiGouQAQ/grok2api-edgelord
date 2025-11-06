@@ -78,7 +78,6 @@ COPY /root /
 # Create necessary directories with proper permissions for abc user
 RUN mkdir -p /app/logs /app/data/temp/image /app/data/temp/video /config/.cache && \
     echo '{"ssoNormal": {}, "ssoSuper": {}}' > /app/data/token.json && \
-    chmod +x /defaults/autostart && \
     chown -R abc:abc /app /config/.cache
 
 # Set environment variables

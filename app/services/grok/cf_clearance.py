@@ -94,23 +94,27 @@ class CFClearanceManager:
         valid_nodes.sort(key=lambda x: x[1])
         return valid_nodes[0][0]
 
-    async def ensure_valid_clearance(self) -> bool:
-        """确保cf_clearance有效"""
-        if not self._is_enabled():
+    async def ensure_valid_clearance(self, force: bool = False) -> bool:
+        """确保cf_clearance有效
+
+        Args:
+            force: 强制刷新，忽略缓存和启用状态检查（用于403错误时）
+        """
+        if not force and not self._is_enabled():
             return True
 
         self.stats["total_checks"] += 1
 
-        # 检查缓存
-        if self._is_cache_valid():
+        # 检查缓存（除非强制刷新）
+        if not force and self._is_cache_valid():
             self.stats["cache_hits"] += 1
             return True
 
         self.stats["cache_misses"] += 1
 
         async with self._lock:
-            # 双重检查
-            if self._is_cache_valid():
+            # 双重检查（除非强制刷新）
+            if not force and self._is_cache_valid():
                 return True
 
             # 获取新的cf_clearance
@@ -136,23 +140,28 @@ class CFClearanceManager:
 
     async def _refresh_clearance(self) -> bool:
         """刷新cf_clearance"""
+        # 先检测是否有CF拦截
+        if not await self._check_cf_challenge():
+            logger.info("[CFClearance] 未检测到CF拦截，跳过求解")
+            return True
+
         if not setting.grok_config.get("mihomo_enabled", False):
             return await self._try_refresh_once()
-        
+
         # mihomo启用时，带重试逻辑
         max_retries = 10
         for attempt in range(max_retries):
             current_node = await self._get_current_node()
             success = await self._try_refresh_once()
-            
+
             if success:
                 return True
-            
+
             # 失败，加入黑名单
             if current_node:
                 self.node_blacklist.add(current_node)
                 logger.warning(f"[Mihomo] 节点 {current_node} 已加入黑名单")
-            
+
             # 检查节点列表是否变化（元素或数量变化）
             new_node_list = await self._get_node_list()
             if new_node_list and (len(new_node_list) != len(self.last_node_list) or
@@ -160,14 +169,34 @@ class CFClearanceManager:
                 logger.info("[Mihomo] 检测到节点列表变化，清空黑名单")
                 self.node_blacklist.clear()
                 self.last_node_list = new_node_list
-            
+
             # 尝试切换节点
             switched = await self._switch_mihomo_node()
             if not switched:
                 logger.error("[Mihomo] 所有节点已耗尽")
                 return False
-        
+
         return False
+
+    async def _check_cf_challenge(self) -> bool:
+        """检测是否存在CF拦截"""
+        try:
+            proxy_url = setting.grok_config.get("proxy_url", "")
+            timeout = aiohttp.ClientTimeout(total=10)
+
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                kwargs = {}
+                if proxy_url:
+                    kwargs["proxy"] = proxy_url
+
+                async with session.get("https://grok.com", **kwargs) as resp:
+                    if resp.status == 403:
+                        return True
+                    text = await resp.text()
+                    return "challenge-platform" in text or "cf-challenge" in text
+        except Exception as e:
+            logger.debug(f"[CFClearance] CF检测异常: {e}")
+            return True
     
     async def _try_refresh_once(self) -> bool:
         """单次刷新尝试"""
@@ -175,8 +204,8 @@ class CFClearanceManager:
             # Use integrated Turnstile Solver
             from app.services.turnstile.manager import turnstile_manager
             
-            target_url = "https://x.ai"
-            sitekey = setting.grok_config.get("turnstile_sitekey", "0x4AAAAAABSXp6OOe7EVGPnR")
+            target_url = "https://grok.com"
+            sitekey = "0x4AAAAAABSXp6OOe7EVGPnR"
             
             logger.info(f"[CFClearance] 使用集成Turnstile Solver求解验证码")
             

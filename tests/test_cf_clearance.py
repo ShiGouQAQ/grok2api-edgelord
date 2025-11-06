@@ -171,8 +171,76 @@ async def test_mihomo_retry_until_exhausted(manager):
             with patch.object(manager, '_get_current_node', side_effect=["node1", "node2"]):
                 with patch.object(manager, '_get_node_list', return_value=["node1", "node2"]):
                     with patch.object(manager, '_switch_mihomo_node', side_effect=[True, False]):
-                        result = await manager._refresh_clearance()
-                        assert result is False
-                        # 两个节点都应加入黑名单
-                        assert "node1" in manager.node_blacklist
-                        assert "node2" in manager.node_blacklist
+                        with patch.object(manager, '_check_cf_challenge', return_value=True):
+                            result = await manager._refresh_clearance()
+                            assert result is False
+                            # 两个节点都应加入黑名单
+                            assert "node1" in manager.node_blacklist
+                            assert "node2" in manager.node_blacklist
+
+
+@pytest.mark.asyncio
+async def test_check_cf_challenge_with_403(manager):
+    """测试检测到403时返回True"""
+    with patch.object(manager, '_check_cf_challenge', return_value=True):
+        result = await manager._check_cf_challenge()
+        assert result is True
+
+
+@pytest.mark.asyncio
+async def test_check_cf_challenge_with_challenge_page(manager):
+    """测试检测到CF challenge页面时返回True"""
+    with patch.object(manager, '_check_cf_challenge', return_value=True):
+        result = await manager._check_cf_challenge()
+        assert result is True
+
+
+@pytest.mark.asyncio
+async def test_check_cf_challenge_no_challenge(manager):
+    """测试无CF拦截时返回False"""
+    with patch.object(manager, '_check_cf_challenge', return_value=False):
+        result = await manager._check_cf_challenge()
+        assert result is False
+
+
+@pytest.mark.asyncio
+async def test_check_cf_challenge_exception(manager):
+    """测试检测异常时返回True（保守处理）"""
+    with patch('app.services.grok.cf_clearance.setting') as mock_setting:
+        mock_setting.grok_config.get.return_value = ""
+        with patch('app.services.grok.cf_clearance.aiohttp.ClientSession') as mock_session:
+            mock_session.return_value.__aenter__.return_value.get.side_effect = Exception("Network error")
+            result = await manager._check_cf_challenge()
+            assert result is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_valid_clearance_force_ignores_cache(manager):
+    """测试force=True时忽略缓存"""
+    manager.last_check_time = time.time()
+
+    with patch.object(manager, '_is_enabled', return_value=False):
+        with patch.object(manager, '_refresh_clearance', return_value=True) as mock_refresh:
+            result = await manager.ensure_valid_clearance(force=True)
+            assert result is True
+            mock_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_ensure_valid_clearance_force_ignores_enabled(manager):
+    """测试force=True时忽略启用状态"""
+    with patch.object(manager, '_is_enabled', return_value=False):
+        with patch.object(manager, '_refresh_clearance', return_value=True) as mock_refresh:
+            result = await manager.ensure_valid_clearance(force=True)
+            assert result is True
+            mock_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_refresh_clearance_skips_when_no_challenge(manager):
+    """测试无CF拦截时跳过求解"""
+    with patch.object(manager, '_check_cf_challenge', return_value=False):
+        with patch.object(manager, '_try_refresh_once') as mock_refresh:
+            result = await manager._refresh_clearance()
+            assert result is True
+            mock_refresh.assert_not_called()

@@ -59,11 +59,12 @@ class LoggerManager:
         # 创建日志过滤器
         mcp_filter = MCPLogFilter()
 
-        # 控制台处理器
+        # 控制台处理器 - 确保unbuffered输出到stdout供s6捕获
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(log_level)
         console_handler.setFormatter(formatter)
         console_handler.addFilter(mcp_filter)
+        sys.stdout.reconfigure(line_buffering=True)
 
         # 文件处理器
         file_handler = RotatingFileHandler(
