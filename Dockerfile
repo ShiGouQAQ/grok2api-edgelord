@@ -78,7 +78,8 @@ COPY /root /
 # Create necessary directories with proper permissions for abc user
 RUN mkdir -p /app/logs /app/data/temp/image /app/data/temp/video /config/.cache && \
     echo '{"ssoNormal": {}, "ssoSuper": {}}' > /app/data/token.json && \
-    chown -R abc:abc /app /config/.cache
+    chown -R abc:abc /app /config/.cache && \
+    chmod 755 /app/logs
 
 # Set environment variables
 ENV TITLE="Grok2API" \
