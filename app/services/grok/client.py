@@ -52,9 +52,6 @@ class GrokClient:
     @staticmethod
     async def _try(model: str, content: str, image_urls: List[str], model_name: str, model_mode: str, is_video: bool, stream: bool):
         """带重试的请求执行"""
-        # 确保cf_clearance有效
-        await cf_clearance_manager.ensure_valid_clearance()
-        
         last_err = None
         
         for i in range(MAX_RETRY):

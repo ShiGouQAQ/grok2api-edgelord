@@ -118,30 +118,28 @@ class TestErrorHandling:
 
     @pytest.mark.asyncio
     async def test_client_continues_on_cf_clearance_error(self):
-        """测试客户端在CF Clearance错误时继续执行"""
+        """测试客户端不受CF Clearance影响（已移除阻塞调用）"""
         from app.services.grok.client import GrokClient
 
-        with patch('app.services.grok.client.cf_clearance_manager') as mock_manager, \
-             patch('app.services.grok.client.token_manager') as mock_token, \
+        with patch('app.services.grok.client.token_manager') as mock_token, \
              patch('app.services.grok.client.GrokClient._upload_imgs') as mock_upload, \
              patch('app.services.grok.client.GrokClient._build_payload') as mock_payload, \
              patch('app.services.grok.client.GrokClient._send_request') as mock_send:
 
-            # CF Clearance抛出异常
-            mock_manager.ensure_valid_clearance = AsyncMock(side_effect=Exception("CF Error"))
             mock_token.get_token.return_value = "test_token"
             mock_upload.return_value = ([], [])
             mock_payload.return_value = {}
             mock_send.return_value = {"success": True}
 
-            # 应该捕获异常并继续
-            with pytest.raises(Exception):
-                await GrokClient._try(
-                    model="grok-3-fast",
-                    content="test",
-                    image_urls=[],
-                    model_name="grok-3-fast",
-                    model_mode="chat",
-                    is_video=False,
-                    stream=False
-                )
+            # CF Clearance不再在_try中调用，客户端正常工作
+            result = await GrokClient._try(
+                model="grok-3-fast",
+                content="test",
+                image_urls=[],
+                model_name="grok-3-fast",
+                model_mode="chat",
+                is_video=False,
+                stream=False
+            )
+
+            assert result == {"success": True}

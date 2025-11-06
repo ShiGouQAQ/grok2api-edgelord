@@ -52,6 +52,9 @@ class GrokTokenManager:
         self._file_lock = asyncio.Lock()
         self.token_file.parent.mkdir(parents=True, exist_ok=True)
         self._storage = None
+        self._cf_solving_lock = asyncio.Lock()  # CF求解锁
+        self._cf_solving_event = asyncio.Event()  # CF求解完成事件
+        self._cf_solving_event.set()  # 初始状态为已完成
 
         # 同步加载初始数据
         self._load_data()
@@ -358,6 +361,37 @@ class GrokTokenManager:
         except Exception as e:
             logger.error(f"[Token] 更新Token限制时发生错误: {str(e)}")
     
+    async def _auto_solve_cf_clearance(self) -> None:
+        """自动求解CF Clearance（使用锁确保只有一个求解任务）"""
+        # 如果已经在求解中，等待完成
+        if self._cf_solving_lock.locked():
+            logger.info(f"[Token] CF求解进行中，等待完成...")
+            await self._cf_solving_event.wait()
+            return
+
+        # 获取锁，开始求解
+        async with self._cf_solving_lock:
+            try:
+                # 清除完成事件，让其他请求等待
+                self._cf_solving_event.clear()
+
+                logger.info(f"[Token] 开始CF Clearance求解")
+                from app.services.grok.cf_clearance import cf_clearance_manager
+                success = await cf_clearance_manager.ensure_valid_clearance(force=True)
+
+                if success:
+                    logger.info(f"[Token] CF Clearance求解成功，通知等待的请求")
+                else:
+                    logger.warning(
+                        f"[Token] CF Clearance求解失败，请 1. 启用Turnstile Solver 2. 更换服务器IP "
+                        f"3. 使用代理IP 4. 手动登陆Grok.com过盾后填入CF值"
+                    )
+            except Exception as e:
+                logger.error(f"[Token] CF Clearance求解异常: {e}")
+            finally:
+                # 设置完成事件，唤醒所有等待的请求
+                self._cf_solving_event.set()
+
     async def record_failure(self, auth_token: str, status_code: int, error_message: str) -> None:
         """记录Token失败信息
 
@@ -371,18 +405,11 @@ class GrokTokenManager:
             error_message: 错误信息
         """
         try:
-            # 403错误是服务器IP被Block，尝试自动求解CF Clearance
+            # 403错误是服务器IP被Block，触发CF求解（第一个请求阻塞求解，后续请求等待）
             if status_code == STATSIG_INVALID_CODE:
-                logger.warning(f"[Token] 服务器IP被Block (403)，尝试自动求解CF Clearance")
-                from app.services.grok.cf_clearance import cf_clearance_manager
-                success = await cf_clearance_manager.ensure_valid_clearance(force=True)
-                if success:
-                    logger.info(f"[Token] CF Clearance自动求解成功")
-                else:
-                    logger.warning(
-                        f"[Token] CF Clearance自动求解失败，请 1. 启用Turnstile Solver 2. 更换服务器IP "
-                        f"3. 使用代理IP 4. 手动登陆Grok.com过盾后填入CF值"
-                    )
+                logger.warning(f"[Token] 服务器IP被Block (403)，触发CF Clearance求解")
+                # 创建后台任务进行求解
+                asyncio.create_task(self._auto_solve_cf_clearance())
                 return
 
             sso_value = self._extract_sso(auth_token)

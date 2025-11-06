@@ -7,15 +7,11 @@ from app.services.grok.client import GrokClient
 
 @pytest.mark.asyncio
 async def test_client_try_with_cf_clearance_disabled():
-    """测试CF Clearance禁用时客户端正常工作"""
-    with patch('app.services.grok.client.cf_clearance_manager') as mock_manager, \
-         patch('app.services.grok.client.token_manager') as mock_token, \
+    """测试客户端正常工作（CF Clearance已移除阻塞调用）"""
+    with patch('app.services.grok.client.token_manager') as mock_token, \
          patch('app.services.grok.client.GrokClient._upload_imgs') as mock_upload, \
          patch('app.services.grok.client.GrokClient._build_payload') as mock_payload, \
          patch('app.services.grok.client.GrokClient._send_request') as mock_send:
-
-        # Mock CF clearance manager (禁用状态)
-        mock_manager.ensure_valid_clearance = AsyncMock(return_value=True)
 
         # Mock token manager
         mock_token.get_token.return_value = "test_token"
@@ -40,23 +36,18 @@ async def test_client_try_with_cf_clearance_disabled():
             stream=False
         )
 
-        # 验证
+        # 验证 - CF clearance不再在_try中调用，不会阻塞
         assert result == {"response": "success"}
-        mock_manager.ensure_valid_clearance.assert_called_once()
         mock_send.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_client_try_with_cf_clearance_enabled():
-    """测试CF Clearance启用时客户端正常工作"""
-    with patch('app.services.grok.client.cf_clearance_manager') as mock_manager, \
-         patch('app.services.grok.client.token_manager') as mock_token, \
+    """测试客户端正常工作（CF Clearance不阻塞请求）"""
+    with patch('app.services.grok.client.token_manager') as mock_token, \
          patch('app.services.grok.client.GrokClient._upload_imgs') as mock_upload, \
          patch('app.services.grok.client.GrokClient._build_payload') as mock_payload, \
          patch('app.services.grok.client.GrokClient._send_request') as mock_send:
-
-        # Mock CF clearance manager (启用状态)
-        mock_manager.ensure_valid_clearance = AsyncMock(return_value=True)
 
         # Mock token manager
         mock_token.get_token.return_value = "test_token"
@@ -81,9 +72,8 @@ async def test_client_try_with_cf_clearance_enabled():
             stream=False
         )
 
-        # 验证
+        # 验证 - 请求不会被CF clearance阻塞
         assert result == {"response": "success"}
-        mock_manager.ensure_valid_clearance.assert_called_once()
 
 
 @pytest.mark.asyncio
