@@ -28,10 +28,12 @@ async def lifespan(app: FastAPI):
     启动顺序:
     1. 初始化核心服务 (storage, settings, token_manager)
     2. 启动MCP服务生命周期
-    
+
     关闭顺序 (LIFO):
     1. 关闭MCP服务生命周期
     2. 关闭核心服务
+
+    注意: Cloudflare Solver 按需启动，无需在启动时初始化
     """
     # --- 启动过程 ---
     # 1. 初始化核心服务
@@ -47,11 +49,7 @@ async def lifespan(app: FastAPI):
     token_manager._load_data()
     logger.info("[Grok2API] 核心服务初始化完成")
 
-    # 2. 启动Turnstile Solver服务
-    from app.services.turnstile.manager import turnstile_manager
-    await turnstile_manager.start()
-
-    # 3. 管理MCP服务的生命周期
+    # 2. 管理MCP服务的生命周期
     mcp_lifespan_context = mcp_app.lifespan(app)
     await mcp_lifespan_context.__aenter__()
     logger.info("[MCP] MCP服务初始化完成")
@@ -66,11 +64,7 @@ async def lifespan(app: FastAPI):
         await mcp_lifespan_context.__aexit__(None, None, None)
         logger.info("[MCP] MCP服务已关闭")
 
-        # 2. 关闭Turnstile Solver服务
-        from app.services.turnstile.manager import turnstile_manager
-        await turnstile_manager.stop()
-
-        # 3. 关闭核心服务
+        # 2. 关闭核心服务
         await storage_manager.close()
         logger.info("[Grok2API] 应用关闭成功")
 
