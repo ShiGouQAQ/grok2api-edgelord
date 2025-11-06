@@ -26,10 +26,13 @@ class TurnstileSolverManager:
             cf_clearance cookie value or None if failed
         """
         self.enabled = setting.grok_config.get("turnstile_enabled", False)
-        
+        self.headless = setting.grok_config.get("turnstile_headless", True)
+
         if not self.enabled:
-            logger.warning("Turnstile Solver is disabled")
+            logger.warning("[CF Solver] Disabled in config")
             return None
+
+        logger.info(f"[CF Solver] Starting (headless={self.headless}, url={url})")
 
         try:
             from camoufox import AsyncCamoufox
@@ -49,33 +52,34 @@ class TurnstileSolverManager:
                 main_world_eval=True,
                 addons=[os.path.abspath(addon_path)]
             ) as browser:
+                logger.debug("[CF Solver] Browser launched")
                 context = await browser.new_context()
                 page = await context.new_page()
 
                 async with ClickSolver(framework=FrameworkType.CAMOUFOX, page=page) as solver:
                     await page.goto(url)
-                    await asyncio.sleep(3)
-                    
+                    await asyncio.sleep(5)
+
                     await solver.solve_captcha(
                         captcha_container=page,
                         captcha_type=CaptchaType.CLOUDFLARE_INTERSTITIAL,
                         expected_content_selector="body"
                     )
-                    
-                    await asyncio.sleep(2)
-                    
+
+                    await asyncio.sleep(5)
+
                     cookies = await context.cookies()
                     cf_clearance = next((c['value'] for c in cookies if c['name'] == 'cf_clearance'), None)
-                    
+
                     if cf_clearance:
-                        logger.info(f"cf_clearance obtained: {cf_clearance[:20]}...")
+                        logger.info(f"[CF Solver] Success: cf_clearance={cf_clearance[:20]}...")
                         return cf_clearance
-                    
-                    logger.error("cf_clearance cookie not found")
+
+                    logger.error("[CF Solver] cf_clearance cookie not found")
                     return None
 
         except Exception as e:
-            logger.error(f"Error solving Cloudflare: {e}")
+            logger.error(f"[CF Solver] Failed: {e}", exc_info=True)
             return None
 
 

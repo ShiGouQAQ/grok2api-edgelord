@@ -405,11 +405,10 @@ class GrokTokenManager:
             error_message: 错误信息
         """
         try:
-            # 403错误是服务器IP被Block，触发CF求解（第一个请求阻塞求解，后续请求等待）
+            # 403错误是服务器IP被Block，触发CF求解并等待完成
             if status_code == STATSIG_INVALID_CODE:
                 logger.warning(f"[Token] 服务器IP被Block (403)，触发CF Clearance求解")
-                # 创建后台任务进行求解
-                asyncio.create_task(self._auto_solve_cf_clearance())
+                await self._auto_solve_cf_clearance()
                 return
 
             sso_value = self._extract_sso(auth_token)
