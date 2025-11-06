@@ -1,0 +1,40 @@
+mixed-port: 10801
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: info
+ipv6: false
+external-controller: 0.0.0.0:9091
+
+dns:
+  enable: true
+  listen: 0.0.0.0:53
+  ipv6: false
+  enhanced-mode: redir-host
+  nameserver:
+    - "https://doh.pub/dns-query"
+    - "223.5.5.5"
+
+proxy-groups:
+  - name: XAI-GROUP
+    type: select
+    use:
+      - xai-nodes
+
+proxy-providers:
+  xai-nodes:
+    type: http
+    interval: 3600
+    health-check:
+      enable: true
+      url: "https://x.ai"
+      interval: 60
+      timeout: 5000
+    proxy: DIRECT
+    url: "YOUR_SUBSCRIPTION_URL"
+
+rules:
+  - DOMAIN-SUFFIX,x.ai,XAI-GROUP
+  - DOMAIN-SUFFIX,grok.com,XAI-GROUP
+  - GEOIP,CN,DIRECT
+  - MATCH,DIRECT
