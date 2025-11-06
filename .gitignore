@@ -188,3 +188,10 @@ cython_debug/
 
 # Serena (MCP tool)
 .serena/
+
+# Project data files
+data/token.json
+data/temp/
+
+# Cloned repositories for reference
+playwright-captcha/
