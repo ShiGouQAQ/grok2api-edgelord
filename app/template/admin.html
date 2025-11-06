@@ -92,6 +92,7 @@
             <nav class="flex space-x-8">
                 <button onclick="switchTab('tokens')" id="tabTokens" class="tab-btn border-b-2 border-primary text-sm font-medium py-3 px-1">Token 管理</button>
                 <button onclick="switchTab('settings')" id="tabSettings" class="tab-btn border-b-2 border-transparent text-sm font-medium py-3 px-1">Setting 配置</button>
+                <button onclick="switchTab('cfClearance')" id="tabCfClearance" class="tab-btn border-b-2 border-transparent text-sm font-medium py-3 px-1">CF Clearance</button>
             </nav>
         </div>
 
@@ -234,6 +235,71 @@
                 <p class="text-sm text-muted-foreground">暂无数据</p>
             </div>
         </div>
+        </div>
+
+        <!-- CF Clearance 面板 -->
+        <div id="panelCfClearance" class="hidden">
+            <div class="mb-6">
+                <h2 class="text-xl font-bold mb-2">CF Clearance 管理</h2>
+                <p class="text-sm text-muted-foreground">自动管理 CloudFlare cf_clearance 令牌</p>
+            </div>
+
+            <div class="grid gap-6 lg:grid-cols-2">
+                <!-- 状态卡片 -->
+                <div class="rounded-lg border border-border bg-background p-6">
+                    <h3 class="text-sm font-semibold mb-4">状态信息</h3>
+                    <div class="space-y-3">
+                        <div class="flex justify-between text-sm">
+                            <span class="text-muted-foreground">功能状态:</span>
+                            <span id="cfEnabled" class="font-medium">-</span>
+                        </div>
+                        <div class="flex justify-between text-sm">
+                            <span class="text-muted-foreground">缓存状态:</span>
+                            <span id="cfCacheValid" class="font-medium">-</span>
+                        </div>
+                        <div class="flex justify-between text-sm">
+                            <span class="text-muted-foreground">总检查次数:</span>
+                            <span id="cfTotalChecks" class="font-medium">-</span>
+                        </div>
+                        <div class="flex justify-between text-sm">
+                            <span class="text-muted-foreground">缓存命中:</span>
+                            <span id="cfCacheHits" class="font-medium">-</span>
+                        </div>
+                        <div class="flex justify-between text-sm">
+                            <span class="text-muted-foreground">求解成功:</span>
+                            <span id="cfSolverSuccess" class="font-medium">-</span>
+                        </div>
+                        <div class="flex justify-between text-sm">
+                            <span class="text-muted-foreground">命中率:</span>
+                            <span id="cfHitRate" class="font-medium">-</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 操作卡片 -->
+                <div class="rounded-lg border border-border bg-background p-6">
+                    <h3 class="text-sm font-semibold mb-4">操作</h3>
+                    <div class="space-y-3">
+                        <button onclick="refreshCfStatus()" class="w-full inline-flex items-center justify-center rounded-md text-sm font-medium bg-secondary text-secondary-foreground hover:bg-accent h-9 px-4 transition-colors">
+                            <svg class="h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                                <path d="M3 3v5h5"/>
+                                <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+                                <path d="M16 16h5v5"/>
+                            </svg>
+                            刷新状态
+                        </button>
+                        <button onclick="refreshCfClearance()" id="cfRefreshBtn" class="w-full inline-flex items-center justify-center rounded-md text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4 transition-colors">
+                            <svg class="h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/>
+                                <path d="M21 3v5h-5"/>
+                            </svg>
+                            手动刷新 CF Clearance
+                        </button>
+                        <div id="cfMessage" class="hidden p-3 rounded-md text-sm"></div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- 全局设置面板 -->
@@ -417,9 +483,25 @@
                             <div>
                                 <label class="cfg-label">
                                     CF Clearance
-                                    <span class="help-icon" title="Cloudflare验证cookie的值部分，用于绕过Cloudflare人机验证。只需输入cf_clearance=后面的值。">?</span>
+                                    <span class="help-icon" title="Cloudflare验证cookie。开启自动管理后将自动获取和刷新。">?</span>
                                 </label>
-                                <input id="cfgCfClearance" class="cfg-input" placeholder="">
+                                <div class="flex items-center gap-3">
+                                    <input id="cfgCfClearance" class="flex h-9 flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="自动管理时无需手动填写">
+                                    <label class="inline-flex items-center gap-2 cursor-pointer" title="开启后自动通过 Turnstile-Solver 获取和刷新 cf_clearance">
+                                        <span class="text-xs text-muted-foreground whitespace-nowrap">自动</span>
+                                        <div class="relative">
+                                            <input type="checkbox" id="cfgCfClearanceEnabled" class="sr-only peer">
+                                            <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-ring rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
+                                        </div>
+                                    </label>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="cfg-label">
+                                    Turnstile Sitekey
+                                    <span class="help-icon" title="Cloudflare Turnstile 站点密钥，可在 x.ai 页面源码中找到">?</span>
+                                </label>
+                                <input id="cfgTurnstileSitekey" class="cfg-input" placeholder="0x4AAAAAABSXp6OOe7EVGPnR">
                             </div>
                             <div>
                                 <label class="cfg-label">
@@ -463,6 +545,129 @@
                                 </label>
                                 <input id="cfgStreamTotalTimeout" type="number" class="cfg-input" placeholder="600">
                             </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Turnstile Solver 配置区域 -->
+            <div class="mt-8">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-xl font-bold">Turnstile Solver 配置</h2>
+                    <button onclick="saveTurnstileSettings()" class="inline-flex items-center justify-center rounded-md text-sm font-medium bg-secondary text-secondary-foreground hover:bg-black hover:text-white h-9 px-4 transition-colors">保存配置</button>
+                </div>
+                <div class="grid gap-4 lg:grid-cols-2">
+                    <!-- 基础配置 -->
+                    <div class="rounded-lg border border-border bg-background p-6">
+                        <h3 class="text-sm font-semibold mb-4">基础配置</h3>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="cfg-label">
+                                    启用 Turnstile Solver
+                                    <span class="help-icon" title="开启后将启动内置的 Turnstile Solver 服务，用于自动求解 Cloudflare Turnstile 验证码">?</span>
+                                </label>
+                                <select id="cfgTurnstileEnabled" class="cfg-input">
+                                    <option value="false">关闭</option>
+                                    <option value="true">开启</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="cfg-label">
+                                    服务地址
+                                    <span class="help-icon" title="Turnstile Solver 服务监听地址，默认 127.0.0.1">?</span>
+                                </label>
+                                <input id="cfgTurnstileHost" class="cfg-input" placeholder="127.0.0.1">
+                            </div>
+                            <div>
+                                <label class="cfg-label">
+                                    服务端口
+                                    <span class="help-icon" title="Turnstile Solver 服务监听端口，默认 5072">?</span>
+                                </label>
+                                <input id="cfgTurnstilePort" type="number" class="cfg-input" placeholder="5072">
+                            </div>
+                            <div>
+                                <label class="cfg-label">
+                                    调试模式
+                                    <span class="help-icon" title="开启后将输出详细的调试日志，用于排查问题">?</span>
+                                </label>
+                                <select id="cfgTurnstileDebug" class="cfg-input">
+                                    <option value="false">关闭</option>
+                                    <option value="true">开启</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 浏览器配置 -->
+                    <div class="rounded-lg border border-border bg-background p-6">
+                        <h3 class="text-sm font-semibold mb-4">浏览器配置</h3>
+                        <div class="space-y-4">
+                            <div>
+                                <label class="cfg-label">
+                                    浏览器类型
+                                    <span class="help-icon" title="选择用于求解验证码的浏览器类型。camoufox 具有更好的反检测能力">?</span>
+                                </label>
+                                <select id="cfgTurnstileBrowserType" class="cfg-input">
+                                    <option value="camoufox">Camoufox (推荐)</option>
+                                    <option value="chromium">Chromium</option>
+                                    <option value="chrome">Chrome</option>
+                                    <option value="msedge">Edge</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="cfg-label">
+                                    无头模式
+                                    <span class="help-icon" title="开启后浏览器在后台运行，不显示界面。推荐开启以节省资源">?</span>
+                                </label>
+                                <select id="cfgTurnstileHeadless" class="cfg-input">
+                                    <option value="true">开启</option>
+                                    <option value="false">关闭</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="cfg-label">
+                                    浏览器线程数
+                                    <span class="help-icon" title="并发求解的浏览器实例数量。增加可提高并发能力，但会消耗更多资源。建议 2-4">?</span>
+                                </label>
+                                <input id="cfgTurnstileThreads" type="number" class="cfg-input" placeholder="2" min="1" max="10">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mihomo 代理配置区域 -->
+            <div class="mt-8">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-xl font-bold">Mihomo 代理配置</h2>
+                    <button onclick="saveMihomoSettings()" class="inline-flex items-center justify-center rounded-md text-sm font-medium bg-secondary text-secondary-foreground hover:bg-black hover:text-white h-9 px-4 transition-colors">保存配置</button>
+                </div>
+                <div class="rounded-lg border border-border bg-background p-6">
+                    <h3 class="text-sm font-semibold mb-4">Mihomo 配置</h3>
+                    <div class="grid gap-4 lg:grid-cols-2">
+                        <div>
+                            <label class="cfg-label">
+                                启用 Mihomo
+                                <span class="help-icon" title="开启后将使用 Mihomo 代理进行请求">?</span>
+                            </label>
+                            <select id="cfgMihomoEnabled" class="cfg-input">
+                                <option value="false">关闭</option>
+                                <option value="true">开启</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="cfg-label">
+                                Mihomo API 地址
+                                <span class="help-icon" title="Mihomo API 地址，默认 http://127.0.0.1:9091">?</span>
+                            </label>
+                            <input id="cfgMihomoApiUrl" class="cfg-input" placeholder="http://127.0.0.1:9091">
+                        </div>
+                        <div>
+                            <label class="cfg-label">
+                                代理组名称
+                                <span class="help-icon" title="Mihomo 中用于 XAI 请求的代理组名称">?</span>
+                            </label>
+                            <input id="cfgMihomoGroupName" class="cfg-input" placeholder="XAI-GROUP">
                         </div>
                     </div>
                 </div>
@@ -619,19 +824,23 @@
         const exportSelected=()=>{if(!selectedTokens.size)return showToast('请先选择要导出的 Token','error');const sd=allTokens.filter(t=>selectedTokens.has(t.token)),csv=[['Token','类型','状态','普通调用剩余','高级调用剩余','创建时间'].join(','),...sd.map(t=>[`"${t.token}"`,t.token_type==='sso'?'SSO':'SuperSSO',t.status,t.remaining_queries===-1?'未使用':t.remaining_queries,t.heavy_remaining_queries===-1?'未使用':t.heavy_remaining_queries,`"${t.created_time?new Date(t.created_time).toLocaleString('zh-CN'):'-'}"`].join(','))].join('\n'),l=document.createElement('a');l.href=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8;'}));l.download=`grok_tokens_${new Date().toISOString().slice(0,10)}.csv`;l.style.display='none';document.body.appendChild(l);l.click();document.body.removeChild(l);URL.revokeObjectURL(l.href);showToast(`已导出 ${selectedTokens.size} 个 Token`,'success')}
         showToast=(m,t='info')=>{const d=document.createElement('div'),bc={success:'bg-green-600',error:'bg-destructive',info:'bg-primary'};d.className=`fixed bottom-4 right-4 ${bc[t]||bc.info} text-white px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium z-50 animate-slide-up`;d.textContent=m;document.body.appendChild(d);setTimeout(()=>{d.style.opacity='0';d.style.transition='opacity .3s';setTimeout(()=>d.parentNode&&document.body.removeChild(d),300)},2000)}
         logout=async()=>{if(!confirm('确定要退出登录吗?'))return;try{await apiRequest('/api/logout',{method:'POST'})}catch(e){console.error('登出失败:',e)}finally{localStorage.removeItem('adminToken');location.href='/login'}},
-        switchTab=t=>{const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','settings'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});t==='settings'&&loadSettings()},
+        switchTab=t=>{const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','settings','cfClearance'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});t==='settings'&&loadSettings();t==='cfClearance'&&refreshCfStatus()},
         updateCacheProxyReadonly=()=>{const proxyUrl=$('cfgProxyUrl').value.trim(),cacheProxyInput=$('cfgCacheProxyUrl');if(proxyUrl){cacheProxyInput.readOnly=false;cacheProxyInput.classList.remove('bg-muted');cacheProxyInput.placeholder='socks5://username:password@127.0.0.1:7890'}else{cacheProxyInput.readOnly=true;cacheProxyInput.classList.add('bg-muted');cacheProxyInput.value='';cacheProxyInput.placeholder='设置服务代理后自动启用'}},
         updateStatsigIdState=()=>{const dynamicToggle=$('cfgDynamicStatsig'),statsigInput=$('cfgStatsigId');if(dynamicToggle.checked){statsigInput.disabled=true;statsigInput.classList.add('bg-muted','text-muted-foreground');statsigInput.placeholder='已启用动态生成'}else{statsigInput.disabled=false;statsigInput.classList.remove('bg-muted','text-muted-foreground');statsigInput.placeholder=''}};
-        loadSettings=async()=>{try{const r=await apiRequest('/api/settings');if(!r)return;const d=await r.json();if(d.success){const g=d.data.global,k=d.data.grok;const cfClearance=k.cf_clearance||'';const cleanCfDisplay=cfClearance.startsWith('cf_clearance=')?cfClearance.split('cf_clearance=')[1]:cfClearance;$('cfgAdminUser').value=g.admin_username||'';$('cfgAdminPass').value='';$('cfgLogLevel').value=g.log_level||'DEBUG';$('cfgImageCacheMaxSize').value=g.image_cache_max_size_mb||500;$('cfgVideoCacheMaxSize').value=g.video_cache_max_size_mb||1000;$('cfgImageMode').value=g.image_mode||'url';$('cfgBaseUrl').value=g.base_url||'';$('cfgApiKey').value=k.api_key||'';$('cfgProxyUrl').value=k.proxy_url||'';$('cfgCacheProxyUrl').value=k.cache_proxy_url||'';$('cfgCfClearance').value=cleanCfDisplay;$('cfgStatsigId').value=k.x_statsig_id||'';$('cfgDynamicStatsig').checked=k.dynamic_statsig!==false;updateStatsigIdState();$('cfgFilteredTags').value=k.filtered_tags||'';$('cfgShowThinking').value=k.show_thinking!==false?'true':'false';$('cfgTemporary').value=k.temporary!==false?'true':'false';$('cfgStreamChunkTimeout').value=k.stream_chunk_timeout||120;$('cfgStreamFirstResponseTimeout').value=k.stream_first_response_timeout||30;$('cfgStreamTotalTimeout').value=k.stream_total_timeout||600;updateCacheProxyReadonly();await loadCacheSize()}}catch(e){console.error('加载配置失败:',e);showToast('加载配置失败','error')}},
+        loadSettings=async()=>{try{const r=await apiRequest('/api/settings');if(!r)return;const d=await r.json();if(d.success){const g=d.data.global,k=d.data.grok;const cfClearance=k.cf_clearance||'';const cleanCfDisplay=cfClearance.startsWith('cf_clearance=')?cfClearance.split('cf_clearance=')[1]:cfClearance;$('cfgAdminUser').value=g.admin_username||'';$('cfgAdminPass').value='';$('cfgLogLevel').value=g.log_level||'DEBUG';$('cfgImageCacheMaxSize').value=g.image_cache_max_size_mb||500;$('cfgVideoCacheMaxSize').value=g.video_cache_max_size_mb||1000;$('cfgImageMode').value=g.image_mode||'url';$('cfgBaseUrl').value=g.base_url||'';$('cfgApiKey').value=k.api_key||'';$('cfgProxyUrl').value=k.proxy_url||'';$('cfgCacheProxyUrl').value=k.cache_proxy_url||'';$('cfgCfClearance').value=cleanCfDisplay;$('cfgCfClearanceEnabled').checked=k.cf_clearance_enabled||false;$('cfgTurnstileSitekey').value=k.turnstile_sitekey||'0x4AAAAAABSXp6OOe7EVGPnR';$('cfgStatsigId').value=k.x_statsig_id||'';$('cfgDynamicStatsig').checked=k.dynamic_statsig!==false;updateStatsigIdState();$('cfgFilteredTags').value=k.filtered_tags||'';$('cfgShowThinking').value=k.show_thinking!==false?'true':'false';$('cfgTemporary').value=k.temporary!==false?'true':'false';$('cfgStreamChunkTimeout').value=k.stream_chunk_timeout||120;$('cfgStreamFirstResponseTimeout').value=k.stream_first_response_timeout||30;$('cfgStreamTotalTimeout').value=k.stream_total_timeout||600;$('cfgTurnstileEnabled').value=k.turnstile_enabled?'true':'false';$('cfgTurnstileHost').value=k.turnstile_host||'127.0.0.1';$('cfgTurnstilePort').value=k.turnstile_port||5072;$('cfgTurnstileBrowserType').value=k.turnstile_browser_type||'camoufox';$('cfgTurnstileHeadless').value=k.turnstile_headless!==false?'true':'false';$('cfgTurnstileThreads').value=k.turnstile_threads||2;$('cfgTurnstileDebug').value=k.turnstile_debug?'true':'false';$('cfgMihomoEnabled').value=k.mihomo_enabled?'true':'false';$('cfgMihomoApiUrl').value=k.mihomo_api_url||'http://127.0.0.1:9091';$('cfgMihomoGroupName').value=k.mihomo_group_name||'XAI-GROUP';updateCacheProxyReadonly();await loadCacheSize()}}catch(e){console.error('加载配置失败:',e);showToast('加载配置失败','error')}},
         loadCacheSize=async()=>{try{const r=await apiRequest('/api/cache/size');if(!r)return;const d=await r.json();if(d.success){['image','video','total'].forEach(t=>$(`${t}CacheSize`).value=d.data[`${t}_size`]||'0 MB')}}catch(e){console.error('加载缓存大小失败:',e);['image','video','total'].forEach(t=>$(`${t}CacheSize`).value='0 MB')}},
         clearCacheByType=async(type,url,msg)=>{if(!confirm(msg))return;try{const r=await apiRequest(url,{method:'POST'});if(!r)return;const d=await r.json();d.success?(showToast(`${type}缓存清理完成，已删除 ${d.data.deleted_count||0} 个文件`,'success'),await loadCacheSize()):showToast('清理失败: '+(d.error||'未知错误'),'error')}catch(e){showToast('清理失败: '+e.message,'error')}},
         clearImageCache=()=>clearCacheByType('图片','/api/cache/clear/images','确定要清理图片缓存吗？此操作将删除所有图片缓存文件！'),
         clearVideoCache=()=>clearCacheByType('视频','/api/cache/clear/videos','确定要清理视频缓存吗？此操作将删除所有视频缓存文件！'),
         clearCache=()=>clearCacheByType('','/api/cache/clear','确定要清理缓存吗？此操作将删除 /data/temp 目录中的所有文件！'),
         saveGlobalSettings=async()=>{const gc={admin_username:$('cfgAdminUser').value,log_level:$('cfgLogLevel').value,image_cache_max_size_mb:parseInt($('cfgImageCacheMaxSize').value)||500,video_cache_max_size_mb:parseInt($('cfgVideoCacheMaxSize').value)||1000,image_mode:$('cfgImageMode').value,base_url:$('cfgBaseUrl').value};if($('cfgAdminPass').value)gc.admin_password=$('cfgAdminPass').value;try{const r=await apiRequest('/api/settings');if(!r)return;const d=await r.json();if(!d.success)return showToast('加载配置失败','error');const s=await apiRequest('/api/settings',{method:'POST',body:JSON.stringify({global_config:gc,grok_config:d.data.grok})});if(!s)return;const sd=await s.json();sd.success?(showToast('全局配置保存成功','success'),$('cfgAdminPass').value=''):showToast('保存失败: '+(sd.error||'未知错误'),'error')}catch(e){showToast('保存失败: '+e.message,'error')}},
-        saveGrokSettings=async()=>{const pu=$('cfgProxyUrl').value.trim(),cf=$('cfgCfClearance').value.trim();const cleanCf=cf.startsWith('cf_clearance=')?cf.split('cf_clearance=')[1]:cf;const kc={api_key:$('cfgApiKey').value,proxy_url:pu,cache_proxy_url:pu?$('cfgCacheProxyUrl').value:'',cf_clearance:cleanCf,x_statsig_id:$('cfgStatsigId').value,dynamic_statsig:$('cfgDynamicStatsig').checked,filtered_tags:$('cfgFilteredTags').value,show_thinking:$('cfgShowThinking').value==='true',temporary:$('cfgTemporary').value==='true',stream_chunk_timeout:parseInt($('cfgStreamChunkTimeout').value)||120,stream_first_response_timeout:parseInt($('cfgStreamFirstResponseTimeout').value)||30,stream_total_timeout:parseInt($('cfgStreamTotalTimeout').value)||600};try{const r=await apiRequest('/api/settings');if(!r)return;const d=await r.json();if(!d.success)return showToast('加载配置失败','error');const s=await apiRequest('/api/settings',{method:'POST',body:JSON.stringify({global_config:d.data.global,grok_config:kc})});if(!s)return;const sd=await s.json();sd.success?showToast('Grok配置保存成功','success'):showToast('保存失败: '+(sd.error||'未知错误'),'error')}catch(e){showToast('保存失败: '+e.message,'error')}};
+        saveGrokSettings=async()=>{const pu=$('cfgProxyUrl').value.trim(),cf=$('cfgCfClearance').value.trim();const cleanCf=cf.startsWith('cf_clearance=')?cf.split('cf_clearance=')[1]:cf;const kc={api_key:$('cfgApiKey').value,proxy_url:pu,cache_proxy_url:pu?$('cfgCacheProxyUrl').value:'',cf_clearance:cleanCf,cf_clearance_enabled:$('cfgCfClearanceEnabled').checked,turnstile_sitekey:$('cfgTurnstileSitekey').value,x_statsig_id:$('cfgStatsigId').value,dynamic_statsig:$('cfgDynamicStatsig').checked,filtered_tags:$('cfgFilteredTags').value,show_thinking:$('cfgShowThinking').value==='true',temporary:$('cfgTemporary').value==='true',stream_chunk_timeout:parseInt($('cfgStreamChunkTimeout').value)||120,stream_first_response_timeout:parseInt($('cfgStreamFirstResponseTimeout').value)||30,stream_total_timeout:parseInt($('cfgStreamTotalTimeout').value)||600};try{const r=await apiRequest('/api/settings');if(!r)return;const d=await r.json();if(!d.success)return showToast('加载配置失败','error');const s=await apiRequest('/api/settings',{method:'POST',body:JSON.stringify({global_config:d.data.global,grok_config:kc})});if(!s)return;const sd=await s.json();sd.success?showToast('Grok配置保存成功','success'):showToast('保存失败: '+(sd.error||'未知错误'),'error')}catch(e){showToast('保存失败: '+e.message,'error')}},
+        saveTurnstileSettings=async()=>{const kc={turnstile_enabled:$('cfgTurnstileEnabled').value==='true',turnstile_host:$('cfgTurnstileHost').value,turnstile_port:parseInt($('cfgTurnstilePort').value)||5072,turnstile_browser_type:$('cfgTurnstileBrowserType').value,turnstile_headless:$('cfgTurnstileHeadless').value==='true',turnstile_threads:parseInt($('cfgTurnstileThreads').value)||2,turnstile_debug:$('cfgTurnstileDebug').value==='true'};try{const r=await apiRequest('/api/settings');if(!r)return;const d=await r.json();if(!d.success)return showToast('加载配置失败','error');const merged={...d.data.grok,...kc};const s=await apiRequest('/api/settings',{method:'POST',body:JSON.stringify({global_config:d.data.global,grok_config:merged})});if(!s)return;const sd=await s.json();sd.success?showToast('Turnstile配置保存成功，重启服务后生效','success'):showToast('保存失败: '+(sd.error||'未知错误'),'error')}catch(e){showToast('保存失败: '+e.message,'error')}},
+        saveMihomoSettings=async()=>{const kc={mihomo_enabled:$('cfgMihomoEnabled').value==='true',mihomo_api_url:$('cfgMihomoApiUrl').value,mihomo_group_name:$('cfgMihomoGroupName').value};try{const r=await apiRequest('/api/settings');if(!r)return;const d=await r.json();if(!d.success)return showToast('加载配置失败','error');const merged={...d.data.grok,...kc};const s=await apiRequest('/api/settings',{method:'POST',body:JSON.stringify({global_config:d.data.global,grok_config:merged})});if(!s)return;const sd=await s.json();sd.success?showToast('Mihomo配置保存成功','success'):showToast('保存失败: '+(sd.error||'未知错误'),'error')}catch(e){showToast('保存失败: '+e.message,'error')}};
         updateHoverCardPosition=c=>{const t=c.querySelector('.hover-card-trigger'),ct=c.querySelector('.hover-card-content');if(!t||!ct)return;const{top,bottom}=t.getBoundingClientRect(),h=window.innerHeight;ct.classList.remove('top','bottom');const{visibility:v,opacity:o}=getComputedStyle(ct);Object.assign(ct.style,{visibility:'hidden',opacity:'1'});const ch=ct.offsetHeight;Object.assign(ct.style,{visibility:v,opacity:o});ct.classList.add(top>ch+10?'top':h-bottom>ch+10?'bottom':'top')},
         loadStorageMode=async()=>{const modeConfig={MYSQL:{classes:['bg-blue-50','text-blue-700','border-blue-200'],tooltip:'数据库连接模式 - 数据持久化存储，修改配置时可能稍慢但更安全'},REDIS:{classes:['bg-purple-50','text-purple-700','border-purple-200'],tooltip:'Redis缓存模式 - 高速内存存储，数据持久化且读写性能极佳'},FILE:{classes:['bg-green-50','text-green-700','border-green-200'],tooltip:'文件存储模式 - 本地文件存储，读写速度快'}};const applyMode=(mode)=>{$('storageModeText').textContent=mode;const config=modeConfig[mode]||modeConfig.FILE;$('storageMode').classList.add(...config.classes);$('storageModeTooltip').textContent=config.tooltip;updateHoverCardPosition($('storageMode').closest('.hover-card'))};try{const r=await apiRequest('/api/storage/mode');if(!r)return;const d=await r.json();d.success&&applyMode(d.data.mode)}catch(e){console.error('加载存储模式失败:',e);applyMode('FILE')}};
+        refreshCfStatus=async()=>{try{const r=await apiRequest('/v1/cf-clearance/status');if(!r)return;const d=await r.json();if(d.success){const data=d.data;$('cfEnabled').innerHTML=data.enabled?'<span class="text-green-600">启用</span>':'<span class="text-gray-500">禁用</span>';$('cfCacheValid').textContent=data.cache_valid?'有效':'无效';$('cfTotalChecks').textContent=data.stats.total_checks;$('cfCacheHits').textContent=data.stats.cache_hits;$('cfSolverSuccess').textContent=data.stats.solver_success;$('cfHitRate').textContent=(data.hit_rate*100).toFixed(2)+'%'}}catch(e){console.error('获取CF状态失败:',e)}},
+        refreshCfClearance=async()=>{const btn=$('cfRefreshBtn'),msg=$('cfMessage');btn.disabled=true;btn.innerHTML='<svg class="h-4 w-4 mr-2 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>处理中...';msg.classList.add('hidden');try{const r=await apiRequest('/v1/cf-clearance/refresh',{method:'POST'});if(!r)return;const d=await r.json();if(d.success){msg.textContent='CF Clearance 刷新成功！';msg.className='p-3 rounded-md text-sm bg-green-50 text-green-700 border border-green-200';setTimeout(refreshCfStatus,1000)}else{msg.textContent='刷新失败: '+d.message;msg.className='p-3 rounded-md text-sm bg-red-50 text-red-700 border border-red-200'}msg.classList.remove('hidden')}catch(e){msg.textContent='刷新失败: '+e.message;msg.className='p-3 rounded-md text-sm bg-red-50 text-red-700 border border-red-200';msg.classList.remove('hidden')}finally{btn.disabled=false;btn.innerHTML='<svg class="h-4 w-4 mr-2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>手动刷新 CF Clearance'}},
         window.addEventListener('DOMContentLoaded',()=>{checkAuth();loadStorageMode();refreshTokens();setInterval(()=>{loadStats();updateRemaining()},30000);window.addEventListener('resize',()=>{const hoverCard=$('storageMode').closest('.hover-card');hoverCard&&updateHoverCardPosition(hoverCard)});const hoverCard=$('storageMode').closest('.hover-card'),trigger=hoverCard?.querySelector('.hover-card-trigger'),content=hoverCard?.querySelector('.hover-card-content');if(trigger&&content){trigger.addEventListener('mouseenter',()=>{content.style.opacity='1';content.style.visibility='visible'});trigger.addEventListener('mouseleave',()=>{content.style.opacity='0';content.style.visibility='hidden'})};$('cfgProxyUrl').addEventListener('input',updateCacheProxyReadonly);$('cfgDynamicStatsig').addEventListener('change',updateStatsigIdState)});
     </script>
 </body>
