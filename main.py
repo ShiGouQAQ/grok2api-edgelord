@@ -11,6 +11,7 @@ from app.services.grok.token import token_manager
 from app.api.v1.chat import router as chat_router
 from app.api.v1.models import router as models_router
 from app.api.v1.images import router as images_router
+from app.api.v1.cf_monitor import router as cf_monitor_router
 from app.api.admin.manage import router as admin_router
 
 # 导入MCP服务器（认证配置在server.py中完成）
@@ -40,13 +41,17 @@ async def lifespan(app: FastAPI):
     storage = storage_manager.get_storage()
     setting.set_storage(storage)
     token_manager.set_storage(storage)
-    
+
     # 重新加载配置和token数据
     await setting.reload()
     token_manager._load_data()
     logger.info("[Grok2API] 核心服务初始化完成")
 
-    # 2. 管理MCP服务的生命周期
+    # 2. 启动Turnstile Solver服务
+    from app.services.turnstile.manager import turnstile_manager
+    await turnstile_manager.start()
+
+    # 3. 管理MCP服务的生命周期
     mcp_lifespan_context = mcp_app.lifespan(app)
     await mcp_lifespan_context.__aenter__()
     logger.info("[MCP] MCP服务初始化完成")
@@ -60,8 +65,12 @@ async def lifespan(app: FastAPI):
         # 1. 退出MCP服务的生命周期
         await mcp_lifespan_context.__aexit__(None, None, None)
         logger.info("[MCP] MCP服务已关闭")
-        
-        # 2. 关闭核心服务
+
+        # 2. 关闭Turnstile Solver服务
+        from app.services.turnstile.manager import turnstile_manager
+        await turnstile_manager.stop()
+
+        # 3. 关闭核心服务
         await storage_manager.close()
         logger.info("[Grok2API] 应用关闭成功")
 
@@ -84,6 +93,7 @@ register_exception_handlers(app)
 app.include_router(chat_router, prefix="/v1")
 app.include_router(models_router, prefix="/v1")
 app.include_router(images_router)
+app.include_router(cf_monitor_router, prefix="/v1")
 app.include_router(admin_router)
 
 # 挂载静态文件
