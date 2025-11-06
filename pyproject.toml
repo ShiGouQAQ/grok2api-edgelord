@@ -1,0 +1,43 @@
+[project]
+name = "grok2api"
+version = "1.3.1"
+description = "Grok API转换服务"
+requires-python = ">=3.14"
+dependencies = [
+    "toml==0.10.2",
+    "fastapi==0.121.0",
+    "uvicorn==0.38.0",
+    "python-dotenv==1.2.1",
+    "curl_cffi==0.13.0",
+    "requests==2.32.5",
+    "starlette<0.50.0",
+    "pydantic==2.12.3",
+    "aiofiles==25.1.0",
+    "aiomysql==0.3.2",
+    "redis==7.0.1",
+    "fastmcp==2.13.0.2",
+    "cryptography==46.0.3",
+    "aiohttp>=3.13.2",
+    "quart==0.20.0",
+    "aiosqlite==0.21.0",
+    "patchright>=1.55.2",
+    "camoufox[geoip]>=0.4.0",
+    "rich>=14.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

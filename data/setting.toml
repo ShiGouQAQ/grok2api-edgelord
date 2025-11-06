@@ -10,6 +10,20 @@ stream_total_timeout = 600
 stream_first_response_timeout = 30
 temporary = true
 show_thinking = true
+cf_clearance_enabled = false
+turnstile_sitekey = "0x4AAAAAABSXp6OOe7EVGPnR"
+mihomo_enabled = false
+mihomo_api_url = "http://127.0.0.1:9091"
+mihomo_group_name = "XAI-GROUP"
+
+# Turnstile Solver 集成配置
+turnstile_enabled = false
+turnstile_host = "127.0.0.1"
+turnstile_port = 5072
+turnstile_headless = true
+turnstile_browser_type = "camoufox"
+turnstile_threads = 2
+turnstile_debug = false
 
 [global]
 base_url = ""
