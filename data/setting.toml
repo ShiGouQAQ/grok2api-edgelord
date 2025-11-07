@@ -25,6 +25,13 @@ turnstile_browser_type = "camoufox"
 turnstile_threads = 2
 turnstile_debug = false
 
+# CF Solver 等待时间配置（秒）
+# cf_solver_wait_before: 页面加载后、开始求解前的等待时间，默认 10 秒
+# cf_solver_wait_after: 求解完成后、获取 cookie 前的等待时间，默认 20 秒
+# 网络较差时可适当增加这些值，例如设置为 15 和 30
+cf_solver_wait_before = 10
+cf_solver_wait_after = 20
+
 [global]
 base_url = ""
 log_level = "DEBUG"

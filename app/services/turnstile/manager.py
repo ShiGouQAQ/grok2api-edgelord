@@ -42,6 +42,9 @@ class TurnstileSolverManager:
 
             addon_path = get_addon_path()
 
+            proxy_url = setting.grok_config.get("proxy_url", "")
+            proxy_config = {"server": proxy_url} if proxy_url else None
+
             async with AsyncCamoufox(
                 headless=self.headless,
                 geoip=True,
@@ -50,15 +53,20 @@ class TurnstileSolverManager:
                 config={'forceScopeAccess': True},
                 disable_coop=True,
                 main_world_eval=True,
-                addons=[os.path.abspath(addon_path)]
+                addons=[os.path.abspath(addon_path)],
+                proxy=proxy_config
             ) as browser:
-                logger.debug("[CF Solver] Browser launched")
+                logger.debug(f"[CF Solver] Browser launched (proxy={proxy_url or 'None'})")
                 context = await browser.new_context()
                 page = await context.new_page()
 
+                wait_before = setting.grok_config.get("cf_solver_wait_before", 10)
+                wait_after = setting.grok_config.get("cf_solver_wait_after", 20)
+
                 async with ClickSolver(framework=FrameworkType.CAMOUFOX, page=page) as solver:
                     await page.goto(url, timeout=120000)
-                    await asyncio.sleep(5)
+                    logger.debug(f"[CF Solver] Waiting {wait_before}s before solving...")
+                    await asyncio.sleep(wait_before)
 
                     await solver.solve_captcha(
                         captcha_container=page,
@@ -66,7 +74,8 @@ class TurnstileSolverManager:
                         expected_content_selector="body"
                     )
 
-                    await asyncio.sleep(5)
+                    logger.debug(f"[CF Solver] Waiting {wait_after}s after solving...")
+                    await asyncio.sleep(wait_after)
 
                     cookies = await context.cookies()
                     cf_clearance = next((c['value'] for c in cookies if c['name'] == 'cf_clearance'), None)
