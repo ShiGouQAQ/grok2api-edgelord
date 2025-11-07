@@ -2,9 +2,25 @@ mixed-port: 10801
 allow-lan: true
 bind-address: "*"
 mode: rule
-log-level: info
+log-level: warning
 ipv6: false
-external-controller: 0.0.0.0:9091
+external-controller: 0.0.0.0:9093
+
+geodata-mode: true
+geodata-loader: memconservative
+geox-url:
+  geoip: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat"
+  geosite: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat"
+  mmdb: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb"
+  asn: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb"
+
+geo-auto-update: true
+geo-update-interval: 24
+
+geosite-matcher: mph
+
+tcp-concurrent: true
+unified-delay: true
 
 dns:
   enable: true
@@ -27,14 +43,15 @@ proxy-providers:
     interval: 3600
     health-check:
       enable: true
-      url: "https://x.ai"
+      url: "https://grok.com"
       interval: 60
       timeout: 5000
     proxy: DIRECT
     url: "YOUR_SUBSCRIPTION_URL"
 
 rules:
-  - DOMAIN-SUFFIX,x.ai,XAI-GROUP
-  - DOMAIN-SUFFIX,grok.com,XAI-GROUP
+  - GEOSITE,xai,XAI-GROUP
+  # Cloudflare
+  - GEOIP,cloudflare,XAI-GROUP
   - GEOIP,CN,DIRECT
   - MATCH,DIRECT

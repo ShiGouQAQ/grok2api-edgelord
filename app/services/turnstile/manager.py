@@ -57,7 +57,7 @@ class TurnstileSolverManager:
                 page = await context.new_page()
 
                 async with ClickSolver(framework=FrameworkType.CAMOUFOX, page=page) as solver:
-                    await page.goto(url)
+                    await page.goto(url, timeout=120000)
                     await asyncio.sleep(5)
 
                     await solver.solve_captcha(

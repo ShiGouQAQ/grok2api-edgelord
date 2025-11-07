@@ -75,26 +75,29 @@ async def test_mihomo_blacklist_mechanism(manager):
     manager.node_blacklist = set()
     manager.last_node_list = []
 
-    group_data = {
-        "proxies": [
-            {"name": "node1", "history": [{"delay": 100}]},
-            {"name": "node2", "history": [{"delay": 200}]},
-            {"name": "DIRECT", "history": []}
-        ]
+    available_nodes = ["node1", "node2"]
+    providers_data = {
+        "xai-nodes": {
+            "proxies": [
+                {"name": "node1", "history": [{"delay": 100}]},
+                {"name": "node2", "history": [{"delay": 200}]},
+                {"name": "DIRECT", "history": []}
+            ]
+        }
     }
 
     # 测试正常选择
-    best = manager._select_best_node(group_data)
+    best = manager._select_best_node_from_providers(available_nodes, providers_data)
     assert best == "node1"
 
     # 加入黑名单后应选择node2
     manager.node_blacklist.add("node1")
-    best = manager._select_best_node(group_data)
+    best = manager._select_best_node_from_providers(available_nodes, providers_data)
     assert best == "node2"
 
     # 全部加入黑名单应返回None
     manager.node_blacklist.add("node2")
-    best = manager._select_best_node(group_data)
+    best = manager._select_best_node_from_providers(available_nodes, providers_data)
     assert best is None
 
 

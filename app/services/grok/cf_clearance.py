@@ -45,19 +45,22 @@ class CFClearanceManager:
         try:
             mihomo_api = setting.grok_config.get("mihomo_api_url", "http://127.0.0.1:9091")
             group_name = setting.grok_config.get("mihomo_group_name", "XAI-GROUP")
-            
+
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{mihomo_api}/group/{group_name}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                async with session.get(f"{mihomo_api}/proxies/{group_name}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status != 200:
                         logger.warning(f"[Mihomo] 初始化失败: {resp.status}")
                         return
-                    
+
                     group_data = await resp.json()
-                    self.last_node_list = [p["name"] for p in group_data.get("proxies", []) if p["name"] != "DIRECT"]
-                    best_node = self._select_best_node(group_data)
-                    
+                    all_nodes = group_data.get("all", [])
+                    self.last_node_list = [n for n in all_nodes if n != "DIRECT"]
+
+                    providers_data = await self._get_providers_info(session, mihomo_api)
+                    best_node = self._select_best_node_from_providers(self.last_node_list, providers_data)
+
                     if best_node and best_node != group_data.get("now"):
-                        async with session.put(f"{mihomo_api}/proxies/{group_name}", 
+                        async with session.put(f"{mihomo_api}/proxies/{group_name}",
                                              json={"name": best_node},
                                              timeout=aiohttp.ClientTimeout(total=5)) as resp:
                             if resp.status == 204:
@@ -68,31 +71,55 @@ class CFClearanceManager:
                     else:
                         self.mihomo_initialized = True
                         logger.info(f"[Mihomo] 已初始化，当前节点: {group_data.get('now')}")
-        
+
         except Exception as e:
             logger.error(f"[Mihomo] 初始化异常: {e}")
+
+    async def _get_providers_info(self, session: aiohttp.ClientSession, mihomo_api: str) -> Dict[str, Any]:
+        """获取所有providers信息"""
+        try:
+            async with session.get(f"{mihomo_api}/providers/proxies", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("providers", {})
+        except Exception as e:
+            logger.debug(f"[Mihomo] 获取providers信息失败: {e}")
+        return {}
+
+    def _select_best_node_from_providers(self, available_nodes: list, providers_data: Dict[str, Any]) -> Optional[str]:
+        """从providers数据中选择最优节点"""
+        if not available_nodes:
+            return None
+        
+        # 过滤黑名单节点
+        candidate_nodes = [n for n in available_nodes if n not in self.node_blacklist]
+        if not candidate_nodes:
+            return None
+        
+        # 收集所有节点的延迟信息
+        node_delays = {}
+        for provider_name, provider_info in providers_data.items():
+            proxies = provider_info.get("proxies", [])
+            for proxy in proxies:
+                node_name = proxy.get("name")
+                if node_name not in candidate_nodes:
+                    continue
+                
+                history = proxy.get("history", [])
+                if history:
+                    latest = history[-1]
+                    delay = latest.get("delay", 9999)
+                    if delay > 0:
+                        node_delays[node_name] = delay
+        
+        # 选择延迟最低的节点
+        if node_delays:
+            best_node = min(node_delays.items(), key=lambda x: x[1])[0]
+            return best_node
+        
+        # 没有延迟数据，返回第一个可用节点
+        return candidate_nodes[0] if candidate_nodes else None
     
-    def _select_best_node(self, group_data: Dict[str, Any]) -> Optional[str]:
-        """根据延迟选择最优节点"""
-        proxies = group_data.get("proxies", [])
-        valid_nodes = []
-        
-        for proxy in proxies:
-            if proxy["name"] == "DIRECT" or proxy["name"] in self.node_blacklist:
-                continue
-            
-            history = proxy.get("history", [])
-            if history:
-                latest_delay = history[-1].get("delay", 9999)
-                if latest_delay > 0:
-                    valid_nodes.append((proxy["name"], latest_delay))
-        
-        if not valid_nodes:
-            all_nodes = [p["name"] for p in proxies if p["name"] != "DIRECT" and p["name"] not in self.node_blacklist]
-            return all_nodes[0] if all_nodes else None
-        
-        valid_nodes.sort(key=lambda x: x[1])
-        return valid_nodes[0][0]
 
     async def ensure_valid_clearance(self, force: bool = False) -> bool:
         """确保cf_clearance有效
@@ -221,71 +248,38 @@ class CFClearanceManager:
             logger.error(f"[CFClearance] 刷新失败: {e}")
             return False
 
-    async def _poll_result(self, session: aiohttp.ClientSession, api_url: str, task_id: str) -> Optional[str]:
-        """轮询Turnstile结果"""
-        start_time = time.time()
-        timeout = 120
-
-        while time.time() - start_time < timeout:
-            try:
-                async with session.get(f"{api_url}/result", params={"id": task_id}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status != 200:
-                        await asyncio.sleep(3)
-                        continue
-
-                    result = await resp.json()
-                    status = result.get("status")
-
-                    if status == "ready":
-                        token = result.get("solution", {}).get("token")
-                        if token:
-                            return f"cf_clearance={token}"
-                        return None
-                    elif status == "fail":
-                        logger.error(f"[CFClearance] 求解失败: {result.get('errorDescription')}")
-                        return None
-
-                    await asyncio.sleep(3)
-
-            except Exception as e:
-                logger.debug(f"[CFClearance] 轮询异常: {e}")
-                await asyncio.sleep(3)
-
-        logger.error(f"[CFClearance] 求解超时")
-        return None
 
     async def _switch_mihomo_node(self) -> bool:
         """切换mihomo代理节点到最优节点"""
         if not setting.grok_config.get("mihomo_enabled", False):
             return False
-        
+
         try:
             mihomo_api = setting.grok_config.get("mihomo_api_url", "http://127.0.0.1:9091")
             group_name = setting.grok_config.get("mihomo_group_name", "XAI-GROUP")
-            
+
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{mihomo_api}/group/{group_name}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                async with session.get(f"{mihomo_api}/proxies/{group_name}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status != 200:
                         logger.error(f"[Mihomo] 获取节点组失败: {resp.status}")
                         return False
-                    
+
                     group_data = await resp.json()
                     current = group_data.get("now")
-                    best_node = self._select_best_node(group_data)
-                    
+                    all_nodes = [n for n in group_data.get("all", []) if n != "DIRECT"]
+
+                    providers_data = await self._get_providers_info(session, mihomo_api)
+                    best_node = self._select_best_node_from_providers(all_nodes, providers_data)
+
                     if not best_node:
                         logger.error("[Mihomo] 没有可用节点")
                         return False
-                    
+
                     if best_node == current:
-                        all_nodes = [p["name"] for p in group_data.get("proxies", []) if p["name"] != "DIRECT" and p["name"] != current]
-                        if all_nodes:
-                            best_node = all_nodes[0]
-                        else:
-                            logger.warning("[Mihomo] 无其他可用节点")
-                            return False
-                    
-                    async with session.put(f"{mihomo_api}/groups/{group_name}", 
+                        logger.info(f"[Mihomo] 当前已是最优节点: {best_node}")
+                        return True
+
+                    async with session.put(f"{mihomo_api}/proxies/{group_name}",
                                          json={"name": best_node},
                                          timeout=aiohttp.ClientTimeout(total=5)) as resp:
                         if resp.status == 204:
@@ -294,7 +288,7 @@ class CFClearanceManager:
                         else:
                             logger.error(f"[Mihomo] 切换节点失败: {resp.status}")
                             return False
-        
+
         except Exception as e:
             logger.error(f"[Mihomo] 切换节点异常: {e}")
             return False
@@ -303,13 +297,13 @@ class CFClearanceManager:
         """获取当前使用的节点"""
         if not setting.grok_config.get("mihomo_enabled", False):
             return None
-        
+
         try:
             mihomo_api = setting.grok_config.get("mihomo_api_url", "http://127.0.0.1:9091")
             group_name = setting.grok_config.get("mihomo_group_name", "XAI-GROUP")
-            
+
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{mihomo_api}/group/{group_name}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                async with session.get(f"{mihomo_api}/proxies/{group_name}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         group_data = await resp.json()
                         return group_data.get("now")
@@ -321,16 +315,16 @@ class CFClearanceManager:
         """获取当前节点列表"""
         if not setting.grok_config.get("mihomo_enabled", False):
             return []
-        
+
         try:
             mihomo_api = setting.grok_config.get("mihomo_api_url", "http://127.0.0.1:9091")
             group_name = setting.grok_config.get("mihomo_group_name", "XAI-GROUP")
-            
+
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"{mihomo_api}/group/{group_name}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                async with session.get(f"{mihomo_api}/proxies/{group_name}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         group_data = await resp.json()
-                        return [p["name"] for p in group_data.get("proxies", []) if p["name"] != "DIRECT"]
+                        return [n for n in group_data.get("all", []) if n != "DIRECT"]
         except Exception:
             pass
         return []
