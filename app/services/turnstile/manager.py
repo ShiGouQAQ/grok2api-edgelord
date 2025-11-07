@@ -11,9 +11,7 @@ class TurnstileSolverManager:
     """Manager for Cloudflare clearance solving"""
 
     def __init__(self):
-        self.enabled = setting.grok_config.get("turnstile_enabled", False)
-        self.headless = setting.grok_config.get("turnstile_headless", True)
-        self.browser_type = setting.grok_config.get("turnstile_browser_type", "chromium")
+        pass
 
     async def solve_cloudflare(self, url: str) -> Optional[str]:
         """
@@ -25,14 +23,14 @@ class TurnstileSolverManager:
         Returns:
             cf_clearance cookie value or None if failed
         """
-        self.enabled = setting.grok_config.get("turnstile_enabled", False)
-        self.headless = setting.grok_config.get("turnstile_headless", True)
+        enabled = setting.grok_config.get("turnstile_enabled", False)
+        headless = setting.grok_config.get("turnstile_headless", True)
 
-        if not self.enabled:
+        if not enabled:
             logger.warning("[CF Solver] Disabled in config")
             return None
 
-        logger.info(f"[CF Solver] Starting (headless={self.headless}, url={url})")
+        logger.info(f"[CF Solver] Starting (headless={headless}, url={url})")
 
         try:
             from camoufox import AsyncCamoufox
@@ -46,7 +44,7 @@ class TurnstileSolverManager:
             proxy_config = {"server": proxy_url} if proxy_url else None
 
             async with AsyncCamoufox(
-                headless=self.headless,
+                headless=headless,
                 geoip=True,
                 humanize=True,
                 i_know_what_im_doing=True,
@@ -61,12 +59,12 @@ class TurnstileSolverManager:
                 page = await context.new_page()
 
                 wait_before = setting.grok_config.get("cf_solver_wait_before", 10)
-                wait_after = setting.grok_config.get("cf_solver_wait_after", 20)
-                max_attempts = setting.grok_config.get("cf_solver_max_attempts", 3)
-                attempt_delay = setting.grok_config.get("cf_solver_attempt_delay", 5)
-                click_delay = setting.grok_config.get("cf_solver_click_delay", 6)
-                checkbox_delay = setting.grok_config.get("cf_solver_checkbox_delay", 6)
-                checkbox_attempts = setting.grok_config.get("cf_solver_checkbox_attempts", 10)
+                wait_after = setting.grok_config.get("cf_solver_wait_after", 0)
+                max_attempts = setting.grok_config.get("cf_solver_max_attempts", 5)
+                attempt_delay = setting.grok_config.get("cf_solver_attempt_delay", 3)
+                click_delay = setting.grok_config.get("cf_solver_click_delay", 10)
+                checkbox_delay = setting.grok_config.get("cf_solver_checkbox_delay", 8)
+                checkbox_attempts = setting.grok_config.get("cf_solver_checkbox_attempts", 15)
 
                 async with ClickSolver(
                     framework=FrameworkType.CAMOUFOX,
@@ -81,7 +79,7 @@ class TurnstileSolverManager:
                     await solver.solve_captcha(
                         captcha_container=page,
                         captcha_type=CaptchaType.CLOUDFLARE_INTERSTITIAL,
-                        expected_content_selector="body",
+                        expected_content_selector='div[class*="@container/mainview"]',
                         solve_click_delay=click_delay,
                         wait_checkbox_delay=checkbox_delay,
                         wait_checkbox_attempts=checkbox_attempts
