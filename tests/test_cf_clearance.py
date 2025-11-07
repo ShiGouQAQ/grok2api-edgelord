@@ -161,7 +161,7 @@ async def test_backward_compatibility_without_mihomo(manager):
 async def test_mihomo_retry_until_exhausted(manager):
     """测试mihomo重试直到节点耗尽"""
     manager.node_blacklist = set()
-    manager.last_node_list = ["node1", "node2"]
+    manager.last_node_list = ["node1", "node2", "node3"]
 
     with patch('app.services.grok.cf_clearance.setting') as mock_setting:
         mock_setting.grok_config.get.side_effect = lambda k, d=None: {
@@ -171,15 +171,16 @@ async def test_mihomo_retry_until_exhausted(manager):
         }.get(k, d)
 
         with patch.object(manager, '_try_refresh_once', return_value=False):
-            with patch.object(manager, '_get_current_node', side_effect=["node1", "node2"]):
-                with patch.object(manager, '_get_node_list', return_value=["node1", "node2"]):
-                    with patch.object(manager, '_switch_mihomo_node', side_effect=[True, False]):
+            with patch.object(manager, '_get_current_node', side_effect=["node1", "node2", "node3"]):
+                with patch.object(manager, '_get_node_list', return_value=["node1", "node2", "node3"]):
+                    with patch.object(manager, '_switch_mihomo_node', side_effect=[True, True, False]):
                         with patch.object(manager, '_check_cf_challenge', return_value=True):
                             result = await manager._refresh_clearance()
                             assert result is False
-                            # 两个节点都应加入黑名单
+                            # 三个节点都应加入黑名单
                             assert "node1" in manager.node_blacklist
                             assert "node2" in manager.node_blacklist
+                            assert "node3" in manager.node_blacklist
 
 
 @pytest.mark.asyncio

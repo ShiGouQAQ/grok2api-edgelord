@@ -64,7 +64,7 @@ class CFClearanceManager:
                                              json={"name": best_node},
                                              timeout=aiohttp.ClientTimeout(total=5)) as resp:
                             if resp.status == 204:
-                                logger.success(f"[Mihomo] 已初始化并切换到最优节点: {best_node}")
+                                logger.info(f"[Mihomo] 已初始化并切换到最优节点: {best_node}")
                                 self.mihomo_initialized = True
                             else:
                                 logger.warning(f"[Mihomo] 切换节点失败: {resp.status}")
@@ -176,9 +176,10 @@ class CFClearanceManager:
             return await self._try_refresh_once()
 
         # mihomo启用时，带重试逻辑
-        max_retries = 10
+        max_retries = 3
         for attempt in range(max_retries):
             current_node = await self._get_current_node()
+            logger.info(f"[Mihomo] 尝试求解 (第 {attempt + 1}/{max_retries} 次，当前节点: {current_node})")
             success = await self._try_refresh_once()
 
             if success:
@@ -203,6 +204,7 @@ class CFClearanceManager:
                 logger.error("[Mihomo] 所有节点已耗尽")
                 return False
 
+        logger.error(f"[Mihomo] 达到最大重试次数 ({max_retries})，求解失败")
         return False
 
     async def _check_cf_challenge(self) -> bool:

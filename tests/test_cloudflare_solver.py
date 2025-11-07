@@ -70,7 +70,7 @@ class TestCloudflareSolver:
                     result = await manager.solve_cloudflare("https://grok.com")
 
                     assert result == 'test_clearance_value'
-                    mock_page.goto.assert_called_once_with("https://grok.com")
+                    mock_page.goto.assert_called_once_with("https://grok.com", timeout=120000)
                     mock_solver.solve_captcha.assert_called_once()
 
     @pytest.mark.asyncio
