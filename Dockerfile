@@ -23,14 +23,10 @@ COPY pyproject.toml uv.lock ./
 ENV UV_LINK_MODE=copy
 RUN uv sync --frozen --no-dev --no-install-project
 
-# Install Camoufox from git
-RUN uv pip install --no-cache \
-    'git+https://github.com/coryking/camoufox.git@v142.0.1-bluetaka.25#subdirectory=pythonlib'
-
 # ============================================
 # Stage 2: Runtime
 # ============================================
-FROM ghcr.io/linuxserver/baseimage-selkies:ubuntunoble
+FROM linuxserver/chrome:latest
 
 WORKDIR /app
 
@@ -54,19 +50,6 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-# Install Patchright system dependencies only (no browsers)
-RUN uv run -m patchright install-deps && \
-    apt-get autoclean && \
-    rm -rf \
-    /var/lib/apt/lists/* \
-    /var/tmp/* \
-    /tmp/*
-
-# Pre-fetch Camoufox browser during build to avoid runtime network issues
-RUN mkdir -p /config/.cache && \
-    uv run python -m camoufox fetch || (echo "ERROR: Failed to fetch Camoufox browser. Build aborted." && exit 1) && \
-    chown -R abc:abc /config/.cache
-
 # Copy application code
 COPY app/ ./app/
 COPY main.py .
@@ -76,7 +59,7 @@ COPY data/setting.toml ./data/
 COPY /root /
 
 # Create necessary directories with proper permissions for abc user
-RUN mkdir -p /app/logs /app/data/temp/image /app/data/temp/video /config/.cache && \
+RUN mkdir -p /app/logs /app/data/temp/image /app/data/temp/video && \
     echo '{"ssoNormal": {}, "ssoSuper": {}}' > /app/data/token.json && \
     chown -R abc:abc /app /config/.cache /app/logs
 

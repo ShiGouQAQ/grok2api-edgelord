@@ -80,6 +80,12 @@ def get_dynamic_headers(pathname: str = "/rest/app-chat/conversations/new") -> D
         if not statsig_id:
             raise ValueError("配置文件中未设置 x_statsig_id")
 
+    # 获取浏览器指纹信息（由patchright求解时保存）
+    user_agent = setting.grok_config.get("browser_user_agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36")
+    sec_ch_ua = setting.grok_config.get("browser_sec_ch_ua", '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"')
+    sec_ch_ua_mobile = setting.grok_config.get("browser_sec_ch_ua_mobile", "?0")
+    sec_ch_ua_platform = setting.grok_config.get("browser_sec_ch_ua_platform", '"macOS"')
+
     # 构建基础请求头
     headers = {
         "Accept": "*/*",
@@ -89,10 +95,10 @@ def get_dynamic_headers(pathname: str = "/rest/app-chat/conversations/new") -> D
         "Connection": "keep-alive",
         "Origin": "https://grok.com",
         "Priority": "u=1, i",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-        "Sec-Ch-Ua": '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"macOS"',
+        "User-Agent": user_agent,
+        "Sec-Ch-Ua": sec_ch_ua,
+        "Sec-Ch-Ua-Mobile": sec_ch_ua_mobile,
+        "Sec-Ch-Ua-Platform": sec_ch_ua_platform,
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",

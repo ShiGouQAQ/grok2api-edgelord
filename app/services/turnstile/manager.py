@@ -33,30 +33,46 @@ class TurnstileSolverManager:
         logger.info(f"[CF Solver] Starting (headless={headless}, url={url})")
 
         try:
-            from camoufox import AsyncCamoufox
+            from patchright.async_api import async_playwright
             from playwright_captcha import CaptchaType, ClickSolver, FrameworkType
-            from playwright_captcha.utils.camoufox_add_init_script.add_init_script import get_addon_path
-            import os
-
-            addon_path = get_addon_path()
 
             proxy_url = setting.grok_config.get("proxy_url", "")
             proxy_config = {"server": proxy_url} if proxy_url else None
 
-            async with AsyncCamoufox(
-                headless=headless,
-                geoip=True,
-                humanize=True,
-                i_know_what_im_doing=True,
-                config={'forceScopeAccess': True},
-                disable_coop=True,
-                main_world_eval=True,
-                addons=[os.path.abspath(addon_path)],
-                proxy=proxy_config
-            ) as browser:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=headless,
+                    proxy=proxy_config
+                )
                 logger.debug(f"[CF Solver] Browser launched (proxy={proxy_url or 'None'})")
+                
                 context = await browser.new_context()
                 page = await context.new_page()
+
+                # 获取浏览器实际的User-Agent和Sec-Ch-Ua信息
+                browser_info = await page.evaluate("""() => ({
+                    userAgent: navigator.userAgent,
+                    platform: navigator.platform,
+                    userAgentData: navigator.userAgentData ? {
+                        platform: navigator.userAgentData.platform,
+                        mobile: navigator.userAgentData.mobile,
+                        brands: navigator.userAgentData.brands.map(b => `"${b.brand}";v="${b.version}"`).join(", ")
+                    } : null
+                })""")
+                
+                logger.info(f"[CF Solver] Browser User-Agent: {browser_info['userAgent']}")
+                if browser_info.get('userAgentData'):
+                    logger.info(f"[CF Solver] Sec-Ch-Ua: {browser_info['userAgentData']['brands']}")
+                    logger.info(f"[CF Solver] Sec-Ch-Ua-Platform: {browser_info['userAgentData']['platform']}")
+                
+                # 保存浏览器指纹信息
+                user_agent_data = browser_info.get('userAgentData')
+                await setting.save(grok_config={
+                    "browser_user_agent": browser_info['userAgent'],
+                    "browser_sec_ch_ua": user_agent_data['brands'] if user_agent_data else None,
+                    "browser_sec_ch_ua_platform": f'"{user_agent_data["platform"]}"' if user_agent_data else None,
+                    "browser_sec_ch_ua_mobile": "?1" if user_agent_data and user_agent_data.get('mobile') else "?0"
+                })
 
                 wait_before = setting.grok_config.get("cf_solver_wait_before", 10)
                 wait_after = setting.grok_config.get("cf_solver_wait_after", 0)
@@ -67,7 +83,7 @@ class TurnstileSolverManager:
                 checkbox_attempts = setting.grok_config.get("cf_solver_checkbox_attempts", 15)
 
                 async with ClickSolver(
-                    framework=FrameworkType.CAMOUFOX,
+                    framework=FrameworkType.PLAYWRIGHT,
                     page=page,
                     max_attempts=max_attempts,
                     attempt_delay=attempt_delay
@@ -90,6 +106,8 @@ class TurnstileSolverManager:
 
                     cookies = await context.cookies()
                     cf_clearance = next((c['value'] for c in cookies if c['name'] == 'cf_clearance'), None)
+
+                    await browser.close()
 
                     if cf_clearance:
                         logger.info(f"[CF Solver] Success: cf_clearance={cf_clearance[:20]}...")
