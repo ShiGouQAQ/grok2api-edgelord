@@ -62,8 +62,15 @@ class TurnstileSolverManager:
 
                 wait_before = setting.grok_config.get("cf_solver_wait_before", 10)
                 wait_after = setting.grok_config.get("cf_solver_wait_after", 20)
+                max_attempts = setting.grok_config.get("cf_solver_max_attempts", 5)
+                attempt_delay = setting.grok_config.get("cf_solver_attempt_delay", 3)
 
-                async with ClickSolver(framework=FrameworkType.CAMOUFOX, page=page) as solver:
+                async with ClickSolver(
+                    framework=FrameworkType.CAMOUFOX,
+                    page=page,
+                    max_attempts=max_attempts,
+                    attempt_delay=attempt_delay
+                ) as solver:
                     await page.goto(url, timeout=120000)
                     logger.debug(f"[CF Solver] Waiting {wait_before}s before solving...")
                     await asyncio.sleep(wait_before)
