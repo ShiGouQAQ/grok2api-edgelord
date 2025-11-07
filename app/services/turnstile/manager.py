@@ -62,8 +62,11 @@ class TurnstileSolverManager:
 
                 wait_before = setting.grok_config.get("cf_solver_wait_before", 10)
                 wait_after = setting.grok_config.get("cf_solver_wait_after", 20)
-                max_attempts = setting.grok_config.get("cf_solver_max_attempts", 5)
-                attempt_delay = setting.grok_config.get("cf_solver_attempt_delay", 3)
+                max_attempts = setting.grok_config.get("cf_solver_max_attempts", 3)
+                attempt_delay = setting.grok_config.get("cf_solver_attempt_delay", 5)
+                click_delay = setting.grok_config.get("cf_solver_click_delay", 6)
+                checkbox_delay = setting.grok_config.get("cf_solver_checkbox_delay", 6)
+                checkbox_attempts = setting.grok_config.get("cf_solver_checkbox_attempts", 10)
 
                 async with ClickSolver(
                     framework=FrameworkType.CAMOUFOX,
@@ -78,7 +81,10 @@ class TurnstileSolverManager:
                     await solver.solve_captcha(
                         captcha_container=page,
                         captcha_type=CaptchaType.CLOUDFLARE_INTERSTITIAL,
-                        expected_content_selector="body"
+                        expected_content_selector="body",
+                        solve_click_delay=click_delay,
+                        wait_checkbox_delay=checkbox_delay,
+                        wait_checkbox_attempts=checkbox_attempts
                     )
 
                     logger.debug(f"[CF Solver] Waiting {wait_after}s after solving...")

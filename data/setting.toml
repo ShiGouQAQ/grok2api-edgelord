@@ -25,16 +25,22 @@ turnstile_browser_type = "camoufox"
 turnstile_threads = 2
 turnstile_debug = false
 
-# CF Solver 等待时间配置（秒）
+# CF Solver 配置（秒）
 # cf_solver_wait_before: 页面加载后、开始求解前的等待时间，默认 10 秒
 # cf_solver_wait_after: 求解完成后、获取 cookie 前的等待时间，默认 20 秒
-# cf_solver_max_attempts: 求解器最大尝试次数，默认 5 次
-# cf_solver_attempt_delay: 每次尝试之间的等待时间，默认 3 秒
+# cf_solver_max_attempts: 求解器最大尝试次数，默认 3 次（源代码默认值）
+# cf_solver_attempt_delay: 每次尝试之间的等待时间，默认 5 秒（源代码默认值）
+# cf_solver_click_delay: 点击验证框后的等待时间，默认 6 秒
+# cf_solver_checkbox_delay: 查找验证框之间的等待时间，默认 6 秒
+# cf_solver_checkbox_attempts: 查找验证框的最大尝试次数，默认 10 次
 # 网络较差时可适当增加这些值
 cf_solver_wait_before = 10
 cf_solver_wait_after = 20
-cf_solver_max_attempts = 5
-cf_solver_attempt_delay = 3
+cf_solver_max_attempts = 3
+cf_solver_attempt_delay = 5
+cf_solver_click_delay = 6
+cf_solver_checkbox_delay = 6
+cf_solver_checkbox_attempts = 10
 
 [global]
 base_url = ""
