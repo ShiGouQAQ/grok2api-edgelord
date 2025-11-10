@@ -210,6 +210,12 @@ class GrokClient:
             proxy_url = setting.get_service_proxy()
             proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
             
+            # 验证代理配置
+            if proxy_url:
+                logger.debug(f"[Client] 使用代理: {proxy_url}")
+            else:
+                logger.warning("[Client] 未配置代理，直连请求")
+            
             # 构建请求参数
             request_kwargs = {
                 "headers": headers,
@@ -229,7 +235,7 @@ class GrokClient:
 
             # 处理非成功响应
             if response.status_code != 200:
-                GrokClient._handle_error(response, auth_token)
+                await GrokClient._handle_error(response, auth_token)
 
             # 请求成功，重置失败计数
             asyncio.create_task(token_manager.reset_failure(auth_token))
@@ -238,7 +244,21 @@ class GrokClient:
             return await GrokClient._process_response(response, auth_token, model, stream)
 
         except curl_requests.RequestsError as e:
-            logger.error(f"[Client] 网络请求错误: {e}")
+            error_msg = str(e)
+            logger.error(f"[Client] 网络请求错误: {error_msg}")
+            
+            # TLS错误表示代理网络问题，触发节点切换
+            if "TLS connect error" in error_msg or "SSL" in error_msg or "OPENSSL" in error_msg:
+                logger.warning("[Client] 检测到TLS/SSL错误，可能是代理网络问题，尝试切换节点")
+                try:
+                    switched = await cf_clearance_manager._switch_mihomo_node()
+                    if switched:
+                        logger.info("[Client] 节点切换成功，请重试请求")
+                    else:
+                        logger.warning("[Client] 节点切换失败或未启用Mihomo")
+                except Exception as switch_err:
+                    logger.error(f"[Client] 节点切换异常: {switch_err}")
+            
             raise GrokApiException(f"网络错误: {e}", "NETWORK_ERROR") from e
         except json.JSONDecodeError as e:
             logger.error(f"[Client] JSON解析错误: {e}")
@@ -259,7 +279,7 @@ class GrokClient:
         return headers
 
     @staticmethod
-    def _handle_error(response, auth_token: str):
+    async def _handle_error(response, auth_token: str):
         """处理错误响应"""
         # 处理 403 错误
         if response.status_code == 403:
@@ -275,8 +295,8 @@ class GrokClient:
                 error_data = response.text
                 error_message = error_data[:200] if error_data else str(e)
 
-        # 记录Token失败
-        asyncio.create_task(token_manager.record_failure(auth_token, response.status_code, error_message))
+        # 记录Token失败（403会触发CF求解并等待）
+        await token_manager.record_failure(auth_token, response.status_code, error_message)
 
         raise GrokApiException(
             f"请求失败: {response.status_code} - {error_message}",

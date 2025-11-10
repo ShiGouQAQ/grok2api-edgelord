@@ -59,14 +59,22 @@ class PostCreateManager:
             proxy_url = setting.grok_config.get("proxy_url", "")
             proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
+            # 验证代理配置
+            if proxy_url:
+                logger.debug(f"[PostCreate] 使用代理: {proxy_url}")
+            else:
+                logger.warning("[PostCreate] 未配置代理，直连请求")
+
             # 发送异步请求
+            headers = {
+                **get_dynamic_headers("/rest/media/post/create"),
+                "Cookie": cookie,
+            }
+
             async with AsyncSession() as session:
                 response = await session.post(
                     CREATE_ENDPOINT,
-                    headers={
-                        **get_dynamic_headers("/rest/media/post/create"),
-                        "Cookie": cookie,
-                    },
+                    headers=headers,
                     json=create_data,
                     impersonate=IMPERSONATE_BROWSER,
                     timeout=REQUEST_TIMEOUT,
@@ -99,5 +107,20 @@ class PostCreateManager:
         except GrokApiException:
             raise
         except Exception as e:
-            logger.error(f"[PostCreate] 创建会话异常: {e}")
+            error_msg = str(e)
+            logger.error(f"[PostCreate] 创建会话异常: {error_msg}")
+            
+            # TLS错误表示代理网络问题，触发节点切换
+            if "TLS connect error" in error_msg or "SSL" in error_msg or "OPENSSL" in error_msg:
+                logger.warning("[PostCreate] 检测到TLS/SSL错误，可能是代理网络问题，尝试切换节点")
+                try:
+                    from app.services.grok.cf_clearance import cf_clearance_manager
+                    switched = await cf_clearance_manager._switch_mihomo_node()
+                    if switched:
+                        logger.info("[PostCreate] 节点切换成功，请重试请求")
+                    else:
+                        logger.warning("[PostCreate] 节点切换失败或未启用Mihomo")
+                except Exception as switch_err:
+                    logger.error(f"[PostCreate] 节点切换异常: {switch_err}")
+            
             raise GrokApiException(f"创建会话异常: {e}", "CREATE_ERROR") from e
