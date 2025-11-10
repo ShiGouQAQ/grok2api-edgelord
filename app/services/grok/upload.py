@@ -66,13 +66,19 @@ class ImageUploadManager:
             proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
             # 发送异步请求
+            headers = {
+                **get_dynamic_headers("/rest/app-chat/upload-file"),
+                "Cookie": cookie,
+            }
+
+            logger.info(f"[Upload] cf_clearance: {cf_clearance[:30] if cf_clearance else 'None'}...")
+            logger.info(f"[Upload] User-Agent: {headers.get('User-Agent', 'None')}")
+            logger.info(f"[Upload] Sec-Ch-Ua: {headers.get('Sec-Ch-Ua', 'None')}")
+
             async with AsyncSession() as session:
                 response = await session.post(
                     UPLOAD_ENDPOINT,
-                    headers={
-                        **get_dynamic_headers("/rest/app-chat/upload-file"),
-                        "Cookie": cookie,
-                    },
+                    headers=headers,
                     json=upload_data,
                     impersonate=IMPERSONATE_BROWSER,
                     timeout=REQUEST_TIMEOUT,
