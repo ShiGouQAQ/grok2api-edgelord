@@ -8,6 +8,12 @@ from typing import Dict
 
 from app.core.logger import logger
 from app.core.config import setting
+from app.services.grok.browser_config import (
+    BROWSER_USER_AGENT,
+    BROWSER_SEC_CH_UA,
+    BROWSER_SEC_CH_UA_PLATFORM,
+    BROWSER_SEC_CH_UA_MOBILE
+)
 
 
 def _generate_random_string(length: int, use_letters: bool = True) -> str:
@@ -80,11 +86,11 @@ def get_dynamic_headers(pathname: str = "/rest/app-chat/conversations/new") -> D
         if not statsig_id:
             raise ValueError("配置文件中未设置 x_statsig_id")
 
-    # 获取浏览器指纹信息（由patchright求解时保存）
-    user_agent = setting.grok_config.get("browser_user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
-    sec_ch_ua = setting.grok_config.get("browser_sec_ch_ua", '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"')
-    sec_ch_ua_mobile = setting.grok_config.get("browser_sec_ch_ua_mobile", "?0")
-    sec_ch_ua_platform = setting.grok_config.get("browser_sec_ch_ua_platform", '"Windows"')
+    # 获取浏览器指纹信息（由patchright求解时保存，使用集中配置的默认值）
+    user_agent = setting.grok_config.get("browser_user_agent", BROWSER_USER_AGENT)
+    sec_ch_ua = setting.grok_config.get("browser_sec_ch_ua", BROWSER_SEC_CH_UA)
+    sec_ch_ua_mobile = setting.grok_config.get("browser_sec_ch_ua_mobile", BROWSER_SEC_CH_UA_MOBILE)
+    sec_ch_ua_platform = setting.grok_config.get("browser_sec_ch_ua_platform", BROWSER_SEC_CH_UA_PLATFORM)
 
     # 构建基础请求头
     headers = {
@@ -94,7 +100,7 @@ def get_dynamic_headers(pathname: str = "/rest/app-chat/conversations/new") -> D
         "Content-Type": "application/json" if "upload-file" not in pathname else "text/plain;charset=UTF-8",
         "Connection": "keep-alive",
         "Origin": "https://grok.com",
-        "Priority": "u=1, i",
+        "Priority": "u=1",
         "User-Agent": user_agent,
         "Sec-Ch-Ua": sec_ch_ua,
         "Sec-Ch-Ua-Mobile": sec_ch_ua_mobile,

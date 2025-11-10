@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from curl_cffi.requests import AsyncSession
 
 from app.services.grok.statsig import get_dynamic_headers
+from app.services.grok.browser_config import CURL_IMPERSONATE
 from app.core.exception import GrokApiException
 from app.core.config import setting
 from app.core.logger import logger
@@ -15,7 +16,7 @@ from app.core.logger import logger
 # 常量定义
 UPLOAD_ENDPOINT = "https://grok.com/rest/app-chat/upload-file"
 REQUEST_TIMEOUT = 30
-IMPERSONATE_BROWSER = "chrome"
+IMPERSONATE_BROWSER = CURL_IMPERSONATE
 DEFAULT_MIME_TYPE = "image/jpeg"
 DEFAULT_EXTENSION = "jpg"
 
@@ -59,8 +60,8 @@ class ImageUploadManager:
             if not auth_token:
                 raise GrokApiException("认证令牌缺失或为空", "NO_AUTH_TOKEN")
 
-            cf_clearance = setting.grok_config.get("cf_clearance", "")
-            cookie = f"{auth_token};{cf_clearance}" if cf_clearance else auth_token
+            cf_cookies = setting.grok_config.get("cf_clearance", "")
+            cookie = f"{auth_token}; {cf_cookies}" if cf_cookies else auth_token
             
             proxy_url = setting.grok_config.get("proxy_url", "")
             proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None

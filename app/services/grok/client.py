@@ -14,19 +14,14 @@ from app.services.grok.statsig import get_dynamic_headers
 from app.services.grok.token import token_manager
 from app.services.grok.upload import ImageUploadManager
 from app.services.grok.create import PostCreateManager
+from app.services.grok.browser_config import CURL_IMPERSONATE, CURL_JA3, CURL_AKAMAI
 from app.core.exception import GrokApiException
 
 # 常量定义
 GROK_API_ENDPOINT = "https://grok.com/rest/app-chat/conversations/new"
 REQUEST_TIMEOUT = 120
-IMPERSONATE_BROWSER = "chrome"
+IMPERSONATE_BROWSER = CURL_IMPERSONATE
 MAX_RETRY = 3  # 最大重试次数
-
-# Chrome Windows 指纹配置
-CHROME_FINGERPRINT = {
-    "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,17613-51-10-35-65037-27-16-11-5-45-18-65281-0-13-43-23,4588-29-23-24,0",
-    "akamai": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"
-}
 
 
 from app.services.grok.cf_clearance import cf_clearance_manager
@@ -97,6 +92,8 @@ class GrokClient:
                 
                 if i < MAX_RETRY - 1:
                     logger.warning(f"[Client] 请求失败(状态码:{status}), 重试 {i+1}/{MAX_RETRY}")
+                    if status == 403:
+                        logger.info(f"[Client] 403错误，CF求解已完成，将使用新的cf_clearance重试")
                     await asyncio.sleep(0.5)
                 else:
                     logger.error(f"[Client] 重试{MAX_RETRY}次后仍失败")
@@ -227,8 +224,8 @@ class GrokClient:
                 "headers": headers,
                 "data": json.dumps(payload),
                 "impersonate": IMPERSONATE_BROWSER,
-                "ja3": CHROME_FINGERPRINT["ja3"],
-                "akamai": CHROME_FINGERPRINT["akamai"],
+                "ja3": CURL_JA3,
+                "akamai": CURL_AKAMAI,
                 "timeout": REQUEST_TIMEOUT,
                 "stream": True,
                 "proxies": proxies
@@ -289,9 +286,9 @@ class GrokClient:
         """构建请求头"""
         headers = get_dynamic_headers("/rest/app-chat/conversations/new")
 
-        # 构建Cookie
-        cf_clearance = setting.grok_config.get("cf_clearance", "")
-        headers["Cookie"] = f"{auth_token};{cf_clearance}" if cf_clearance else auth_token
+        # 构建Cookie（auth_token + CF cookies）
+        cf_cookies = setting.grok_config.get("cf_clearance", "")
+        headers["Cookie"] = f"{auth_token}; {cf_cookies}" if cf_cookies else auth_token
 
         return headers
 

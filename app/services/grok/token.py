@@ -13,11 +13,12 @@ from app.core.exception import GrokApiException
 from app.core.logger import logger
 from app.core.config import setting
 from app.services.grok.statsig import get_dynamic_headers
+from app.services.grok.browser_config import CURL_IMPERSONATE
 
 # 常量定义
 RATE_LIMIT_ENDPOINT = "https://grok.com/rest/rate-limits"
 REQUEST_TIMEOUT = 30
-IMPERSONATE_BROWSER = "chrome"
+IMPERSONATE_BROWSER = CURL_IMPERSONATE
 MAX_FAILURE_COUNT = 3
 TOKEN_INVALID_CODE = 401  # SSO Token失效
 STATSIG_INVALID_CODE = 403  # x-statsig-id失效
@@ -285,8 +286,8 @@ class GrokTokenManager:
 
             # 准备请求
             payload = {"requestKind": "DEFAULT", "modelName": rate_limit_model_name}
-            cf_clearance = setting.grok_config.get("cf_clearance", "")
-            cookie = f"{auth_token};{cf_clearance}" if cf_clearance else auth_token
+            cf_cookies = setting.grok_config.get("cf_clearance", "")
+            cookie = f"{auth_token}; {cf_cookies}" if cf_cookies else auth_token
 
             headers = get_dynamic_headers("/rest/rate-limits")
             headers["Cookie"] = cookie

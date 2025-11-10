@@ -35,6 +35,13 @@ class TurnstileSolverManager:
         try:
             from patchright.async_api import async_playwright
             from playwright_captcha import CaptchaType, ClickSolver, FrameworkType
+            from app.services.grok.browser_config import (
+                BROWSER_USER_AGENT,
+                PLAYWRIGHT_CHANNEL,
+                PLAYWRIGHT_VIEWPORT,
+                get_browser_fingerprint,
+                get_playwright_headers
+            )
 
             proxy_url = setting.grok_config.get("proxy_url", "")
             proxy_config = {"server": proxy_url} if proxy_url else None
@@ -43,62 +50,23 @@ class TurnstileSolverManager:
                 browser = await p.chromium.launch(
                     headless=headless,
                     proxy=proxy_config,
-                    channel="chrome"
+                    channel=PLAYWRIGHT_CHANNEL
                 )
                 logger.debug(f"[CF Solver] Browser launched (proxy={proxy_url or 'None'})")
 
-                # 使用 Windows 指纹创建上下文
+                # 使用集中配置的浏览器指纹
                 context = await browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
-                    viewport={"width": 1920, "height": 1080},
-                    extra_http_headers={
-                        "sec-ch-ua": '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
-                        "sec-ch-ua-mobile": "?0",
-                        "sec-ch-ua-platform": '"Windows"'
-                    }
+                    user_agent=BROWSER_USER_AGENT,
+                    viewport=PLAYWRIGHT_VIEWPORT,
+                    extra_http_headers=get_playwright_headers()
                 )
                 page = await context.new_page()
 
-                # 获取浏览器实际的User-Agent和Sec-Ch-Ua信息
-                browser_info = await page.evaluate("""async () => {
-                    const info = {
-                        userAgent: navigator.userAgent,
-                        platform: navigator.platform,
-                        userAgentData: null
-                    };
-
-                    if (navigator.userAgentData) {
-                        try {
-                            const highEntropyValues = await navigator.userAgentData.getHighEntropyValues(['platform', 'platformVersion', 'fullVersionList']);
-                            info.userAgentData = {
-                                platform: highEntropyValues.platform,
-                                mobile: navigator.userAgentData.mobile,
-                                brands: highEntropyValues.fullVersionList.map(b => `"${b.brand}";v="${b.version}"`).join(", ")
-                            };
-                        } catch (e) {
-                            console.error('Failed to get high entropy values:', e);
-                        }
-                    }
-
-                    return info;
-                }""")
-                
-                logger.info(f"[CF Solver] Browser User-Agent: {browser_info['userAgent']}")
-                if browser_info.get('userAgentData'):
-                    logger.info(f"[CF Solver] Sec-Ch-Ua: {browser_info['userAgentData']['brands']}")
-                    logger.info(f"[CF Solver] Sec-Ch-Ua-Platform: {browser_info['userAgentData']['platform']}")
-                
-                # 保存浏览器指纹信息
-                user_agent_data = browser_info.get('userAgentData')
-                fingerprint_config = {
-                    "browser_user_agent": browser_info['userAgent'],
-                    "browser_sec_ch_ua": user_agent_data['brands'] if user_agent_data else None,
-                    "browser_sec_ch_ua_platform": f'"{user_agent_data["platform"]}"' if user_agent_data else None,
-                    "browser_sec_ch_ua_mobile": "?1" if user_agent_data and user_agent_data.get('mobile') else "?0"
-                }
-                logger.info(f"[CF Solver] 保存浏览器指纹: UA={fingerprint_config['browser_user_agent']}")
-                logger.info(f"[CF Solver] 保存Sec-Ch-Ua: {fingerprint_config['browser_sec_ch_ua']}")
-                logger.info(f"[CF Solver] 保存Platform: {fingerprint_config['browser_sec_ch_ua_platform']}")
+                # 保存集中配置的浏览器指纹
+                fingerprint_config = get_browser_fingerprint()
+                logger.info(f"[CF Solver] 使用固定指纹 - UA: {fingerprint_config['browser_user_agent']}")
+                logger.info(f"[CF Solver] Sec-Ch-Ua: {fingerprint_config['browser_sec_ch_ua']}")
+                logger.info(f"[CF Solver] Platform: {fingerprint_config['browser_sec_ch_ua_platform']}")
                 await setting.save(grok_config=fingerprint_config)
 
                 wait_before = setting.grok_config.get("cf_solver_wait_before", 10)
@@ -132,13 +100,20 @@ class TurnstileSolverManager:
                     await asyncio.sleep(wait_after)
 
                     cookies = await context.cookies()
+
+                    # 获取所有 Cloudflare 相关的 cookies
                     cf_clearance = next((c['value'] for c in cookies if c['name'] == 'cf_clearance'), None)
+                    cf_cookies = {c['name']: c['value'] for c in cookies if c['name'].startswith('cf_') or c['name'].startswith('__cf')}
+
+                    logger.info(f"[CF Solver] 获取到的 Cloudflare cookies: {list(cf_cookies.keys())}")
 
                     await browser.close()
 
                     if cf_clearance:
                         logger.info(f"[CF Solver] Success: cf_clearance={cf_clearance[:20]}...")
-                        return cf_clearance
+                        # 构建完整的 cookie 字符串
+                        cookie_string = "; ".join([f"{name}={value}" for name, value in cf_cookies.items()])
+                        return cookie_string
 
                     logger.error("[CF Solver] cf_clearance cookie not found")
                     return None

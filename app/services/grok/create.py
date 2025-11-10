@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 from curl_cffi.requests import AsyncSession
 
 from app.services.grok.statsig import get_dynamic_headers
+from app.services.grok.browser_config import CURL_IMPERSONATE
 from app.core.exception import GrokApiException
 from app.core.config import setting
 from app.core.logger import logger
@@ -12,7 +13,7 @@ from app.core.logger import logger
 # 常量定义
 CREATE_ENDPOINT = "https://grok.com/rest/media/post/create"
 REQUEST_TIMEOUT = 30
-IMPERSONATE_BROWSER = "chrome"
+IMPERSONATE_BROWSER = CURL_IMPERSONATE
 
 
 class PostCreateManager:
@@ -52,8 +53,8 @@ class PostCreateManager:
             }
 
             # 获取认证令牌和cookie
-            cf_clearance = setting.grok_config.get("cf_clearance", "")
-            cookie = f"{auth_token};{cf_clearance}" if cf_clearance else auth_token
+            cf_cookies = setting.grok_config.get("cf_clearance", "")
+            cookie = f"{auth_token}; {cf_cookies}" if cf_cookies else auth_token
             
             # 获取代理配置
             proxy_url = setting.grok_config.get("proxy_url", "")
