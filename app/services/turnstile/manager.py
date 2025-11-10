@@ -68,12 +68,16 @@ class TurnstileSolverManager:
                 
                 # 保存浏览器指纹信息
                 user_agent_data = browser_info.get('userAgentData')
-                await setting.save(grok_config={
+                fingerprint_config = {
                     "browser_user_agent": browser_info['userAgent'],
                     "browser_sec_ch_ua": user_agent_data['brands'] if user_agent_data else None,
                     "browser_sec_ch_ua_platform": f'"{user_agent_data["platform"]}"' if user_agent_data else None,
                     "browser_sec_ch_ua_mobile": "?1" if user_agent_data and user_agent_data.get('mobile') else "?0"
-                })
+                }
+                logger.info(f"[CF Solver] 保存浏览器指纹: UA={fingerprint_config['browser_user_agent']}")
+                logger.info(f"[CF Solver] 保存Sec-Ch-Ua: {fingerprint_config['browser_sec_ch_ua']}")
+                logger.info(f"[CF Solver] 保存Platform: {fingerprint_config['browser_sec_ch_ua_platform']}")
+                await setting.save(grok_config=fingerprint_config)
 
                 wait_before = setting.grok_config.get("cf_solver_wait_before", 10)
                 wait_after = setting.grok_config.get("cf_solver_wait_after", 0)

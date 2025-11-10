@@ -74,6 +74,7 @@ class PostCreateManager:
             logger.info(f"[PostCreate] cf_clearance: {cf_clearance[:30] if cf_clearance else 'None'}...")
             logger.info(f"[PostCreate] User-Agent: {headers.get('User-Agent', 'None')}")
             logger.info(f"[PostCreate] Sec-Ch-Ua: {headers.get('Sec-Ch-Ua', 'None')}")
+            logger.info(f"[PostCreate] Sec-Ch-Ua-Platform: {headers.get('Sec-Ch-Ua-Platform', 'None')}")
 
             async with AsyncSession() as session:
                 response = await session.post(

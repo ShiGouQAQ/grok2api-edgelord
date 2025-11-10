@@ -231,6 +231,8 @@ class GrokClient:
             logger.info(f"[Client] Cookie中的cf_clearance: {cf_clearance[:30] if cf_clearance else 'None'}...")
             logger.info(f"[Client] User-Agent: {headers.get('User-Agent', 'None')}")
             logger.info(f"[Client] Sec-Ch-Ua: {headers.get('Sec-Ch-Ua', 'None')}")
+            logger.info(f"[Client] Sec-Ch-Ua-Platform: {headers.get('Sec-Ch-Ua-Platform', 'None')}")
+            logger.info(f"[Client] Sec-Ch-Ua-Mobile: {headers.get('Sec-Ch-Ua-Mobile', 'None')}")
             logger.debug(f"[Client] 完整Cookie: {headers.get('Cookie', '')[:100]}...")
 
             # 在线程池中执行同步HTTP请求，避免阻塞事件循环
