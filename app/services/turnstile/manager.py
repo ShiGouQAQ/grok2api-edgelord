@@ -42,7 +42,8 @@ class TurnstileSolverManager:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
                     headless=headless,
-                    proxy=proxy_config
+                    proxy=proxy_config,
+                    channel="chrome"
                 )
                 logger.debug(f"[CF Solver] Browser launched (proxy={proxy_url or 'None'})")
                 
