@@ -81,10 +81,10 @@ def get_dynamic_headers(pathname: str = "/rest/app-chat/conversations/new") -> D
             raise ValueError("配置文件中未设置 x_statsig_id")
 
     # 获取浏览器指纹信息（由patchright求解时保存）
-    user_agent = setting.grok_config.get("browser_user_agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36")
-    sec_ch_ua = setting.grok_config.get("browser_sec_ch_ua", '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"')
+    user_agent = setting.grok_config.get("browser_user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
+    sec_ch_ua = setting.grok_config.get("browser_sec_ch_ua", '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"')
     sec_ch_ua_mobile = setting.grok_config.get("browser_sec_ch_ua_mobile", "?0")
-    sec_ch_ua_platform = setting.grok_config.get("browser_sec_ch_ua_platform", '"macOS"')
+    sec_ch_ua_platform = setting.grok_config.get("browser_sec_ch_ua_platform", '"Windows"')
 
     # 构建基础请求头
     headers = {

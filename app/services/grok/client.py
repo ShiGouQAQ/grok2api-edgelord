@@ -19,8 +19,14 @@ from app.core.exception import GrokApiException
 # 常量定义
 GROK_API_ENDPOINT = "https://grok.com/rest/app-chat/conversations/new"
 REQUEST_TIMEOUT = 120
-IMPERSONATE_BROWSER = "chrome133a"
+IMPERSONATE_BROWSER = "chrome"
 MAX_RETRY = 3  # 最大重试次数
+
+# Chrome Windows 指纹配置
+CHROME_FINGERPRINT = {
+    "ja3": "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,17613-51-10-35-65037-27-16-11-5-45-18-65281-0-13-43-23,4588-29-23-24,0",
+    "akamai": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"
+}
 
 
 from app.services.grok.cf_clearance import cf_clearance_manager
@@ -221,6 +227,8 @@ class GrokClient:
                 "headers": headers,
                 "data": json.dumps(payload),
                 "impersonate": IMPERSONATE_BROWSER,
+                "ja3": CHROME_FINGERPRINT["ja3"],
+                "akamai": CHROME_FINGERPRINT["akamai"],
                 "timeout": REQUEST_TIMEOUT,
                 "stream": True,
                 "proxies": proxies

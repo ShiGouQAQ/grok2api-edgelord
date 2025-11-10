@@ -61,7 +61,7 @@ class CacheService:
                     proxies=proxies,
                     timeout=timeout,
                     allow_redirects=True,
-                    impersonate="chrome133a"
+                    impersonate="chrome"
                 )
                 response.raise_for_status()
                 cache_path.write_bytes(response.content)

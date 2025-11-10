@@ -17,7 +17,7 @@ from app.services.grok.statsig import get_dynamic_headers
 # 常量定义
 RATE_LIMIT_ENDPOINT = "https://grok.com/rest/rate-limits"
 REQUEST_TIMEOUT = 30
-IMPERSONATE_BROWSER = "chrome133a"
+IMPERSONATE_BROWSER = "chrome"
 MAX_FAILURE_COUNT = 3
 TOKEN_INVALID_CODE = 401  # SSO Token失效
 STATSIG_INVALID_CODE = 403  # x-statsig-id失效

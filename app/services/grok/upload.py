@@ -15,7 +15,7 @@ from app.core.logger import logger
 # 常量定义
 UPLOAD_ENDPOINT = "https://grok.com/rest/app-chat/upload-file"
 REQUEST_TIMEOUT = 30
-IMPERSONATE_BROWSER = "chrome133a"
+IMPERSONATE_BROWSER = "chrome"
 DEFAULT_MIME_TYPE = "image/jpeg"
 DEFAULT_EXTENSION = "jpg"
 

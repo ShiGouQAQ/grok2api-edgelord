@@ -46,20 +46,42 @@ class TurnstileSolverManager:
                     channel="chrome"
                 )
                 logger.debug(f"[CF Solver] Browser launched (proxy={proxy_url or 'None'})")
-                
-                context = await browser.new_context()
+
+                # 使用 Windows 指纹创建上下文
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+                    viewport={"width": 1920, "height": 1080},
+                    extra_http_headers={
+                        "sec-ch-ua": '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+                        "sec-ch-ua-mobile": "?0",
+                        "sec-ch-ua-platform": '"Windows"'
+                    }
+                )
                 page = await context.new_page()
 
                 # 获取浏览器实际的User-Agent和Sec-Ch-Ua信息
-                browser_info = await page.evaluate("""() => ({
-                    userAgent: navigator.userAgent,
-                    platform: navigator.platform,
-                    userAgentData: navigator.userAgentData ? {
-                        platform: navigator.userAgentData.platform,
-                        mobile: navigator.userAgentData.mobile,
-                        brands: navigator.userAgentData.brands.map(b => `"${b.brand}";v="${b.version}"`).join(", ")
-                    } : null
-                })""")
+                browser_info = await page.evaluate("""async () => {
+                    const info = {
+                        userAgent: navigator.userAgent,
+                        platform: navigator.platform,
+                        userAgentData: null
+                    };
+
+                    if (navigator.userAgentData) {
+                        try {
+                            const highEntropyValues = await navigator.userAgentData.getHighEntropyValues(['platform', 'platformVersion', 'fullVersionList']);
+                            info.userAgentData = {
+                                platform: highEntropyValues.platform,
+                                mobile: navigator.userAgentData.mobile,
+                                brands: highEntropyValues.fullVersionList.map(b => `"${b.brand}";v="${b.version}"`).join(", ")
+                            };
+                        } catch (e) {
+                            console.error('Failed to get high entropy values:', e);
+                        }
+                    }
+
+                    return info;
+                }""")
                 
                 logger.info(f"[CF Solver] Browser User-Agent: {browser_info['userAgent']}")
                 if browser_info.get('userAgentData'):

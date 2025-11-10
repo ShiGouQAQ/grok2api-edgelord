@@ -12,7 +12,7 @@ from app.core.logger import logger
 # 常量定义
 CREATE_ENDPOINT = "https://grok.com/rest/media/post/create"
 REQUEST_TIMEOUT = 30
-IMPERSONATE_BROWSER = "chrome133a"
+IMPERSONATE_BROWSER = "chrome"
 
 
 class PostCreateManager:
