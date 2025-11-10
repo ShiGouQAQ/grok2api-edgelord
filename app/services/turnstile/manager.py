@@ -84,7 +84,7 @@ class TurnstileSolverManager:
                 checkbox_attempts = setting.grok_config.get("cf_solver_checkbox_attempts", 15)
 
                 async with ClickSolver(
-                    framework=FrameworkType.PLAYWRIGHT,
+                    framework=FrameworkType.PATCHRIGHT,
                     page=page,
                     max_attempts=max_attempts,
                     attempt_delay=attempt_delay

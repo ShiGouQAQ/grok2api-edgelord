@@ -80,13 +80,13 @@ class GrokClient:
                 
             except GrokApiException as e:
                 last_err = e
-                # 401/429 可重试，其他错误直接抛出
+                # 401/403/429 可重试，其他错误直接抛出
                 if e.error_code not in ["HTTP_ERROR", "NO_AVAILABLE_TOKEN"]:
                     raise
                 
                 # 检查是否为可重试的状态码
                 status = e.context.get("status") if e.context else None
-                if status not in [401, 429]:
+                if status not in [401, 403, 429]:
                     raise
                 
                 if i < MAX_RETRY - 1:
@@ -225,6 +225,11 @@ class GrokClient:
                 "stream": True,
                 "proxies": proxies
             }
+
+            # 日志输出关键信息
+            cf_clearance = setting.grok_config.get("cf_clearance", "")
+            logger.info(f"[Client] Cookie中的cf_clearance: {cf_clearance[:30] if cf_clearance else 'None'}...")
+            logger.debug(f"[Client] 完整Cookie: {headers.get('Cookie', '')[:100]}...")
 
             # 在线程池中执行同步HTTP请求，避免阻塞事件循环
             response = await asyncio.to_thread(
