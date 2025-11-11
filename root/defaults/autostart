@@ -1,0 +1,4 @@
+#!/bin/bash
+# Disable Chrome autostart to reduce resource usage
+# Original autostart from linuxserver/chrome is overridden
+exit 0
