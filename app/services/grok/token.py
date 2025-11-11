@@ -296,7 +296,7 @@ class GrokTokenManager:
             proxy_url = setting.grok_config.get("proxy_url", "")
             proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
 
-            logger.info(f"[Token] cf_clearance: {cf_clearance[:30] if cf_clearance else 'None'}...")
+            logger.info(f"[Token] cf_clearance: {cf_cookies[:30] if cf_cookies else 'None'}...")
             logger.info(f"[Token] User-Agent: {headers.get('User-Agent', 'None')}")
             logger.info(f"[Token] Sec-Ch-Ua: {headers.get('Sec-Ch-Ua', 'None')}")
             logger.info(f"[Token] Sec-Ch-Ua-Platform: {headers.get('Sec-Ch-Ua-Platform', 'None')}")

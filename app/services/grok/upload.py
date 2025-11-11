@@ -72,7 +72,7 @@ class ImageUploadManager:
                 "Cookie": cookie,
             }
 
-            logger.info(f"[Upload] cf_clearance: {cf_clearance[:30] if cf_clearance else 'None'}...")
+            logger.info(f"[Upload] cf_clearance: {cf_cookies[:30] if cf_cookies else 'None'}...")
             logger.info(f"[Upload] User-Agent: {headers.get('User-Agent', 'None')}")
             logger.info(f"[Upload] Sec-Ch-Ua: {headers.get('Sec-Ch-Ua', 'None')}")
             logger.info(f"[Upload] Sec-Ch-Ua-Platform: {headers.get('Sec-Ch-Ua-Platform', 'None')}")

@@ -72,7 +72,7 @@ class PostCreateManager:
                 "Cookie": cookie,
             }
 
-            logger.info(f"[PostCreate] cf_clearance: {cf_clearance[:30] if cf_clearance else 'None'}...")
+            logger.info(f"[PostCreate] cf_clearance: {cf_cookies[:30] if cf_cookies else 'None'}...")
             logger.info(f"[PostCreate] User-Agent: {headers.get('User-Agent', 'None')}")
             logger.info(f"[PostCreate] Sec-Ch-Ua: {headers.get('Sec-Ch-Ua', 'None')}")
             logger.info(f"[PostCreate] Sec-Ch-Ua-Platform: {headers.get('Sec-Ch-Ua-Platform', 'None')}")
