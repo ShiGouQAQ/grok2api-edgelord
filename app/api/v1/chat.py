@@ -5,7 +5,7 @@
 提供OpenAI兼容的聊天API接口，支持与Grok模型的交互。
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import Optional
 from fastapi.responses import StreamingResponse
 
@@ -21,7 +21,8 @@ router = APIRouter(prefix="/chat", tags=["聊天"])
 
 @router.post("/completions", response_model=None)
 async def chat_completions(
-    request: OpenAIChatRequest,
+    chat_request: OpenAIChatRequest,
+    raw_request: Request,
     _: Optional[str] = Depends(auth_manager.verify)
 ):
     """
@@ -30,7 +31,8 @@ async def chat_completions(
     兼容OpenAI聊天API的端点，支持流式和非流式响应。
 
     Args:
-        request: OpenAI格式的聊天请求
+        chat_request: OpenAI格式的聊天请求
+        raw_request: FastAPI Request对象，用于检测客户端断开
         _: 认证依赖（自动验证）
 
     Returns:
@@ -44,10 +46,10 @@ async def chat_completions(
         logger.info(f"[Chat] 收到聊天请求")
 
         # 调用Grok客户端处理请求
-        result = await GrokClient.openai_to_grok(request.model_dump())
-        
+        result = await GrokClient.openai_to_grok(chat_request.model_dump(), raw_request if chat_request.stream else None)
+
         # 如果是流式响应，GrokClient已经返回了Iterator，直接包装为StreamingResponse
-        if request.stream:
+        if chat_request.stream:
             return StreamingResponse(
                 content=result,
                 media_type="text/event-stream",
@@ -57,7 +59,7 @@ async def chat_completions(
                     "X-Accel-Buffering": "no"
                 }
             )
-        
+
         # 非流式响应直接返回
         return result
         

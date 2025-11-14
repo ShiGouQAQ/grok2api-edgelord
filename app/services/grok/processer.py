@@ -220,7 +220,7 @@ class GrokResponseProcessor:
                     logger.warning(f"[Processor] 关闭响应对象时出错: {e}")
 
     @staticmethod
-    async def process_stream(response, auth_token: str) -> AsyncGenerator[str, None]:
+    async def process_stream(response, auth_token: str, raw_request=None) -> AsyncGenerator[str, None]:
         """处理流式响应"""
         # 流式生成状态
         is_image = False
@@ -259,8 +259,22 @@ class GrokResponseProcessor:
             # SSE 格式返回
             return f"data: {json.dumps(chunk_data)}\n\n"
 
+        async def is_client_disconnected():
+            """检测客户端是否断开连接"""
+            if raw_request is None:
+                return False
+            try:
+                return await raw_request.is_disconnected()
+            except Exception:
+                return False
+
         try:
             for chunk in response.iter_lines():
+                # 客户端断开检测
+                if await is_client_disconnected():
+                    logger.info("[Processor] 客户端已断开连接，停止流式处理")
+                    return
+
                 # 超时检查
                 is_timeout, timeout_msg = timeout_manager.check_timeout()
                 if is_timeout:
@@ -324,9 +338,14 @@ class GrokResponseProcessor:
                         
                         # 处理视频URL
                         if v_url:
+                            # 客户端断开检测
+                            if await is_client_disconnected():
+                                logger.info("[Processor] 客户端已断开，跳过视频下载")
+                                return
+
                             logger.debug(f"[Processor] 视频生成完成")
                             full_video_url = f"https://assets.grok.com/{v_url}"
-                            
+
                             try:
                                 cache_path = await video_cache_service.download_video(f"/{v_url}", auth_token)
                                 if cache_path:
@@ -339,7 +358,7 @@ class GrokResponseProcessor:
                             except Exception as e:
                                 logger.warning(f"[Processor] 缓存视频失败: {e}")
                                 video_content = f'<video src="{full_video_url}" controls="controls"></video>\n'
-                            
+
                             yield make_chunk(video_content)
                             chunk_index += 1
                         
@@ -363,6 +382,11 @@ class GrokResponseProcessor:
 
                             # 生成图片链接并缓存
                             for img in model_resp.get("generatedImageUrls", []):
+                                # 客户端断开检测
+                                if await is_client_disconnected():
+                                    logger.info("[Processor] 客户端已断开，跳过图片下载")
+                                    return
+
                                 try:
                                     if image_mode == "base64":
                                         # base64 模式：下载并转换为 base64
@@ -386,6 +410,11 @@ class GrokResponseProcessor:
                                                     # 分块发送 base64 数据
                                                     chunk_size = 8192
                                                     for i in range(0, len(b64_data), chunk_size):
+                                                        # 客户端断开检测
+                                                        if await is_client_disconnected():
+                                                            logger.info("[Processor] 客户端已断开，停止发送base64数据")
+                                                            return
+
                                                         chunk_data = b64_data[i:i + chunk_size]
                                                         yield make_chunk(chunk_data)
                                                         chunk_index += 1

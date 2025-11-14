@@ -30,7 +30,7 @@ class GrokClient:
     """Grok API 客户端"""
 
     @staticmethod
-    async def openai_to_grok(openai_request: dict):
+    async def openai_to_grok(openai_request: dict, raw_request=None):
         """转换OpenAI请求为Grok请求并处理响应"""
         model = openai_request["model"]
         messages = openai_request["messages"]
@@ -48,10 +48,10 @@ class GrokClient:
                 image_urls = image_urls[:1]
 
         # 重试逻辑
-        return await GrokClient._try(model, content, image_urls, model_name, model_mode, is_video_model, stream)
+        return await GrokClient._try(model, content, image_urls, model_name, model_mode, is_video_model, stream, raw_request)
 
     @staticmethod
-    async def _try(model: str, content: str, image_urls: List[str], model_name: str, model_mode: str, is_video: bool, stream: bool):
+    async def _try(model: str, content: str, image_urls: List[str], model_name: str, model_mode: str, is_video: bool, stream: bool, raw_request=None):
         """带重试的请求执行"""
         last_err = None
         
@@ -77,7 +77,7 @@ class GrokClient:
                 
                 # 构建并发送请求
                 payload = GrokClient._build_payload(content, model_name, model_mode, imgs, uris, is_video, post_id)
-                return await GrokClient._send_request(payload, auth_token, model, stream, post_id)
+                return await GrokClient._send_request(payload, auth_token, model, stream, post_id, raw_request)
                 
             except GrokApiException as e:
                 last_err = e
@@ -193,7 +193,7 @@ class GrokClient:
         return payload
 
     @staticmethod
-    async def _send_request(payload: dict, auth_token: str, model: str, stream: bool, post_id: str = None):
+    async def _send_request(payload: dict, auth_token: str, model: str, stream: bool, post_id: str = None, raw_request=None):
         """发送HTTP请求到Grok API"""
         # 验证认证令牌
         if not auth_token:
@@ -255,7 +255,7 @@ class GrokClient:
             asyncio.create_task(token_manager.reset_failure(auth_token))
 
             # 处理并返回响应
-            return await GrokClient._process_response(response, auth_token, model, stream)
+            return await GrokClient._process_response(response, auth_token, model, stream, raw_request)
 
         except curl_requests.RequestsError as e:
             error_msg = str(e)
@@ -319,10 +319,10 @@ class GrokClient:
         )
 
     @staticmethod
-    async def _process_response(response, auth_token: str, model: str, stream: bool):
+    async def _process_response(response, auth_token: str, model: str, stream: bool, raw_request=None):
         """处理API响应"""
         if stream:
-            result = GrokResponseProcessor.process_stream(response, auth_token)
+            result = GrokResponseProcessor.process_stream(response, auth_token, raw_request)
             asyncio.create_task(GrokClient._update_rate_limits(auth_token, model))
         else:
             result = await GrokResponseProcessor.process_normal(response, auth_token, model)
