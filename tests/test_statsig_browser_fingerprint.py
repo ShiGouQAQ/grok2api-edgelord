@@ -37,10 +37,10 @@ class TestStatsigBrowserFingerprint:
             headers = get_dynamic_headers()
 
             assert 'Mozilla/5.0' in headers['User-Agent']
-            assert 'Chrome/133.0.0.0' in headers['User-Agent']
+            assert 'Chrome/142.0.0.0' in headers['User-Agent']
             assert 'Sec-Ch-Ua' in headers
             assert headers['Sec-Ch-Ua-Mobile'] == '?0'
-            assert headers['Sec-Ch-Ua-Platform'] == '"macOS"'
+            assert headers['Sec-Ch-Ua-Platform'] == '"Windows"'
 
     def test_get_dynamic_headers_with_dynamic_statsig(self):
         """Test headers with dynamic statsig generation"""

@@ -58,7 +58,7 @@ class TestBrowserFingerprintIntegration:
                     manager = TurnstileSolverManager()
                     result = await manager.solve_cloudflare("https://grok.com")
 
-                    assert result == 'test_clearance'
+                    assert result == 'cf_clearance=test_clearance'
                     assert 'browser_user_agent' in saved_config
                     assert 'browser_sec_ch_ua' in saved_config
                     assert 'browser_sec_ch_ua_platform' in saved_config
@@ -155,7 +155,8 @@ class TestBrowserFingerprintIntegration:
                     manager = TurnstileSolverManager()
                     result = await manager.solve_cloudflare("https://grok.com")
 
-                    assert result == 'test_clearance'
-                    assert saved_config['browser_user_agent'] == 'Mozilla/5.0 Test'
-                    assert saved_config['browser_sec_ch_ua'] is None
-                    assert saved_config['browser_sec_ch_ua_platform'] is None
+                    assert result == 'cf_clearance=test_clearance'
+                    # 现在使用固定的浏览器指纹配置，而不是从浏览器动态获取
+                    assert saved_config['browser_user_agent'] == 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
+                    assert saved_config['browser_sec_ch_ua'] == '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"'
+                    assert saved_config['browser_sec_ch_ua_platform'] == '"Windows"'
