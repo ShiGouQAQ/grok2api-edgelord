@@ -78,7 +78,7 @@ services:
       # - DATABASE_URL=mysql://user:password@host:3306/grok2api
 
       ## MySQL格式: mysql://user:password@host:port/database
-      ## Redis格式: redis://host:port/db 或 redis://user:password@host:port/db
+      ## Redis格式: redis://host:port/db 或 redis://user:password@host:port/db (SSL: rediss://)
 
 volumes:
   grok_data:
@@ -143,12 +143,14 @@ volumes:
 
 | 模型名称               | 计次   | 账户类型      | 图像生成/编辑 | 深度思考 | 联网搜索 | 视频生成 |
 |------------------------|--------|--------------|--------------|----------|----------|----------|
-| `grok-3-fast`          | 1      | Basic/Super  | ✅           | ❌       | ✅       | ❌       |
+| `grok-4.1`             | 1      | Basic/Super  | ✅           | ✅       | ✅       | ❌       |
+| `grok-4.1-thinking`    | 1      | Basic/Super  | ✅           | ✅       | ✅       | ❌       |
+| `grok-imagine-0.9`     | -      | Basic/Super  | ✅           | ❌       | ❌       | ✅       |
 | `grok-4-fast`          | 1      | Basic/Super  | ✅           | ✅       | ✅       | ❌       |
 | `grok-4-fast-expert`   | 4      | Basic/Super  | ✅           | ✅       | ✅       | ❌       |
 | `grok-4-expert`        | 4      | Basic/Super  | ✅           | ✅       | ✅       | ❌       |
 | `grok-4-heavy`         | 1      | Super        | ✅           | ✅       | ✅       | ❌       |
-| `grok-imagine-0.9`     | -      | Basic/Super  | ✅           | ❌       | ❌       | ✅       |
+| `grok-3-fast`          | 1      | Basic/Super  | ✅           | ❌       | ✅       | ❌       |
 
 <br>
 
