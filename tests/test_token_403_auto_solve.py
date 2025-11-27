@@ -65,3 +65,75 @@ async def test_record_failure_401_no_auto_solve(token_manager):
 
         # 验证没有调用自动求解
         mock_cf_manager.ensure_valid_clearance.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_record_failure_with_empty_token():
+    """测试空token不会导致崩溃"""
+    mgr = GrokTokenManager.__new__(GrokTokenManager)
+    mgr.token_data = {"ssoNormal": {}, "ssoSuper": {}}
+    
+    with patch.object(mgr, '_save_data', new_callable=AsyncMock):
+        await mgr.record_failure("", 401, "Empty token")
+        await mgr.record_failure("invalid", 401, "Invalid format")
+        assert True
+
+
+@pytest.mark.asyncio
+async def test_record_failure_with_malformed_token():
+    """测试格式错误的token"""
+    mgr = GrokTokenManager.__new__(GrokTokenManager)
+    mgr.token_data = {"ssoNormal": {}, "ssoSuper": {}}
+    
+    with patch.object(mgr, '_save_data', new_callable=AsyncMock):
+        await mgr.record_failure("no-sso-field", 401, "Malformed")
+        await mgr.record_failure("sso-rw=only", 401, "Missing sso")
+        assert True
+
+
+@pytest.mark.asyncio
+async def test_record_failure_increments_count():
+    """测试失败计数递增"""
+    mgr = GrokTokenManager.__new__(GrokTokenManager)
+    mgr.token_data = {"ssoNormal": {"test_sso": {"status": "active", "failedCount": 0}}, "ssoSuper": {}}
+    
+    with patch.object(mgr, '_save_data', new_callable=AsyncMock):
+        await mgr.record_failure("sso-rw=xxx;sso=test_sso", 401, "Error 1")
+        assert mgr.token_data["ssoNormal"]["test_sso"]["failedCount"] == 1
+        
+        await mgr.record_failure("sso-rw=xxx;sso=test_sso", 401, "Error 2")
+        assert mgr.token_data["ssoNormal"]["test_sso"]["failedCount"] == 2
+
+
+@pytest.mark.asyncio
+async def test_record_failure_marks_expired_after_max_failures():
+    """测试达到最大失败次数后标记为过期"""
+    mgr = GrokTokenManager.__new__(GrokTokenManager)
+    mgr.token_data = {"ssoNormal": {"test_sso": {"status": "active", "failedCount": 2}}, "ssoSuper": {}}
+    
+    with patch.object(mgr, '_save_data', new_callable=AsyncMock):
+        await mgr.record_failure("sso-rw=xxx;sso=test_sso", 401, "Final error")
+        assert mgr.token_data["ssoNormal"]["test_sso"]["status"] == "expired"
+        assert mgr.token_data["ssoNormal"]["test_sso"]["failedCount"] == 3
+
+
+@pytest.mark.asyncio
+async def test_record_failure_403_does_not_mark_expired():
+    """测试403错误不会标记token为过期"""
+    mgr = GrokTokenManager.__new__(GrokTokenManager)
+    mgr.token_data = {"ssoNormal": {"test_sso": {"status": "active", "failedCount": 0}}, "ssoSuper": {}}
+    
+    with patch.object(mgr, '_auto_solve_cf_clearance', new_callable=AsyncMock):
+        await mgr.record_failure("sso-rw=xxx;sso=test_sso", 403, "CF blocked")
+        assert mgr.token_data["ssoNormal"]["test_sso"]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_record_failure_nonexistent_token():
+    """测试记录不存在的token失败"""
+    mgr = GrokTokenManager.__new__(GrokTokenManager)
+    mgr.token_data = {"ssoNormal": {}, "ssoSuper": {}}
+    
+    with patch.object(mgr, '_save_data', new_callable=AsyncMock):
+        await mgr.record_failure("sso-rw=xxx;sso=nonexistent", 401, "Not found")
+        assert True

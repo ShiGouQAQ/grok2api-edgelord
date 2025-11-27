@@ -295,8 +295,37 @@ class GrokClient:
     @staticmethod
     async def _handle_error(response, auth_token: str):
         """处理错误响应"""
-        # 处理 403 错误
+        # 处理 403 错误 - 区分Token失效和CF盾
         if response.status_code == 403:
+            try:
+                error_data = response.json()
+                error_text = response.text.lower()
+                
+                # 检查是否为Token失效（JSON响应且包含unauthorized/blocked/invalid/expired关键词）
+                if isinstance(error_data, dict) and any(keyword in error_text for keyword in ["unauthorized", "blocked", "invalid", "expired"]):
+                    # 提取错误信息
+                    if "error" in error_data:
+                        if isinstance(error_data["error"], dict):
+                            error_message = error_data["error"].get("message", str(error_data))
+                        else:
+                            error_message = str(error_data["error"])
+                    else:
+                        error_message = str(error_data)
+                    
+                    logger.warning(f"[Client] Token失效或被封禁: {error_message}")
+                    # 记录为401错误，让token管理器标记为失效
+                    await token_manager.record_failure(auth_token, 401, f"Token blocked/invalid: {error_message}")
+                    raise GrokApiException(
+                        f"Token失效: {error_message}",
+                        "HTTP_ERROR",
+                        {"status": 403, "data": error_data}
+                    )
+            except GrokApiException:
+                raise
+            except Exception:
+                pass
+            
+            # CF盾拦截（HTML响应或无法解析为JSON）
             error_message = "服务器IP被Block，请尝试 1. 更换服务器IP 2. 使用代理IP 3. 服务器登陆Grok.com，过盾后F12找到CF值填入后台设置"
             error_data = {"cf_blocked": True, "status": 403}
             logger.warning(f"[Client] {error_message}")
