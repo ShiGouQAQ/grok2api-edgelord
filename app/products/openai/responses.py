@@ -255,7 +255,24 @@ async def create(
     timeout_s    = cfg.get_float("chat.timeout", 120.0)
 
     # -------------------------------------------------------------------------
-    # Streaming
+    # Console 模型路由 — 走 console.x.ai/v1/responses，输出转为 Responses API 格式
+    # -------------------------------------------------------------------------
+    if spec.is_console_chat():
+        from .console_responses import create as console_responses_create
+        return await console_responses_create(
+            model=model,
+            messages=messages,
+            stream=stream,
+            emit_think=emit_think,
+            temperature=temperature,
+            top_p=top_p,
+            response_id=response_id,
+            reasoning_id=reasoning_id,
+            message_id=message_id,
+        )
+
+    # -------------------------------------------------------------------------
+    # Streaming (grok.com path)
     # -------------------------------------------------------------------------
     async def _run_stream() -> AsyncGenerator[str, None]:
         excluded: list[str] = []
@@ -292,6 +309,7 @@ async def create(
                     })
 
                     ended = False
+                    yield ": heartbeat\n\n"
                     async for line in _stream_chat(
                         token     = token,
                         mode_id   = ModeId(selected_mode_id),
