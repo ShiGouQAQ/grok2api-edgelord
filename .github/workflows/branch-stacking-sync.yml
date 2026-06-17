@@ -1,0 +1,38 @@
+name: Branch Stacking Auto Sync
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 每天凌晨 4 点（UTC）
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout L1 (main)
+        uses: actions/checkout@v3
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Sync from upstream
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+
+          git remote add upstream ${UPSTREAM_URL}
+          git fetch upstream
+          git reset --hard upstream/main
+          git push origin main --force
+
+      - name: Create cascade sync PR
+        run: |
+          # 创建 PR 提示用户手动级联 rebase
+          gh pr create \
+            --title "[Auto] Upstream Sync Ready" \
+            --body "上游已同步到 main，请手动执行级联 rebase：\n\n```bash\nsh .agents/skills/branch-stacking-maintenance/scripts/bsm.sh cascade-sync\n```" \
+            --base feat/mixin-fixes \
+            --head main || true  # 如果 PR 已存在则忽略
+
+env:
+  UPSTREAM_URL: ${UPSTREAM_URL}
+  GITHUB_TOKEN: ${GITHUB_TOKEN}

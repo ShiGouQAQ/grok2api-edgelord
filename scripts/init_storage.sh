@@ -12,4 +12,4 @@ if [ ! -f "$DATA_DIR/config.toml" ]; then
   cp "$DEFAULT_CONFIG" "$DATA_DIR/config.toml"
 fi
 
-chmod 600 "$DATA_DIR/config.toml" || true
+chown -R abc:abc "$DATA_DIR" "$LOG_DIR"

@@ -1,0 +1,4 @@
+#!/usr/bin/with-contenv bash
+
+cd /app || exit 1
+exec s6-setuidgid abc granian --interface asgi --host ${SERVER_HOST:-0.0.0.0} --port ${SERVER_PORT:-8000} --workers ${SERVER_WORKERS:-1} app.main:app

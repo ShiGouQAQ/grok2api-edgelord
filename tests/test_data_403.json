@@ -1,0 +1,32 @@
+{
+  "cf_challenge": {
+    "status": 403,
+    "body": "<!DOCTYPE html>\n<html lang=\"en-US\">\n<head>\n    <title>Just a moment...</title>\n    <meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\">\n    <meta http-equiv=\"X-UA-Compatible\" content=\"IE=Edge\">\n    <meta name=\"robots\" content=\"noindex,nofollow\">\n    <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n    <link rel=\"stylesheet\" href=\"/cdn-cgi/styles/challenges.css\">\n</head>\n<body>\n    <div id=\"challenge-running\">\n        <div id=\"cf-please-wait\">\n            <div id=\"spinner\">\n                <div id=\"cf-bubbles\">\n                    <div class=\"b\"></div>\n                    <div class=\"b\"></div>\n                    <div class=\"b\"></div>\n                </div>\n            </div>\n            <h2>Please wait...</h2>\n        </div>\n    </div>\n    <script>\n        (function(){\n            window._cf_chl_opt={\n                cvId: '2',\n                cZone: 'console.x.ai',\n                cType: 'managed',\n                cNounce: '1234567890',\n                cRay: 'a088b45049fb84a9',\n                cHash: 'abc123',\n                cUPMDTk: 'abc123',\n                cFPWv: 'b',\n                cTTimeMs: '1000',\n                cRq: {\n                    ru: 'aHR0cHM6Ly9jb25zb2xlLnhhaS92MS9yZXNwb25zZXM=',\n                    ra: 'abc123',\n                    rm: 'POST',\n                    d: 'abc123',\n                    t: 'MTc4MDkzMDE3OC42MDk0Nzk=',\n                    m: 'abc123',\n                    i1: 'abc123',\n                    i2: 'abc123',\n                    ih: 'abc123',\n                    u: 'abc123',\n                    ch: 'abc123',\n                },\n                cFPWv: 'b',\n            };\n        })();\n    </script>\n    <script src=\"/cdn-cgi/ch-platform/cf-turnstile-v2.js\" async defer></script>\n</body>\n</html>",
+    "expected": "challenge",
+    "description": "CF 挑战页面（HTML 格式）"
+  },
+  "account_blocked": {
+    "status": 403,
+    "body": "{\"code\":\"The caller does not have permission to execute the specified operation\",\"error\":\"User is blocked [WKE=unauthorized:blocked-user]\"}",
+    "expected": "forbidden",
+    "description": "账号封禁（JSON 格式）"
+  },
+  "session_expired": {
+    "status": 403,
+    "body": "{\"code\":\"The caller does not have permission to execute the specified operation\",\"error\":\"Session expired by TTL. [WKE=unauthorized:session-expired]\"}",
+    "expected": "forbidden",
+    "description": "会话过期（JSON 格式）"
+  },
+  "unknown_403": {
+    "status": 403,
+    "body": "{\"error\":\"Unknown error\"}",
+    "expected": "forbidden",
+    "description": "未知 403 错误"
+  },
+  "empty_response": {
+    "status": 403,
+    "body": "",
+    "expected": "forbidden",
+    "description": "空响应"
+  }
+}

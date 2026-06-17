@@ -14,6 +14,11 @@ from urllib.parse import urlparse
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
+from app.platform.config.browser import (
+    BROWSER_SEC_CH_UA,
+    BROWSER_SEC_CH_UA_MOBILE,
+    BROWSER_SEC_CH_UA_PLATFORM,
+)
 from app.control.proxy.models import ProxyLease
 from app.dataplane.proxy.adapters.profile import ProxyProfile, resolve_proxy_profile
 
@@ -65,14 +70,27 @@ def _sanitize(value: Optional[str], *, field: str, strip_spaces: bool = False) -
 
 
 def _statsig_id() -> str:
+    """Generate a Statsig evaluation fallback ID.
+
+    The real browser's fetch interceptor tries to evaluate Statsig gates for
+    each request.  When the Statsig SDK is not yet initialised (headless,
+    first paint, etc.) it catches the error and falls back to::
+
+        btoa("x1:" + error.toString())
+
+    The server accepts this fallback.  We reproduce the exact format with
+    varied error messages to avoid a static fingerprint.
+    """
     cfg = get_config()
     if cfg.get_bool("features.dynamic_statsig", False):
         if random.choice((True, False)):
             rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=5))
-            msg = f"x1:TypeError: Cannot read properties of null (reading 'children['{rand}']')"
+            msg = f"x1:TypeError: Cannot read properties of null (reading 'children[\\'{rand}\\']')"
         else:
             rand = "".join(random.choices(string.ascii_lowercase, k=10))
-            msg = f"x1:TypeError: Cannot read properties of undefined (reading '{rand}')"
+            msg = (
+                f"x1:TypeError: Cannot read properties of undefined (reading '{rand}')"
+            )
         return base64.b64encode(msg.encode()).decode()
     return (
         "ZTpUeXBlRXJyb3I6IENhbm5vdCByZWFkIHByb3BlcnRpZXMgb2YgdW5kZWZpbmVkIChyZWFkaW5nICdjaGls"
@@ -118,6 +136,11 @@ def _arch(ua: str) -> Optional[str]:
 
 
 def _client_hints(browser: Optional[str], ua: Optional[str]) -> dict[str, str]:
+    """Build Sec-CH-UA client hints headers.
+
+    Uses centralized browser config constants for consistent fingerprinting.
+    Returns empty dict for non-chromium browsers.
+    """
     b = (browser or "").lower()
     u = (ua or "").lower()
     is_chromium = any(k in b for k in ("chrome", "chromium", "edge", "brave")) or any(
@@ -125,34 +148,13 @@ def _client_hints(browser: Optional[str], ua: Optional[str]) -> dict[str, str]:
     )
     if not is_chromium or "firefox" in u or ("safari" in u and "chrome" not in u):
         return {}
-    ver = _major_version(browser, ua)
-    if not ver:
-        return {}
-    if "edge" in b or "edg" in u:
-        brand = "Microsoft Edge"
-    elif "brave" in b:
-        brand = "Brave"
-    elif "chromium" in b:
-        brand = "Chromium"
-    else:
-        brand = "Google Chrome"
 
-    sec_ch_ua = f'"{brand}";v="{ver}", "Chromium";v="{ver}", "Not(A:Brand";v="24"'
-    plat = _platform(ua or "")
-    arch = _arch(ua or "")
-    mobile = "?1" if ("mobile" in u or plat in ("Android", "iOS")) else "?0"
-
-    hints: dict[str, str] = {
-        "Sec-Ch-Ua": sec_ch_ua,
-        "Sec-Ch-Ua-Mobile": mobile,
+    return {
+        "Sec-Ch-Ua": BROWSER_SEC_CH_UA,
+        "Sec-Ch-Ua-Mobile": BROWSER_SEC_CH_UA_MOBILE,
+        "Sec-Ch-Ua-Platform": BROWSER_SEC_CH_UA_PLATFORM,
         "Sec-Ch-Ua-Model": "",
     }
-    if plat:
-        hints["Sec-Ch-Ua-Platform"] = f'"{plat}"'
-    if arch:
-        hints["Sec-Ch-Ua-Arch"] = arch
-        hints["Sec-Ch-Ua-Bitness"] = "64"
-    return hints
 
 
 # ---------------------------------------------------------------------------
@@ -327,11 +329,26 @@ def build_console_headers(
     # 复用现有 clearance profile（cf_clearance / user_agent）
     profile = _resolve_profile(lease)
     ua = _sanitize(profile.user_agent, field="user_agent")
-    cf_clearance = _sanitize(profile.cf_clearance, field="cf_clearance", strip_spaces=True)
+    cf_clearance = _sanitize(
+        profile.cf_clearance, field="cf_clearance", strip_spaces=True
+    )
 
     cookie = f"sso={tok}; sso-rw={tok}"
-    if cf_clearance:
-        cookie += f"; cf_clearance={cf_clearance}"
+    eff_cookies = _sanitize(profile.cf_cookies, field="cf_cookies")
+    if cf_clearance and eff_cookies:
+        if re.search(r"(?:^|;\s*)cf_clearance=", eff_cookies):
+            eff_cookies = re.sub(
+                r"(^|;\s*)cf_clearance=[^;]*",
+                r"\1cf_clearance=" + cf_clearance,
+                eff_cookies,
+                count=1,
+            )
+        else:
+            eff_cookies = f"{eff_cookies.rstrip('; ')}; cf_clearance={cf_clearance}"
+    elif cf_clearance:
+        eff_cookies = f"cf_clearance={cf_clearance}"
+    if eff_cookies:
+        cookie += f"; {eff_cookies}"
 
     headers: dict[str, str] = {
         "Accept": "*/*",
@@ -346,7 +363,8 @@ def build_console_headers(
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Site": "same-origin",
-        "User-Agent": ua or (
+        "User-Agent": ua
+        or (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/136.0.0.0 Safari/537.36"
@@ -357,4 +375,9 @@ def build_console_headers(
     return headers
 
 
-__all__ = ["build_http_headers", "build_sso_cookie", "build_ws_headers", "build_console_headers"]
+__all__ = [
+    "build_http_headers",
+    "build_sso_cookie",
+    "build_ws_headers",
+    "build_console_headers",
+]

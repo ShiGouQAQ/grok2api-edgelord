@@ -42,21 +42,30 @@ async def root():
 async def admin_root():
     return RedirectResponse("/admin/login")
 
+
 @router.get("/admin/login", include_in_schema=False)
 async def admin_login():
     return _serve_html("admin/login.html")
+
 
 @router.get("/admin/account", include_in_schema=False)
 async def admin_account():
     return _serve_html("admin/account.html")
 
+
 @router.get("/admin/config", include_in_schema=False)
 async def admin_config():
     return _serve_html("admin/config.html")
 
+
 @router.get("/admin/cache", include_in_schema=False)
 async def admin_cache():
     return _serve_html("admin/cache.html")
+
+
+@router.get("/admin/cf-clearance", include_in_schema=False)
+async def admin_cf_clearance():
+    return _serve_html("admin/cf-clearance.html")
 
 
 # --- WebUI ---
@@ -64,13 +73,19 @@ async def admin_cache():
 async def webui_root():
     return RedirectResponse("/webui/login")
 
+
 @router.get("/webui/login", include_in_schema=False)
 async def webui_login():
     if not is_webui_enabled():
         raise HTTPException(404, "Not Found")
     return _serve_html("webui/login.html")
 
-@router.get("/webui/api/verify", dependencies=[Depends(verify_webui_key)], tags=["WebUI - System"])
+
+@router.get(
+    "/webui/api/verify",
+    dependencies=[Depends(verify_webui_key)],
+    tags=["WebUI - System"],
+)
 async def webui_verify():
     return {"status": "ok"}
 

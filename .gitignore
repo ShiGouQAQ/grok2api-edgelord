@@ -53,3 +53,11 @@ htmlcov/
 
 # Project specific
 .ace-tool/
+
+# AI Development Tools
+.serena/
+.claude/
+.cursor/
+.opencode/
+*.tar.gz
+token.json

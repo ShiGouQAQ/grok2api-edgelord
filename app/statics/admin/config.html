@@ -547,6 +547,7 @@ const SCHEMA_DEF = [
               { value: 'direct', label: '直连', labelKey: 'config.schema.options.proxyMode.direct' },
               { value: 'single_proxy', label: '代理（固定）', labelKey: 'config.schema.options.proxyMode.singleProxy' },
               { value: 'proxy_pool', label: '代理（轮转）', labelKey: 'config.schema.options.proxyMode.proxyPool' },
+              { value: 'mihomo', label: 'Mihomo 代理管理', labelKey: 'config.schema.options.proxyMode.mihomo' },
             ],
             desc: '控制出站流量代理策略。direct 为直连；single_proxy 使用固定代理；proxy_pool 在代理池中轮转。',
             descKey: 'config.schema.fields.proxyMode.desc',
@@ -557,9 +558,9 @@ const SCHEMA_DEF = [
             labelKey: 'config.schema.fields.proxyUrl.label',
             type: 'text',
             wide: true,
-            desc: 'API 流量的出站代理地址，支持 http、https、socks5 协议。',
+            desc: 'API 流量的出站代理地址，支持 http、https、socks5 协议。Mihomo 模式下填写本地监听地址（如 socks5://127.0.0.1:10801）。',
             descKey: 'config.schema.fields.proxyUrl.desc',
-            showIf: { path: 'proxy.egress.mode', values: ['single_proxy'] },
+            showIf: { path: 'proxy.egress.mode', values: ['single_proxy', 'mihomo'] },
           },
           {
             key: 'resource_proxy_url',
@@ -569,7 +570,7 @@ const SCHEMA_DEF = [
             wide: true,
             desc: '图片、视频等媒体资源下载的专用代理地址；留空时回落至基础代理。',
             descKey: 'config.schema.fields.resourceProxyUrl.desc',
-            showIf: { path: 'proxy.egress.mode', values: ['single_proxy'] },
+            showIf: { path: 'proxy.egress.mode', values: ['single_proxy', 'mihomo'] },
           },
           {
             key: 'proxy_pool',
@@ -596,7 +597,56 @@ const SCHEMA_DEF = [
             type: 'bool',
             desc: '跳过代理服务器 TLS 证书校验，仅在使用自签名证书的代理时启用。',
             descKey: 'config.schema.fields.skipSslVerify.desc',
-            showIf: { path: 'proxy.egress.mode', values: ['single_proxy', 'proxy_pool'] },
+            showIf: { path: 'proxy.egress.mode', values: ['single_proxy', 'proxy_pool', 'mihomo'] },
+          },
+          {
+            key: 'mihomo_api_url',
+            label: 'Mihomo API 地址',
+            type: 'text',
+            desc: 'Mihomo REST API 的访问地址，对应 external-controller 配置（如 http://127.0.0.1:9093）。',
+            showIf: { path: 'proxy.egress.mode', values: ['mihomo'] },
+          },
+          {
+            key: 'mihomo_group_name',
+            label: '代理组名称',
+            type: 'text',
+            desc: 'Mihomo 中配置的代理组名称，例如 XAI-GROUP。',
+            showIf: { path: 'proxy.egress.mode', values: ['mihomo'] },
+          },
+          {
+            key: '_mihomo_status',
+            label: '运行状态',
+            type: 'custom',
+            desc: '当前 Mihomo 代理节点运行状态。',
+            showIf: { path: 'proxy.egress.mode', values: ['mihomo'] },
+            render: () => {
+              const wrap = document.createElement('div');
+              wrap.style.cssText = 'display:flex;flex-direction:column;gap:6px;width:100%';
+              const info = document.createElement('div');
+              info.id = 'mihomo-status-info';
+              info.style.cssText = 'font-size:12px;color:#666;line-height:1.6';
+              info.textContent = '加载中...';
+              wrap.appendChild(info);
+              const btnRow = document.createElement('div');
+              btnRow.style.cssText = 'display:flex;gap:8px';
+              const switchBtn = document.createElement('button');
+              switchBtn.type = 'button';
+              switchBtn.className = 'page-action-btn';
+              switchBtn.style.cssText = 'height:28px;padding:0 12px;font-size:12px';
+              switchBtn.textContent = '切换节点';
+              switchBtn.onclick = mihomoSwitch;
+              const clearBtn = document.createElement('button');
+              clearBtn.type = 'button';
+              clearBtn.className = 'page-action-btn';
+              clearBtn.style.cssText = 'height:28px;padding:0 12px;font-size:12px';
+              clearBtn.textContent = '清空黑名单';
+              clearBtn.onclick = mihomoClearBlacklist;
+              btnRow.appendChild(switchBtn);
+              btnRow.appendChild(clearBtn);
+              wrap.appendChild(btnRow);
+              setTimeout(loadMihomoStatus, 0);
+              return wrap;
+            },
           },
         ]
       },
@@ -613,6 +663,7 @@ const SCHEMA_DEF = [
               { value: 'none', label: '关闭', labelKey: 'config.schema.options.clearanceMode.none' },
               { value: 'manual', label: '手动', labelKey: 'config.schema.options.clearanceMode.manual' },
               { value: 'flaresolverr', label: 'FlareSolverr', labelKey: 'config.schema.options.clearanceMode.flaresolverr' },
+              { value: 'turnstile', label: 'Turnstile 自动求解', labelKey: 'config.schema.options.clearanceMode.turnstile' },
             ],
             desc: '控制 Cloudflare Clearance 的获取方式。',
             descKey: 'config.schema.fields.clearanceMode.desc',
@@ -673,6 +724,63 @@ const SCHEMA_DEF = [
             desc: 'Clearance Cookie 预热刷新任务的调度间隔。',
             descKey: 'config.schema.fields.refreshInterval.desc',
             showIf: { path: 'proxy.clearance.mode', values: ['flaresolverr'] },
+          },
+          // Turnstile 求解器配置
+          {
+            key: 'turnstile_headless',
+            label: '无头模式',
+            type: 'bool',
+            desc: 'Turnstile 求解器是否使用无头浏览器模式。',
+            showIf: { path: 'proxy.clearance.mode', values: ['turnstile'] },
+          },
+          {
+            key: 'cf_solver_wait_before',
+            label: '求解前等待（秒）',
+            type: 'number',
+            desc: '开始求解验证码前的等待时间。',
+            showIf: { path: 'proxy.clearance.mode', values: ['turnstile'] },
+          },
+          {
+            key: 'cf_solver_wait_after',
+            label: '求解后等待（秒）',
+            type: 'number',
+            desc: '求解完成后的等待时间。',
+            showIf: { path: 'proxy.clearance.mode', values: ['turnstile'] },
+          },
+          {
+            key: 'cf_solver_max_attempts',
+            label: '最大尝试次数',
+            type: 'number',
+            desc: '求解验证码的最大尝试次数。',
+            showIf: { path: 'proxy.clearance.mode', values: ['turnstile'] },
+          },
+          {
+            key: 'cf_solver_attempt_delay',
+            label: '尝试间隔（秒）',
+            type: 'number',
+            desc: '每次求解尝试之间的间隔时间。',
+            showIf: { path: 'proxy.clearance.mode', values: ['turnstile'] },
+          },
+          {
+            key: 'cf_solver_click_delay',
+            label: '点击延迟（秒）',
+            type: 'number',
+            desc: '点击验证码的延迟时间。',
+            showIf: { path: 'proxy.clearance.mode', values: ['turnstile'] },
+          },
+          {
+            key: 'cf_solver_checkbox_delay',
+            label: '复选框延迟（秒）',
+            type: 'number',
+            desc: '复选框操作的延迟时间。',
+            showIf: { path: 'proxy.clearance.mode', values: ['turnstile'] },
+          },
+          {
+            key: 'cf_solver_checkbox_attempts',
+            label: '复选框尝试次数',
+            type: 'number',
+            desc: '复选框操作的最大尝试次数。',
+            showIf: { path: 'proxy.clearance.mode', values: ['turnstile'] },
           },
         ]
       },
@@ -1082,6 +1190,10 @@ function renderInput(field, section, value) {
     return inp;
   }
 
+  if (field.type === 'custom' && typeof field.render === 'function') {
+    return field.render();
+  }
+
   // text / password
   const inp = _el('input', {
     class: `cfg-text${field.wide ? ' wide' : ''}`,
@@ -1328,6 +1440,47 @@ function doReset() {
   renderAll();
   _refreshDirtyState({ autoNormalizeSelects: false });
   showToast(tr('config.resetSuccess', null, '未保存的更改已撤销'), 'info');
+}
+
+// ── Mihomo status ──────────────────────────────────────────────────────────
+async function loadMihomoStatus() {
+  const el = document.getElementById('mihomo-status-info');
+  if (!el) return;
+  try {
+    const resp = await _api('GET', '/mihomo/status');
+    const data = resp.data || {};
+    const parts = [];
+    if (data.current_node) parts.push(`当前节点: ${data.current_node}`);
+    if (data.node_count != null) parts.push(`可用节点: ${data.node_count}`);
+    if (data.blacklist_count != null) parts.push(`黑名单: ${data.blacklist_count}`);
+    el.textContent = parts.length ? parts.join(' | ') : '无可用数据';
+    el.style.color = '#444';
+  } catch (e) {
+    el.textContent = `获取失败: ${e.message}`;
+    el.style.color = '#d4380d';
+  }
+}
+
+async function mihomoSwitch() {
+  try {
+    showToast('正在切换节点...', 'info');
+    const data = await _api('POST', '/mihomo/switch');
+    showToast(data.message || '节点切换成功', 'success');
+    loadMihomoStatus();
+  } catch (e) {
+    showToast(`切换失败: ${e.message}`, 'error');
+  }
+}
+
+async function mihomoClearBlacklist() {
+  try {
+    showToast('正在清空黑名单...', 'info');
+    const data = await _api('POST', '/mihomo/blacklist/clear');
+    showToast(data.message || '黑名单已清空', 'success');
+    loadMihomoStatus();
+  } catch (e) {
+    showToast(`清空失败: ${e.message}`, 'error');
+  }
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────

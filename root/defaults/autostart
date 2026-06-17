@@ -1,0 +1,3 @@
+#!/bin/bash
+# Disable Chrome autostart - Playwright will launch Chrome on demand
+exit 0

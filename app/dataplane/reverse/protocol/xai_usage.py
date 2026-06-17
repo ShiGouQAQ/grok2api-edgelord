@@ -208,6 +208,7 @@ def is_invalid_credentials_body(body: str) -> bool:
         or "blocked-user" in text
         or "email-domain-rejected" in text
         or "session not found" in text
+        or "session-expired" in text
         or "account suspended" in text
         or "token revoked" in text
         or "token expired" in text
@@ -238,6 +239,7 @@ def _proxy_feedback_kind_for_error(
     if status == 429:
         return ProxyFeedbackKind.RATE_LIMITED
     if status == 403:
+        # 区分 CF 403 和上游 403（需要调用方传入 body 检查）
         return ProxyFeedbackKind.CHALLENGE
     if status == 401:
         return ProxyFeedbackKind.UNAUTHORIZED

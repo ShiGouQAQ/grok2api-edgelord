@@ -72,7 +72,7 @@ video_max_mb = 0
 
 # ==================== 代理配置 ====================
 [proxy.egress]
-# 出口模式：direct | single_proxy | proxy_pool
+# 出口模式：direct | single_proxy | proxy_pool | mihomo
 mode = "direct"
 # 基础代理 URL（API 流量，single_proxy 模式必填）
 proxy_url = ""
@@ -84,6 +84,10 @@ resource_proxy_url = ""
 resource_proxy_pool = []
 # 跳过代理 SSL 证书验证（代理使用自签名证书时启用）
 skip_ssl_verify = false
+# Mihomo REST API 地址（mihomo 模式必填）
+mihomo_api_url = "http://127.0.0.1:9093"
+# Mihomo 代理组名称（mihomo 模式必填）
+mihomo_group_name = "XAI-GROUP"
 
 [proxy.clearance]
 # Cloudflare clearance 模式：none | manual | flaresolverr
@@ -100,6 +104,22 @@ flaresolverr_url = ""
 timeout_sec = 60
 # Clearance 刷新间隔（秒）
 refresh_interval = 3600
+# Turnstile 求解器：是否无头模式
+turnstile_headless = true
+# 求解前等待秒数
+cf_solver_wait_before = 10
+# 求解后等待秒数
+cf_solver_wait_after = 0
+# 最大求解尝试次数
+cf_solver_max_attempts = 5
+# 每次尝试间隔（秒）
+cf_solver_attempt_delay = 3
+# 点击延迟（秒）
+cf_solver_click_delay = 10
+# 复选框延迟（秒）
+cf_solver_checkbox_delay = 8
+# 复选框最大尝试次数
+cf_solver_checkbox_attempts = 15
 
 
 # ==================== 重试策略 ====================

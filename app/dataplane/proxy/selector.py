@@ -4,8 +4,9 @@ Extracted from ProxyDirectory.acquire() to formalize the dataplane separation.
 """
 
 from app.control.proxy.models import (
-    EgressMode, EgressNode, EgressNodeState,
-    ProxyScope, RequestKind,
+    EgressMode,
+    ProxyScope,
+    RequestKind,
 )
 from .table import ProxyRuntimeTable
 
@@ -25,6 +26,11 @@ def select_proxy(
     if table.egress_mode == EgressMode.SINGLE_PROXY:
         if table.nodes:
             return table.nodes[0].proxy_url
+        return None
+
+    if table.egress_mode == EgressMode.MIHOMO:
+        # MIHOMO 模式通过 MihomoManager 处理，这里返回 None
+        # 实际的代理选择由 ProxyDirectory.acquire() 中的 MihomoManager 完成
         return None
 
     # PROXY_POOL: pick the node with lowest inflight count.

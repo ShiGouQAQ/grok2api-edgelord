@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from curl_cffi.const import CurlOpt
 
 from app.platform.config.snapshot import get_config
+from app.platform.config.browser import BROWSER_JA3, BROWSER_AKAMAI, BROWSER_EXTRA_FP
 from app.platform.errors import UpstreamError
 from app.control.proxy.models import ProxyLease
 from app.dataplane.proxy.adapters.profile import resolve_proxy_profile
@@ -39,14 +40,31 @@ def build_session_kwargs(
     browser_override: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build kwargs suitable for ``curl_cffi.requests.AsyncSession``."""
+    """Build kwargs suitable for ``curl_cffi.requests.AsyncSession``.
+
+    Uses Chrome 148 custom fingerprint (ja3/akamai/extra_fp) by default
+    when no explicit impersonate is set, ensuring TLS and HTTP/2 fingerprints
+    match the browser profile used for headers.
+    """
     kwargs: dict[str, Any] = dict(extra or {})
 
-    # Browser impersonation.
+    # Browser impersonation with custom fingerprint.
     if not kwargs.get("impersonate"):
         browser = browser_override or resolve_proxy_profile(lease).browser
         if browser:
             kwargs["impersonate"] = browser
+
+    # Apply custom TLS/HTTP2 fingerprint when using chromium-based impersonation.
+    impersonate = kwargs.get("impersonate", "")
+    if isinstance(impersonate, str) and (
+        "chrome" in impersonate or "chromium" in impersonate or impersonate == ""
+    ):
+        cfg = get_config()
+        # Allow disabling custom fingerprint via config
+        if cfg.get_bool("browser.custom_fingerprint.enabled", True):
+            kwargs.setdefault("ja3", BROWSER_JA3)
+            kwargs.setdefault("akamai", BROWSER_AKAMAI)
+            kwargs.setdefault("extra_fp", BROWSER_EXTRA_FP)
 
     # Proxy URL.
     proxy_url = ""

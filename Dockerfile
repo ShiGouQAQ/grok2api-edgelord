@@ -1,5 +1,5 @@
 # ── Builder ───────────────────────────────────────────────────────────────────
-FROM python:3.13-alpine AS builder
+FROM python:3.13-bookworm AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -7,22 +7,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 ENV PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH"
 
-# Rust/Cargo are required to compile curl-cffi wheels on musl/Alpine.
-# If upstream ever ships musl wheels, remove cargo + rust to speed up builds.
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    build-base \
-    linux-headers \
+    build-essential \
     libffi-dev \
-    openssl-dev \
-    curl-dev \
-    cargo \
-    rust
+    libssl-dev \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Pin uv to a minor version for reproducible builds.
-# Bump manually when you want to pick up a newer uv release.
 COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /uvx /bin/
 
 COPY pyproject.toml uv.lock ./
@@ -32,30 +27,32 @@ RUN uv sync --frozen --no-dev --no-install-project \
          \( -name "__pycache__" -o -name "tests" -o -name "test" -o -name "testing" \) \
          -prune -exec rm -rf {} + \
     && find /opt/venv -type f -name "*.pyc" -delete \
-    && find /opt/venv -type f -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null; true \
     && rm -rf /root/.cache /tmp/uv-cache
 
-# ── Runtime ───────────────────────────────────────────────────────────────────
-FROM python:3.13-alpine
+# ── Runtime (Chrome + Xvfb for Turnstile solver) ────────────────────────────
+FROM linuxserver/chrome:latest
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai \
     VIRTUAL_ENV=/opt/venv \
+    DISPLAY=:99 \
     SERVER_HOST=0.0.0.0 \
     SERVER_PORT=8000 \
-    SERVER_WORKERS=1
+    SERVER_WORKERS=1 \
+    TITLE="Grok2API"
 
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-RUN apk add --no-cache \
-    tzdata \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libffi \
-    openssl \
-    libgcc \
-    libstdc++ \
-    libcurl
+    libffi8 \
+    libssl3 \
+    libgcc-s1 \
+    curl \
+    git \
+    && apt-get autoclean \
+    && rm -rf /var/lib/apt/lists/* /var/tmp/* /tmp/*
 
 WORKDIR /app
 
@@ -64,14 +61,21 @@ COPY --from=builder /opt/venv /opt/venv
 COPY pyproject.toml config.defaults.toml ./
 COPY app ./app
 COPY scripts ./scripts
+COPY root /
+
+# Fix Python symlink for linuxserver/chrome base image
+RUN ln -sf /lsiopy/bin/python3 /usr/local/bin/python3 \
+    && ln -sf /lsiopy/bin/python3 /usr/local/bin/python
 
 RUN mkdir -p /app/data /app/logs \
-    && chmod +x /app/scripts/entrypoint.sh /app/scripts/init_storage.sh
+    && chown -R abc:abc /app/data /app/logs \
+    && chmod +x /app/scripts/init_storage.sh \
+    && chmod +x /etc/s6-overlay/s6-rc.d/svc-grok2api/run \
+    && chmod +x /etc/cont-init.d/99-init-storage
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD ["sh", "-c", "wget -qO /dev/null http://127.0.0.1:${SERVER_PORT}/health || exit 1"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD ["sh", "-c", "curl -f http://127.0.0.1:${SERVER_PORT}/health || exit 1"]
 
-ENTRYPOINT ["/app/scripts/entrypoint.sh"]
-CMD ["sh", "-c", "exec granian --interface asgi --host ${SERVER_HOST} --port ${SERVER_PORT} --workers ${SERVER_WORKERS} app.main:app"]
+ENTRYPOINT ["/init"]

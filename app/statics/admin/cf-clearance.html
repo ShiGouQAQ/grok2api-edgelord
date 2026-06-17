@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title data-i18n="cfClearance.pageTitle">Grok2API - CF Clearance 监控</title>
+  <link rel="icon" href="/favicon.ico?v={{APP_VERSION}}">
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
+  <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
+  <style>
+    body { background: #FAF9F5 }
+    
+    /* 页面头部 */
+    .page-hd { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:20px }
+    .page-title { font-size:22px; font-weight:700; line-height:1.2 }
+    .page-sub { font-size:13px; color:var(--fg-muted); margin-top:5px }
+    .page-actions { display:flex; gap:8px; align-items:center; flex-shrink:0 }
+    
+    /* 操作按钮 */
+    .page-action-btn {
+      height:32px; padding:0 14px; border-radius:999px;
+      display:inline-flex; align-items:center; justify-content:center; gap:6px;
+      font-size:13px; font-weight:600;
+      border:1px solid #e6e6e6; background:#fafafa; color:#444;
+    }
+    .page-action-btn:hover { background:#f3f3f3; border-color:#dcdcdc }
+    .page-action-btn-primary { background:#111; border-color:#111; color:#fff }
+    .page-action-btn-primary:hover { background:#222; border-color:#222 }
+    .page-action-btn:disabled { opacity:.4; pointer-events:none }
+    
+    /* 统计网格 */
+    .stat-grid { display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); gap:12px; margin-bottom:30px }
+    .stat-cell { min-height:96px; padding:14px 16px; border-radius:12px; background:#fff; display:flex; flex-direction:column; gap:12px }
+    .stat-top { display:flex; align-items:center; justify-content:space-between; gap:10px }
+    .stat-label { font-size:11px; color:#8a8a8a; letter-spacing:.01em; white-space:nowrap }
+    .stat-icon { width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; color:#a3a3a3; flex:0 0 auto }
+    .stat-icon svg { width:14px; height:14px; stroke:currentColor }
+    .stat-num { font-size:22px; font-weight:600; line-height:1; letter-spacing:-.02em; margin-top:auto }
+    
+    /* 状态指示器 (预留) */
+    .status-indicator { display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:500 }
+    .status-dot { width:8px; height:8px; border-radius:50% }
+    .status-dot.active { background:var(--success) }
+    .status-dot.inactive { background:var(--error) }
+    .status-dot.warning { background:var(--warning) }
+    
+    /* 表格 */
+    .table-card { background:#fff; border:none; border-radius:14px; overflow-x:auto; overflow-y:hidden }
+    .table-card > table { width:100%; border-collapse:collapse }
+    th { background:#fff; font-size:11px; font-weight:500; color:#9b9b9b; padding:11px 16px; text-align:left; border-bottom:none; letter-spacing:.01em }
+    td { font-size:13px; padding:13px 16px; border-bottom:none; vertical-align:middle; color:#3f3f3f }
+    tr:last-child td { border-bottom:none }
+    tr:hover td { background:#fdfdfd }
+    
+    /* 徽章 */
+    .badge { display:inline-flex; align-items:center; height:20px; padding:0 8px; border-radius:999px; font-size:11px; font-weight:500; border:none }
+    .badge-success { color:#3e8f69; background:#f2f8f4 }
+    .badge-error { color:#b66a63; background:#fbf3f2 }
+    .badge-info { color:#4c76b2; background:#f1f6fc }
+    
+    /* 分页 */
+    .pagi { display:flex; align-items:center; gap:6px; padding:12px 16px; border-top:none }
+    .pagi-btn { width:28px; height:28px; border-radius:6px; display:inline-flex; align-items:center; justify-content:center; color:inherit; transition:background .1s, color .1s; font:inherit }
+    .pagi-btn:hover { background:var(--border) }
+    .pagi-btn.on { background:var(--fg); color:#fff }
+    .pagi-btn:disabled { opacity:.35; pointer-events:none }
+  </style>
+</head>
+<body>
+
+<!-- 头部 -->
+<div id="admin-header" data-active="/admin/cf-clearance"></div>
+
+<!-- 主内容 -->
+<main class="admin-main">
+  <!-- 页面标题 -->
+  <div class="page-hd">
+    <div>
+      <div class="page-title" data-i18n="cfClearance.pageHeading">CF Clearance 监控</div>
+      <div class="page-sub" data-i18n="cfClearance.pageSubtitle">监控 Cloudflare Clearance 求解器状态和历史记录</div>
+    </div>
+    <div class="page-actions">
+      <button onclick="refreshClearance()" class="page-action-btn page-action-btn-primary" id="btn-refresh">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg>
+        <span data-i18n="cfClearance.actionRefresh">刷新</span>
+      </button>
+      <button onclick="clearHistory()" class="page-action-btn" id="btn-clear">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/></svg>
+        <span data-i18n="cfClearance.actionClear">清空历史</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- 状态面板 -->
+  <div class="section-head">
+    <div class="section-title" data-i18n="cfClearance.sectionStatus">状态信息</div>
+  </div>
+  
+  <div class="stat-grid">
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="cfClearance.statEnabled">启用状态</div>
+        <span class="stat-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M8.5 12 11 14.5 16 9.5"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-enabled">-</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="cfClearance.statCacheValid">缓存状态</div>
+        <span class="stat-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M12 6v6l4 2"/><circle cx="12" cy="12" r="8"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-cache-valid">-</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="cfClearance.statLastCheck">最后检查</div>
+        <span class="stat-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M5 19h14"/><path d="M8 16V10"/><path d="M12 16V6"/><path d="M16 16v-3"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-last-check">-</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="cfClearance.statHitRate">缓存命中率</div>
+        <span class="stat-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M6 17 10 13 13 16 18 9"/><path d="M18 9h-4"/><path d="M18 9v4"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-hit-rate">-</div>
+    </div>
+  </div>
+
+  <!-- 统计面板 -->
+  <div class="section-head">
+    <div class="section-title" data-i18n="cfClearance.sectionStats">详细统计</div>
+  </div>
+  
+  <div class="stat-grid">
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="cfClearance.statTotalChecks">总检查次数</div>
+        <span class="stat-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M5 19h14"/><path d="M8 16V10"/><path d="M12 16V6"/><path d="M16 16v-3"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-total-checks">0</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="cfClearance.statCacheHits">缓存命中</div>
+        <span class="stat-icon" style="color:#16a34a">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><circle cx="12" cy="12" r="8"/><path d="m8.5 12 2.4 2.4 4.8-4.8"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-cache-hits" style="color:#16a34a">0</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="cfClearance.statCacheMisses">缓存未命中</div>
+        <span class="stat-icon" style="color:#ea580c">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="m15 9-6 6m0-6 6 6"/><circle cx="12" cy="12" r="8"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-cache-misses" style="color:#ea580c">0</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="cfClearance.statSolverSuccess">求解成功</div>
+        <span class="stat-icon" style="color:#16a34a">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><circle cx="12" cy="12" r="8"/><path d="m8.5 12 2.4 2.4 4.8-4.8"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-solver-success" style="color:#16a34a">0</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="cfClearance.statSolverFailures">求解失败</div>
+        <span class="stat-icon" style="color:#dc2626">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="m15 9-6 6m0-6 6 6"/><circle cx="12" cy="12" r="8"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-solver-failures" style="color:#dc2626">0</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="cfClearance.statPrecheckSkips">预检跳过</div>
+        <span class="stat-icon" style="color:#4c76b2">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-precheck-skips" style="color:#4c76b2">0</div>
+    </div>
+  </div>
+
+  <!-- 历史记录 -->
+  <div class="section-head">
+    <div class="section-title" data-i18n="cfClearance.sectionHistory">历史记录</div>
+    <span class="section-count-badge" id="history-count">0</span>
+  </div>
+  
+  <div class="table-card">
+    <table>
+      <thead>
+        <tr>
+          <th data-i18n="cfClearance.colTimestamp">时间</th>
+          <th data-i18n="cfClearance.colEventType">事件类型</th>
+          <th data-i18n="cfClearance.colStatus">状态</th>
+          <th data-i18n="cfClearance.colDuration">耗时</th>
+          <th data-i18n="cfClearance.colDetails">详细信息</th>
+        </tr>
+      </thead>
+      <tbody id="history-tbody">
+        <tr>
+          <td colspan="5" class="empty-state" data-i18n="cfClearance.emptyHistory">暂无历史记录</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  
+  <!-- 分页 -->
+  <div class="pagi">
+    <button onclick="prevPage()" class="pagi-btn" id="btn-prev">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+    </button>
+    <div class="pagi-meta">
+      <span class="pagi-page" id="pagi-page">0 / 0</span>
+    </div>
+    <button onclick="nextPage()" class="pagi-btn" id="btn-next">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+    </button>
+  </div>
+</main>
+
+<script src="/static/js/i18n.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/admin-header.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/footer.js?v={{APP_VERSION}}"></script>
+<script>
+function $(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; }
+
+// 状态
+let currentPage = 1;
+let pageSize = 50;
+let totalItems = 0;
+
+// API 调用
+async function _api(method, path, body) {
+  const key = await adminKey.get();
+  const r = await fetch(ADMIN_API + path, {
+    method,
+    headers: { ...(body != null && { 'Content-Type': 'application/json' }), Authorization: `Bearer ${key}` },
+    ...(body != null && { body: JSON.stringify(body) }),
+  });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || r.status); }
+  return r.json();
+}
+
+// 加载数据
+async function load() {
+  try {
+    const [stats, history] = await Promise.all([
+      _api('GET', '/cf-clearance/stats'),
+      _api('GET', `/cf-clearance/history?page=${currentPage}&page_size=${pageSize}`)
+    ]);
+    
+    renderStats(stats.data);
+    renderHistory(history.data);
+  } catch (e) {
+    showToast(`${t('cfClearance.loadFailed', null, '加载失败')}: ${e.message}`, 'error');
+  }
+}
+
+// 渲染统计信息
+function renderStats(data) {
+  // 状态信息
+  $('s-enabled', data.enabled ? t('cfClearance.enabled', null, '已启用') : t('cfClearance.disabled', null, '未启用'));
+  $('s-cache-valid', data.cache_valid ? t('cfClearance.valid', null, '有效') : t('cfClearance.invalid', null, '无效'));
+  $('s-last-check', data.last_check_time ? new Date(data.last_check_time * 1000).toLocaleString() : '-');
+  $('s-hit-rate', data.hit_rate != null ? (data.hit_rate * 100).toFixed(1) + '%' : '-');
+  
+  // 详细统计
+  $('s-total-checks', data.stats.total_checks);
+  $('s-cache-hits', data.stats.cache_hits);
+  $('s-cache-misses', data.stats.cache_misses);
+  $('s-solver-success', data.stats.solver_success);
+  $('s-solver-failures', data.stats.solver_failures);
+  $('s-precheck-skips', data.stats.precheck_skips);
+}
+
+// 渲染历史记录
+function renderHistory(data) {
+  totalItems = data.total;
+  $('history-count', totalItems);
+  
+  const tbody = document.getElementById('history-tbody');
+  if (data.items.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" class="empty-state">${t('cfClearance.emptyHistory', null, '暂无历史记录')}</td></tr>`;
+    return;
+  }
+  
+  tbody.innerHTML = data.items.map(item => {
+    const detailText = item.error_message || (item.details ? JSON.stringify(item.details) : '-');
+    const detailHtml = detailText.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    return `
+    <tr>
+      <td>${new Date(item.timestamp * 1000).toLocaleString()}</td>
+      <td><span class="badge badge-info">${item.event_type}</span></td>
+      <td><span class="badge ${item.success ? 'badge-success' : 'badge-error'}">${item.success ? t('cfClearance.success', null, '成功') : t('cfClearance.failed', null, '失败')}</span></td>
+      <td>${item.duration ? item.duration.toFixed(2) + 's' : '-'}</td>
+      <td>${detailHtml}</td>
+    </tr>
+  `}).join('');
+  
+  // 更新分页
+  const totalPages = Math.ceil(totalItems / pageSize);
+  $('pagi-page', `${currentPage} / ${totalPages}`);
+  document.getElementById('btn-prev').disabled = currentPage <= 1;
+  document.getElementById('btn-next').disabled = currentPage >= totalPages;
+}
+
+// 刷新 CF Clearance
+async function refreshClearance() {
+  try {
+    const btn = document.getElementById('btn-refresh');
+    btn.disabled = true;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg> ${t('cfClearance.refreshing', null, '刷新中...')}`;
+    
+    const result = await _api('POST', '/cf-clearance/refresh');
+    if (result.success) {
+      showToast(t('cfClearance.refreshSuccess', null, '刷新成功'), 'success');
+      await load();
+    } else {
+      showToast(result.message || t('cfClearance.refreshFailed', null, '刷新失败'), 'error');
+    }
+  } catch (e) {
+    showToast(`${t('cfClearance.refreshFailed', null, '刷新失败')}: ${e.message}`, 'error');
+  } finally {
+    const btn = document.getElementById('btn-refresh');
+    btn.disabled = false;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg> ${t('cfClearance.actionRefresh', null, '刷新')}`;
+  }
+}
+
+// 清空历史记录
+async function clearHistory() {
+  if (!confirm(t('cfClearance.confirmClear', null, '确定要清空所有历史记录吗？'))) {
+    return;
+  }
+  
+  try {
+    const result = await _api('DELETE', '/cf-clearance/history');
+    if (result.success) {
+      showToast(t('cfClearance.clearSuccess', null, '历史记录已清空'), 'success');
+      currentPage = 1;
+      await load();
+    } else {
+      showToast(result.message || t('cfClearance.clearFailed', null, '清空失败'), 'error');
+    }
+  } catch (e) {
+    showToast(`${t('cfClearance.clearFailed', null, '清空失败')}: ${e.message}`, 'error');
+  }
+}
+
+// 分页
+function prevPage() {
+  if (currentPage > 1) {
+    currentPage--;
+    load();
+  }
+}
+
+function nextPage() {
+  const totalPages = Math.ceil(totalItems / pageSize);
+  if (currentPage < totalPages) {
+    currentPage++;
+    load();
+  }
+}
+
+// 初始化
+(async () => {
+  await I18n.onReady();
+  await renderAdminHeader?.();
+  await renderSiteFooter?.();
+  
+  const key = await adminKey.get();
+  if (!key || !await verifyKey(ADMIN_API + '/verify', key).catch(() => false)) {
+    return location.href = '/admin/login';
+  }
+  
+  await load();
+})();
+</script>
+</body>
+</html>

@@ -9,7 +9,8 @@ def classify_status_code(status_code: int) -> ProxyFeedbackKind:
     if status_code == 401:
         return ProxyFeedbackKind.UNAUTHORIZED
     if status_code == 403:
-        return ProxyFeedbackKind.CHALLENGE
+        # 默认不作为 CF 挑战，需要调用方通过 build_feedback(is_cloudflare=True) 明确指定
+        return ProxyFeedbackKind.FORBIDDEN
     if status_code == 429:
         return ProxyFeedbackKind.RATE_LIMITED
     if status_code >= 500:
@@ -29,10 +30,10 @@ def build_feedback(
     if is_cloudflare and status_code == 403:
         kind = ProxyFeedbackKind.CHALLENGE
     return ProxyFeedback(
-        kind           = kind,
-        status_code    = status_code,
-        reason         = reason,
-        retry_after_ms = retry_after_ms,
+        kind=kind,
+        status_code=status_code,
+        reason=reason,
+        retry_after_ms=retry_after_ms,
     )
 
 
