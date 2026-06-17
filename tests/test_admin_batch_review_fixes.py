@@ -17,8 +17,12 @@ from app.products.web.admin import tokens as admin_tokens
 class _Repo:
     def __init__(self) -> None:
         self.records = {
-            "active-token": AccountRecord(token="active-token", status=AccountStatus.ACTIVE),
-            "disabled-token": AccountRecord(token="disabled-token", status=AccountStatus.DISABLED),
+            "active-token": AccountRecord(
+                token="active-token", status=AccountStatus.ACTIVE
+            ),
+            "disabled-token": AccountRecord(
+                token="disabled-token", status=AccountStatus.DISABLED
+            ),
         }
         self.requested_tokens: list[str] = []
 
@@ -59,7 +63,9 @@ class _Redis:
     def __init__(self) -> None:
         active = AccountRecord(token="active-token", status=AccountStatus.ACTIVE)
         self.hashes = {
-            "accounts:record:active-token": RedisAccountRepository._to_hash(active, revision=7),
+            "accounts:record:active-token": RedisAccountRepository._to_hash(
+                active, revision=7
+            ),
         }
         self.pipeline_count = 0
         self.hgetall_count = 0
@@ -89,7 +95,10 @@ class AdminBatchReviewFixTests(unittest.IsolatedAsyncioTestCase):
         body = orjson.loads(response.body)
         self.assertEqual(repo.requested_tokens, ["active-token", "disabled-token"])
         self.assertEqual(refresh_svc.refreshed_tokens, ["active-token"])
-        self.assertEqual(body["summary"], {"total": 1, "ok": 1, "fail": 0})
+        self.assertEqual(
+            body["summary"],
+            {"total": 1, "ok": 1, "fail": 0, "expired": 0, "transient": 0},
+        )
 
     async def test_batch_refresh_rejects_only_non_manageable_explicit_tokens(self):
         repo = _Repo()
@@ -134,7 +143,8 @@ class AccountHtmlReviewFixTests(unittest.TestCase):
         self.assertEqual(len(disabled_branches), 2)
         self.assertTrue(
             all(
-                "canManageNsfw ?" in branch and "account.rowActionNotSupported" in branch
+                "canManageNsfw ?" in branch
+                and "account.rowActionNotSupported" in branch
                 for branch in disabled_branches
             )
         )
@@ -143,7 +153,9 @@ class AccountHtmlReviewFixTests(unittest.TestCase):
         for path in Path("app/statics/i18n").glob("*.json"):
             data = orjson.loads(path.read_bytes())
             with self.subTest(locale=path.name):
-                self.assertIn("account", data, f"Locale {path.name} missing account section")
+                self.assertIn(
+                    "account", data, f"Locale {path.name} missing account section"
+                )
                 self.assertIn("rowActionNotSupported", data["account"])
 
 
