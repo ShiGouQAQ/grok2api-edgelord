@@ -47,6 +47,8 @@
 | 媒体生成 | 文生图、图像编辑、文生视频、图生视频，本地缓存与代理链接 |
 | 防封内置 | `x-statsig-id` 兼容修复，WARP + FlareSolverr 一键部署 |
 | 管理后台 | Admin 配置、账号管理、Web Chat、Masonry 画廊、ChatKit 语音 |
+| CF Clearance 监控 | Cloudflare 求解器状态、历史记录、一键刷新 |
+| Mihomo 代理管理 | 代理节点状态、切换、黑名单管理 |
 
 ---
 
@@ -314,6 +316,8 @@ basic表示free账号，spuer和heavy 为付费
 
 ## API 端点
 
+### 公开 API
+
 | 端点 | 说明 |
 | :-- | :-- |
 | `GET /v1/models` | 列出可用模型 |
@@ -324,6 +328,22 @@ basic表示free账号，spuer和heavy 为付费
 | `POST /v1/images/edits` | 图像编辑 |
 | `POST /v1/videos` | 异步视频任务 |
 | `GET /v1/videos/{id}` / `{id}/content` | 查询 / 下载视频 |
+
+### Admin API（需 Bearer Token）
+
+| 端点 | 说明 |
+| :-- | :-- |
+| `GET /admin/api/config` | 获取配置 |
+| `POST /admin/api/config` | 更新配置 |
+| `GET /admin/api/tokens` | 账号列表 |
+| `POST /admin/api/tokens/add` | 添加账号 |
+| `POST /admin/api/batch/refresh` | 批量刷新账号 |
+| `GET /admin/api/mihomo/status` | Mihomo 代理节点状态 |
+| `POST /admin/api/mihomo/switch` | 切换代理节点 |
+| `POST /admin/api/mihomo/blacklist/clear` | 清空节点黑名单 |
+| `GET /admin/api/cf-clearance/stats` | CF Clearance 统计 |
+| `POST /admin/api/cf-clearance/refresh` | 刷新 CF Clearance |
+| `GET /admin/api/cache/list` | 缓存列表 |
 
 ---
 
@@ -386,6 +406,18 @@ curl http://localhost:8000/v1/chat/completions \
 ---
 
 ## 更新日志
+
+### v0.1.6 (2026-06-20)
+
+**修复**
+
+- 🐛 恢复 Mihomo 代理节点管理 API（`/mihomo/status`, `/mihomo/switch`, `/mihomo/blacklist/clear`）
+- 🐛 补全 CF Clearance 监控页面的多语言翻译（ja/de/fr/es）
+- 🐛 修复上游同步工作流的变量引用问题
+
+**新增**
+
+- ✨ 添加 CLAUDE.md 项目规则文档，便于 AI 协作开发
 
 ### v0.1.5 (2025-06-13)
 
