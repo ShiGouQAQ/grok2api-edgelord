@@ -14,7 +14,7 @@ from pydantic import RootModel
 
 from app.control.account.backends.factory import get_repository_backend
 from app.platform.auth.middleware import verify_admin_key
-from app.platform.config.snapshot import config
+from app.platform.config.snapshot import config, get_config
 from app.platform.errors import AppError, ErrorKind, ValidationError
 from app.platform.logging.logger import logger, reload_file_logging
 from app.platform.storage import reconcile_local_media_cache_async
@@ -265,6 +265,79 @@ async def force_sync():
         content=orjson.dumps({"changed": changed, "revision": _directory.revision}),
         media_type="application/json",
     )
+
+
+# ---------------------------------------------------------------------------
+# Mihomo proxy node management
+# ---------------------------------------------------------------------------
+
+
+@router.get("/mihomo/status", tags=[_TAG_ADMIN_SYSTEM])
+async def mihomo_status():
+    from app.control.proxy import get_proxy_directory
+
+    directory = await get_proxy_directory()
+    mihomo = directory._mihomo
+
+    mode = get_config("proxy.egress.mode", "direct")
+    enabled = mode == "mihomo"
+
+    if not enabled:
+        return {"success": True, "data": {"enabled": False}}
+
+    api_url = get_config("proxy.egress.mihomo_api_url", "")
+    group_name = get_config("proxy.egress.mihomo_group_name", "")
+
+    try:
+        group = await mihomo.get_group_nodes()
+        current_node = group.get("now") if group else None
+        all_nodes = [n for n in group.get("all", []) if n != "DIRECT"] if group else []
+
+        return {
+            "success": True,
+            "data": {
+                "enabled": True,
+                "api_url": api_url,
+                "group_name": group_name,
+                "current_node": current_node,
+                "node_count": len(all_nodes),
+                "blacklist_count": len(mihomo._blacklist),
+            },
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/mihomo/switch", tags=[_TAG_ADMIN_SYSTEM])
+async def mihomo_switch():
+    from app.control.proxy import get_proxy_directory
+
+    directory = await get_proxy_directory()
+    mihomo = directory._mihomo
+
+    if not mihomo._enabled():
+        return {"success": False, "message": "Mihomo 未启用"}
+
+    try:
+        # Blacklist current node before switching (manual switch = current node is bad)
+        switched = await mihomo.switch_and_blacklist_current()
+        if switched:
+            return {"success": True, "message": "节点切换成功，当前节点已加入黑名单"}
+        else:
+            return {"success": False, "message": "节点切换失败"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/mihomo/blacklist/clear", tags=[_TAG_ADMIN_SYSTEM])
+async def mihomo_clear_blacklist():
+    from app.control.proxy import get_proxy_directory
+
+    directory = await get_proxy_directory()
+    mihomo = directory._mihomo
+
+    mihomo.clear_blacklist()
+    return {"success": True, "message": "黑名单已清空"}
 
 
 __all__ = ["router", "get_repo", "get_refresh_svc"]
