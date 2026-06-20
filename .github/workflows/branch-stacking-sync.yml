@@ -4,6 +4,10 @@ on:
     - cron: '0 4 * * *'  # 每天凌晨 4 点（UTC）
   workflow_dispatch:  # 允许手动触发
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -25,6 +29,8 @@ jobs:
           git push origin main --force
 
       - name: Create cascade sync PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 创建 PR 提示用户手动级联 rebase
           gh pr create \
@@ -34,5 +40,4 @@ jobs:
             --head main || true  # 如果 PR 已存在则忽略
 
 env:
-  UPSTREAM_URL: ${UPSTREAM_URL}
-  GITHUB_TOKEN: ${GITHUB_TOKEN}
+  UPSTREAM_URL: ${{ vars.UPSTREAM_URL }}
