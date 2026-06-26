@@ -2,13 +2,14 @@
 
 Canonical quota totals per pool type (from upstream rate-limits API):
 
-              auto    fast    expert    heavy    grok_4_3
-  basic          —      30       —        —         —        window: 86400 s
-  super         50     140      50        —        50        window: 7200 s
-  heavy        150     400     150       20       150        window: 7200 s
+              auto    fast    expert    heavy    grok_4_3    console
+  basic          —      30       —        —         —         20        window: fast=86400s, console=3600s
+  super         50     140      50        —        50         —        window: 7200 s
+  heavy        150     400     150       20       150         —        window: 7200 s
 
 Pool inference uses ``auto.total`` as the primary signal for super/heavy
 accounts; basic accounts no longer expose auto/expert windows locally.
+Console quota: 20 queries / 60 min window, rotation threshold at remaining <= 12.
 """
 
 from typing import TYPE_CHECKING

@@ -281,7 +281,7 @@ basic表示free账号，spuer和heavy 为付费
 | `grok-4.20-multi-agent-xhigh` | xhigh（固定）→ 16 agents | basic|
 | `grok-build-console` | 默认 | basic |
 
-**Console 配额**：30 次 / 15 分钟窗口，采用延迟恢复轮换策略（消耗至剩余 15 次时启动计时器，评分机制自动轮换到其他账号）。后台每 30 秒巡检并自动重置过期配额。
+**Console 配额**：20 次 / 60 分钟窗口，采用延迟恢复轮换策略（消耗至剩余 12 次时启动计时器，评分机制自动轮换到其他账号）。后台每 30 秒巡检并自动重置过期配额。
 
 ### Image / Video（ grok.com）
 
