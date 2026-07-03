@@ -6,7 +6,7 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
+  issues: write
 
 jobs:
   sync:
@@ -18,31 +18,29 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Update upstream mirror branch
+      - name: Check upstream updates
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
 
-          # 只更新 upstream/active 镜像分支，不覆盖 main
           git remote add upstream ${UPSTREAM_URL} || true
           git fetch upstream
-          
-          # 强制更新 upstream/active 分支指向活跃上游
-          git branch -f upstream/active upstream/main
-          git push origin upstream/active --force
 
-      - name: Notify if updates available
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # 检查 main 和上游是否有差异
-          BEHIND=$(git rev-list --count main..upstream/active)
+          # 计算上游新提交数
+          BEHIND=$(git rev-list --count main..upstream/main)
+          
           if [ "$BEHIND" -gt 0 ]; then
-            echo "上游有 $BEHIND 个新提交待合并"
-            # 创建 issue 提醒（而不是自动覆盖 main）
+            echo "上游有 $BEHIND 个新提交"
+            
+            # 获取新提交列表
+            COMMITS=$(git log --oneline main..upstream/main | head -20)
+            
+            # 创建 issue 通知
             gh issue create \
-              --title "[Auto] 上游有 $BEHIND 个新提交" \
-              --body "活跃上游 jiujiu532/grok2api 有 $BEHIND 个新提交。\n\n手动合并：\n\`\`\`bash\ngit fetch jiujiu532\ngit branch -f upstream/active jiujiu532/main\ngit checkout main\ngit merge upstream/active\n\`\`\`" \
+              --title "[Sync] 上游有 $BEHIND 个新提交待合并" \
+              --body "## 上游更新通知\n\njiujiu532/grok2api 有 **$BEHIND** 个新提交。\n\n### 最近提交\n\`\`\`\n$COMMITS\n\`\`\`\n\n### 合并方法\n\`\`\`bash\n# 方式1: 自动合并（推荐）\nsh .agents/skills/branch-stacking-maintenance/scripts/bsm.sh cascade-sync\n\n# 方式2: 手动合并\ngit fetch jiujiu532\ngit merge jiujiu532/main\n\`\`\`" \
               --label "upstream-sync" || true
           else
             echo "上游无新提交"
