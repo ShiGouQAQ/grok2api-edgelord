@@ -1,8 +1,8 @@
 name: Branch Stacking Auto Sync
 on:
   schedule:
-    - cron: '0 4 * * *'  # 每天凌晨 4 点（UTC）
-  workflow_dispatch:  # 允许手动触发
+    - cron: '0 4 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,32 +12,41 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout L1 (main)
+      - name: Checkout main
         uses: actions/checkout@v3
         with:
           ref: main
           fetch-depth: 0
 
-      - name: Sync from upstream
+      - name: Update upstream mirror branch
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
 
-          git remote add upstream ${UPSTREAM_URL}
+          # 只更新 upstream/active 镜像分支，不覆盖 main
+          git remote add upstream ${UPSTREAM_URL} || true
           git fetch upstream
-          git reset --hard upstream/main
-          git push origin main --force
+          
+          # 强制更新 upstream/active 分支指向活跃上游
+          git branch -f upstream/active upstream/main
+          git push origin upstream/active --force
 
-      - name: Create cascade sync PR
+      - name: Notify if updates available
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 创建 PR 提示用户手动级联 rebase
-          gh pr create \
-            --title "[Auto] Upstream Sync Ready" \
-            --body "上游已同步到 main，请手动执行级联 rebase：\n\n```bash\nsh .agents/skills/branch-stacking-maintenance/scripts/bsm.sh cascade-sync\n```" \
-            --base feat/mixin-fixes \
-            --head main || true  # 如果 PR 已存在则忽略
+          # 检查 main 和上游是否有差异
+          BEHIND=$(git rev-list --count main..upstream/active)
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "上游有 $BEHIND 个新提交待合并"
+            # 创建 issue 提醒（而不是自动覆盖 main）
+            gh issue create \
+              --title "[Auto] 上游有 $BEHIND 个新提交" \
+              --body "活跃上游 jiujiu532/grok2api 有 $BEHIND 个新提交。\n\n手动合并：\n\`\`\`bash\ngit fetch jiujiu532\ngit branch -f upstream/active jiujiu532/main\ngit checkout main\ngit merge upstream/active\n\`\`\`" \
+              --label "upstream-sync" || true
+          else
+            echo "上游无新提交"
+          fi
 
 env:
   UPSTREAM_URL: ${{ vars.UPSTREAM_URL }}
