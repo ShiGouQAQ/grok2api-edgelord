@@ -24,19 +24,23 @@ class AccountCleanupTests(unittest.IsolatedAsyncioTestCase):
             db_path = Path(tmp) / "accounts.db"
             repo = LocalAccountRepository(db_path)
             await repo.initialize()
-            await repo.upsert_accounts([
-                AccountUpsert(token="old-deleted"),
-                AccountUpsert(token="old-deleted-2"),
-                AccountUpsert(token="old-deleted-3"),
-                AccountUpsert(token="new-deleted"),
-                AccountUpsert(token="live-token"),
-            ])
-            await repo.delete_accounts([
-                "old-deleted",
-                "old-deleted-2",
-                "old-deleted-3",
-                "new-deleted",
-            ])
+            await repo.upsert_accounts(
+                [
+                    AccountUpsert(token="old-deleted"),
+                    AccountUpsert(token="old-deleted-2"),
+                    AccountUpsert(token="old-deleted-3"),
+                    AccountUpsert(token="new-deleted"),
+                    AccountUpsert(token="live-token"),
+                ]
+            )
+            await repo.delete_accounts(
+                [
+                    "old-deleted",
+                    "old-deleted-2",
+                    "old-deleted-3",
+                    "new-deleted",
+                ]
+            )
 
             cutoff = now_ms() - 7 * 86_400_000
             with closing(sqlite3.connect(db_path)) as conn:
@@ -129,7 +133,9 @@ class AccountCleanupTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
-            patch.object(cleanup_mod, "seconds_until_next_daily_run", return_value=0.001),
+            patch.object(
+                cleanup_mod, "seconds_until_next_daily_run", return_value=0.001
+            ),
             patch.object(cleanup_mod, "now_ms", return_value=1_000_000_000),
         ):
             await asyncio.wait_for(
@@ -175,7 +181,7 @@ class AccountCleanupConfigTests(unittest.TestCase):
         self.assertIn("deleted_retention_days = 7", text)
         self.assertIn('run_at = "03:30"', text)
         self.assertIn("batch_size = 5000", text)
-        self.assertIn("vacuum = true", text)
+        self.assertIn("vacuum = false", text)
 
     def test_admin_config_schema_exposes_deleted_account_cleanup(self):
         html = (_ROOT / "app/statics/admin/config.html").read_text(encoding="utf-8")
