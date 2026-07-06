@@ -61,3 +61,6 @@ htmlcov/
 .opencode/
 *.tar.gz
 token.json
+
+# Local analysis docs (not for public repo)
+docs/
