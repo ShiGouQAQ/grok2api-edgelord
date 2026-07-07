@@ -290,3 +290,196 @@ def test_full_workflow():
         assert history_after_clear["data"]["total"] == 0
     finally:
         app.dependency_overrides.pop(verify_admin_key, None)
+
+
+def _make_directory(db_path):
+    from app.control.proxy import ProxyDirectory
+    import asyncio
+    from unittest.mock import MagicMock
+
+    directory = ProxyDirectory.__new__(ProxyDirectory)
+    directory._get_history_database_path = lambda: db_path
+    directory._init_history_database()
+    directory._stats = {
+        "total_checks": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "solver_success": 0,
+        "solver_failures": 0,
+        "precheck_skips": 0,
+    }
+    directory._last_check_time = 0
+    directory._check_interval = 3600
+    directory._lock = asyncio.Lock()
+    directory._clearance_mode = MagicMock()
+    directory._clearance_mode.__ne__ = lambda self, other: True
+    return directory
+
+
+def _insert_events(db_path, events):
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    for e in events:
+        cursor.execute(
+            "INSERT INTO cf_clearance_history (timestamp, event_type, success, duration) VALUES (?, ?, ?, ?)",
+            (
+                e.get("timestamp", time.time()),
+                e["event_type"],
+                e["success"],
+                e.get("duration", 1.0),
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_get_stats_empty_db():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+    try:
+        directory = _make_directory(db_path)
+        stats = directory.get_stats()
+        assert stats["stats"]["total_checks"] == 0
+        assert stats["stats"]["solver_success"] == 0
+        assert stats["stats"]["solver_failures"] == 0
+        assert stats["hit_rate"] == 0.0
+        assert stats["enabled"] is True
+    finally:
+        os.unlink(db_path)
+
+
+def test_get_stats_mixed_success_failure():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+    try:
+        directory = _make_directory(db_path)
+        _insert_events(
+            db_path,
+            [
+                {"event_type": "clearance_refresh", "success": True},
+                {"event_type": "clearance_refresh", "success": True},
+                {"event_type": "clearance_refresh", "success": True},
+                {"event_type": "clearance_refresh", "success": False},
+                {"event_type": "clearance_refresh", "success": False},
+            ],
+        )
+        stats = directory.get_stats()
+        assert stats["stats"]["total_checks"] == 5
+        assert stats["stats"]["solver_success"] == 3
+        assert stats["stats"]["solver_failures"] == 2
+    finally:
+        os.unlink(db_path)
+
+
+def test_get_stats_only_success():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+    try:
+        directory = _make_directory(db_path)
+        _insert_events(
+            db_path,
+            [
+                {"event_type": "clearance_refresh", "success": True},
+                {"event_type": "clearance_refresh", "success": True},
+            ],
+        )
+        stats = directory.get_stats()
+        assert stats["stats"]["solver_success"] == 2
+        assert stats["stats"]["solver_failures"] == 0
+        assert stats["stats"]["total_checks"] == 2
+    finally:
+        os.unlink(db_path)
+
+
+def test_get_stats_only_failure():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+    try:
+        directory = _make_directory(db_path)
+        _insert_events(
+            db_path,
+            [
+                {"event_type": "clearance_refresh", "success": False},
+                {"event_type": "clearance_refresh", "success": False},
+            ],
+        )
+        stats = directory.get_stats()
+        assert stats["stats"]["solver_success"] == 0
+        assert stats["stats"]["solver_failures"] == 2
+        assert stats["stats"]["total_checks"] == 2
+    finally:
+        os.unlink(db_path)
+
+
+def test_get_stats_filters_non_clearance_events():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+    try:
+        directory = _make_directory(db_path)
+        _insert_events(
+            db_path,
+            [
+                {"event_type": "clearance_refresh", "success": True},
+                {"event_type": "clearance_refresh", "success": False},
+                {"event_type": "other_event", "success": True},
+                {"event_type": "precheck_skip", "success": True},
+            ],
+        )
+        stats = directory.get_stats()
+        assert stats["stats"]["total_checks"] == 2
+        assert stats["stats"]["solver_success"] == 1
+        assert stats["stats"]["solver_failures"] == 1
+    finally:
+        os.unlink(db_path)
+
+
+def test_get_stats_db_error_graceful():
+    from app.control.proxy import ProxyDirectory
+    import asyncio
+    from unittest.mock import MagicMock
+
+    directory = ProxyDirectory.__new__(ProxyDirectory)
+    directory._get_history_database_path = lambda: "/nonexistent/path/db.sqlite"
+    directory._stats = {
+        "total_checks": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "solver_success": 0,
+        "solver_failures": 0,
+        "precheck_skips": 0,
+    }
+    directory._last_check_time = 0
+    directory._check_interval = 3600
+    directory._lock = asyncio.Lock()
+    directory._clearance_mode = MagicMock()
+    directory._clearance_mode.__ne__ = lambda self, other: True
+
+    stats = directory.get_stats()
+    assert stats["stats"]["total_checks"] == 0
+    assert stats["stats"]["solver_success"] == 0
+    assert stats["stats"]["solver_failures"] == 0
+    assert stats["enabled"] is True
+
+
+def test_get_stats_reads_from_db_not_memory():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+    try:
+        directory = _make_directory(db_path)
+        assert directory._stats["solver_success"] == 0
+        assert directory._stats["solver_failures"] == 0
+
+        _insert_events(
+            db_path,
+            [
+                {"event_type": "clearance_refresh", "success": True},
+                {"event_type": "clearance_refresh", "success": True},
+                {"event_type": "clearance_refresh", "success": False},
+            ],
+        )
+        stats = directory.get_stats()
+        assert stats["stats"]["solver_success"] == 2
+        assert stats["stats"]["solver_failures"] == 1
+        assert stats["stats"]["total_checks"] == 3
+    finally:
+        os.unlink(db_path)

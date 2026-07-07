@@ -12,7 +12,8 @@ from app.control.account.cleanup import (
     cleanup_threshold_ms,
     seconds_until_next_daily_run,
 )
-from app.control.account.commands import AccountUpsert
+from app.control.account.commands import AccountUpsert, AccountPatch
+from app.control.account.enums import AccountStatus
 from app.platform.runtime.clock import now_ms
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -191,6 +192,57 @@ class AccountCleanupConfigTests(unittest.TestCase):
         self.assertIn("run_at", html)
         self.assertIn("batch_size", html)
         self.assertIn("vacuum", html)
+
+
+class ListInvalidTokensTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        db_path = Path(self.tmp.name) / "accounts.db"
+        self.repo = LocalAccountRepository(db_path)
+        await self.repo.initialize()
+
+    async def asyncTearDown(self):
+        self.tmp.cleanup()
+
+    async def _insert(self, token, status, state_reason=None):
+        await self.repo.upsert_accounts([AccountUpsert(token=token)])
+        if state_reason:
+            await self.repo.patch_accounts(
+                [AccountPatch(token=token, status=status, state_reason=state_reason)]
+            )
+        else:
+            await self.repo.patch_accounts([AccountPatch(token=token, status=status)])
+
+    async def test_returns_expired_invalid_credentials(self):
+        await self._insert("tok-invalid", AccountStatus.EXPIRED, "invalid_credentials")
+        result = await self.repo.list_invalid_tokens()
+        self.assertIn("tok-invalid", result)
+
+    async def test_returns_expired_token_expired(self):
+        await self._insert("tok-expired", AccountStatus.EXPIRED, "token_expired")
+        result = await self.repo.list_invalid_tokens()
+        self.assertIn("tok-expired", result)
+
+    async def test_excludes_expired_console_429(self):
+        await self._insert(
+            "tok-429", AccountStatus.EXPIRED, "console_429_threshold_exceeded"
+        )
+        result = await self.repo.list_invalid_tokens()
+        self.assertNotIn("tok-429", result)
+
+    async def test_excludes_active_cooling_disabled(self):
+        await self._insert("tok-active", AccountStatus.ACTIVE)
+        await self._insert("tok-cooling", AccountStatus.COOLING)
+        await self._insert("tok-disabled", AccountStatus.DISABLED)
+        result = await self.repo.list_invalid_tokens()
+        self.assertNotIn("tok-active", result)
+        self.assertNotIn("tok-cooling", result)
+        self.assertNotIn("tok-disabled", result)
+
+    async def test_expired_without_state_reason_is_returned(self):
+        await self._insert("tok-noreason", AccountStatus.EXPIRED)
+        result = await self.repo.list_invalid_tokens()
+        self.assertIn("tok-noreason", result)
 
 
 if __name__ == "__main__":

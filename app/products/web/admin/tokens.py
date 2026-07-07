@@ -126,6 +126,7 @@ def _serialize_record(r) -> dict:
         "token":       r.token,
         "pool":        r.pool or "basic",
         "status":      r.status,
+        "state_reason": getattr(r, "state_reason", None),
         "quota":       _quota_brief(r.quota) if isinstance(r.quota, dict) else {},
         "use_count":   r.usage_use_count or 0,
         "fail_count":  r.usage_fail_count or 0,
@@ -197,6 +198,10 @@ async def _list_invalid_tokens(repo: "AccountRepository") -> list[str]:
             AccountStatus.ACTIVE.value,
             AccountStatus.COOLING.value,
             AccountStatus.DISABLED.value,
+        )
+        and not (
+            item.get("status") == AccountStatus.EXPIRED.value
+            and item.get("state_reason") == "console_429_threshold_exceeded"
         )
     ]
 

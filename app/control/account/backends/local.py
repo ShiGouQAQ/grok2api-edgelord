@@ -205,6 +205,7 @@ class LocalAccountRepository:
             "token": row["token"],
             "pool": row["pool"] or "basic",
             "status": row["status"],
+            "state_reason": row["state_reason"],
             "quota": quota,
             "use_count": cls._payload_int(row["usage_use_count"]),
             "fail_count": cls._payload_int(row["usage_fail_count"]),
@@ -583,6 +584,7 @@ class LocalAccountRepository:
                 token,
                 pool,
                 status,
+                state_reason,
                 tags,
                 usage_use_count,
                 usage_fail_count,
@@ -611,14 +613,16 @@ class LocalAccountRepository:
                     SELECT token
                     FROM {_TBL}
                     WHERE deleted_at IS NULL
-                      AND status NOT IN (?, ?, ?, ?)
+                      AND status NOT IN (?, ?, ?)
+                      AND NOT (status = ? AND COALESCE(state_reason, '') = ?)
                     ORDER BY updated_at DESC
                     """,
                     (
                         AccountStatus.ACTIVE.value,
                         AccountStatus.COOLING.value,
                         AccountStatus.DISABLED.value,
-                        AccountStatus.EXPIRED.value,  # EXPIRED 是配额误判，不当作垃圾删除
+                        AccountStatus.EXPIRED.value,
+                        "console_429_threshold_exceeded",
                     ),
                 )
                 return [row["token"] for row in rows]

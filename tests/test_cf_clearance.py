@@ -56,14 +56,38 @@ async def test_refresh_clearance_failure(directory):
 
 
 def test_get_stats(directory):
-    """测试获取统计信息"""
-    directory._stats["total_checks"] = 10
-    directory._stats["cache_hits"] = 7
+    import sqlite3
+    import tempfile
+    import os
 
-    stats = directory.get_stats()
-    assert stats["enabled"] is True
-    assert stats["hit_rate"] == 0.7
-    assert stats["stats"]["total_checks"] == 10
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_path = tmp.name
+    try:
+        directory._get_history_database_path = lambda: db_path
+        directory._init_history_database()
+
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        for _ in range(7):
+            cursor.execute(
+                "INSERT INTO cf_clearance_history (timestamp, event_type, success, duration) VALUES (?, ?, ?, ?)",
+                (time.time(), "clearance_refresh", True, 1.0),
+            )
+        for _ in range(3):
+            cursor.execute(
+                "INSERT INTO cf_clearance_history (timestamp, event_type, success, duration) VALUES (?, ?, ?, ?)",
+                (time.time(), "clearance_refresh", False, 1.0),
+            )
+        conn.commit()
+        conn.close()
+
+        stats = directory.get_stats()
+        assert stats["enabled"] is True
+        assert stats["stats"]["total_checks"] == 10
+        assert stats["stats"]["solver_success"] == 7
+        assert stats["stats"]["solver_failures"] == 3
+    finally:
+        os.unlink(db_path)
 
 
 @pytest.mark.asyncio

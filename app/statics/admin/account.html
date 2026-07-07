@@ -1282,7 +1282,7 @@ function getTokenView() {
     const pool = token.pool || 'basic';
     const quota = token.quota || {};
     const nsfwEnabled = (token.tags || []).includes('nsfw');
-    const invalid = isInvalidStatus(token.status);
+    const invalid = isInvalidStatus(token.status, token.state_reason);
     const disabled = isDisabledStatus(token.status);
     const matchesPool = curPool === 'all' || pool === curPool;
     const matchesStatus = curStatus === 'all'
@@ -1353,7 +1353,8 @@ function isDisabledStatus(status) {
   return status === 'disabled';
 }
 
-function isInvalidStatus(status) {
+function isInvalidStatus(status, state_reason) {
+  if (status === 'expired' && state_reason === 'console_429_threshold_exceeded') return false;
   return !['active', 'cooling', 'disabled'].includes(status);
 }
 
@@ -1462,7 +1463,7 @@ function applyPoolFilter(items, pool = curPool) {
 
 function applyStatusFilter(items, status = curStatus) {
   if (status === 'all') return items;
-  if (status === 'invalid') return items.filter(t => isInvalidStatus(t.status));
+  if (status === 'invalid') return items.filter(t => isInvalidStatus(t.status, t.state_reason));
   if (status === 'disabled') return items.filter(t => isDisabledStatus(t.status));
   return items.filter(t => t.status === status);
 }
@@ -1868,12 +1869,12 @@ function batchDeleteSel() { if (sel.size) doDelete([...sel]); }
 
 function selectedInvalidTokens() {
   return allTokens
-    .filter(t => sel.has(t.token) && isInvalidStatus(t.status))
+    .filter(t => sel.has(t.token) && isInvalidStatus(t.status, t.state_reason))
     .map(t => t.token);
 }
 
 function invalidTokenCount() {
-  return allTokens.filter(t => isInvalidStatus(t.status)).length;
+  return allTokens.filter(t => isInvalidStatus(t.status, t.state_reason)).length;
 }
 
 function batchDeleteInvalidSel() {
