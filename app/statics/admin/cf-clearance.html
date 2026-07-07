@@ -385,7 +385,7 @@ function nextPage() {
 
 // 初始化
 (async () => {
-  await I18n.onReady();
+  await new Promise(resolve => I18n.onReady(resolve));
   await renderAdminHeader?.();
   await renderSiteFooter?.();
   
