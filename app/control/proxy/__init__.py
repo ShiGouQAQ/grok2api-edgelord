@@ -587,13 +587,38 @@ class ProxyDirectory:
     # ------------------------------------------------------------------
 
     def get_stats(self) -> dict:
-        """获取统计信息"""
-        total = self._stats["total_checks"]
+        """获取统计信息（从 SQLite 实时聚合）"""
+        db_path = self._get_history_database_path()
+        stats = {
+            "total_checks": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "solver_success": 0,
+            "solver_failures": 0,
+            "precheck_skips": 0,
+        }
+        try:
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT success, COUNT(*) FROM cf_clearance_history "
+                "WHERE event_type='clearance_refresh' GROUP BY success"
+            )
+            for success, count in cursor.fetchall():
+                if success:
+                    stats["solver_success"] = count
+                else:
+                    stats["solver_failures"] = count
+            stats["total_checks"] = stats["solver_success"] + stats["solver_failures"]
+            conn.close()
+        except Exception:
+            pass
+        total = stats["total_checks"]
         return {
             "enabled": self._clearance_mode != ClearanceMode.NONE,
             "cache_valid": self._is_cache_valid(),
             "last_check_time": self._last_check_time or None,
-            "stats": self._stats.copy(),
+            "stats": stats,
             "hit_rate": self._stats["cache_hits"] / max(total, 1),
         }
 
