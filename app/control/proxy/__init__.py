@@ -592,6 +592,7 @@ class ProxyDirectory:
         return {
             "enabled": self._clearance_mode != ClearanceMode.NONE,
             "cache_valid": self._is_cache_valid(),
+            "last_check_time": self._last_check_time or None,
             "stats": self._stats.copy(),
             "hit_rate": self._stats["cache_hits"] / max(total, 1),
         }
