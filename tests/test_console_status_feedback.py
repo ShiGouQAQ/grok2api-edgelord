@@ -2,6 +2,7 @@
 
 测试不同 HTTP 状态码的正确分类：
 - 403 → CHALLENGE（触发 CF 求解）
+- 403 + body 含账号级标记 → FORBIDDEN（账号问题，非 CF）
 - 429 → RATE_LIMITED（触发速率限制）
 - >= 500 → UPSTREAM_5XX（触发上游服务器错误）
 - 其他 → FORBIDDEN（默认拒绝）
@@ -225,6 +226,118 @@ class TestStatusFeedbackEdgeCases:
                 f"Status {status} should be FORBIDDEN"
             )
             assert result.status_code == status
+
+
+class TestStatusFeedbackBodyCheck:
+    """测试 403 + body 区分账号级错误和 CF 挑战"""
+
+    # ============================================================
+    # 账号级 403 → FORBIDDEN（非 CF 挑战）
+    # ============================================================
+
+    def test_403_blocked_user_returns_forbidden(self):
+        """blocked-user 应返回 FORBIDDEN，不是 CHALLENGE"""
+        body = '{"error":"User is blocked [WKE=unauthorized:blocked-user]"}'
+        result = _status_feedback(403, body)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+        assert result.status_code == 403
+
+    def test_403_email_domain_rejected_returns_forbidden(self):
+        """email-domain-rejected 应返回 FORBIDDEN"""
+        body = (
+            "This email domain has been rejected. [WKE=account:email-domain-rejected]"
+        )
+        result = _status_feedback(403, body)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+        assert result.status_code == 403
+
+    def test_403_invalid_credentials_returns_forbidden(self):
+        """invalid-credentials 应返回 FORBIDDEN"""
+        body = '{"code":"invalid-credentials","error":"Invalid credentials"}'
+        result = _status_feedback(403, body)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+        assert result.status_code == 403
+
+    def test_403_bad_credentials_returns_forbidden(self):
+        """bad-credentials 应返回 FORBIDDEN"""
+        body = '{"error":"bad-credentials"}'
+        result = _status_feedback(403, body)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+        assert result.status_code == 403
+
+    def test_403_session_expired_returns_forbidden(self):
+        """session-expired 应返回 FORBIDDEN"""
+        body = '{"error":"session-expired"}'
+        result = _status_feedback(403, body)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+        assert result.status_code == 403
+
+    def test_403_account_suspended_returns_forbidden(self):
+        """account suspended 应返回 FORBIDDEN"""
+        body = '{"error":"account suspended"}'
+        result = _status_feedback(403, body)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+        assert result.status_code == 403
+
+    # ============================================================
+    # CF 挑战 403 → CHALLENGE（无 body 或非账号级）
+    # ============================================================
+
+    def test_403_empty_body_returns_challenge(self):
+        """空 body 的 403 应返回 CHALLENGE"""
+        result = _status_feedback(403, "")
+        assert result.kind == ProxyFeedbackKind.CHALLENGE
+
+    def test_403_no_body_returns_challenge(self):
+        """不传 body 的 403 应返回 CHALLENGE（向后兼容）"""
+        result = _status_feedback(403)
+        assert result.kind == ProxyFeedbackKind.CHALLENGE
+
+    def test_403_cf_challenge_returns_challenge(self):
+        """CF 挑战页应返回 CHALLENGE"""
+        body = (
+            "<!DOCTYPE html><html><head><title>Just a moment...</title></head></html>"
+        )
+        result = _status_feedback(403, body)
+        assert result.kind == ProxyFeedbackKind.CHALLENGE
+
+    def test_403_random_body_returns_challenge(self):
+        """无关 body 的 403 应返回 CHALLENGE"""
+        body = '{"error":"some other error"}'
+        result = _status_feedback(403, body)
+        assert result.kind == ProxyFeedbackKind.CHALLENGE
+
+    # ============================================================
+    # 非 403 状态码不受 body 影响
+    # ============================================================
+
+    def test_429_with_body_still_rate_limited(self):
+        """429 即使有 body 也应返回 RATE_LIMITED"""
+        body = '{"error":"rate limited"}'
+        result = _status_feedback(429, body)
+        assert result.kind == ProxyFeedbackKind.RATE_LIMITED
+
+    def test_500_with_body_still_upstream_5xx(self):
+        """500 即使有 body 也应返回 UPSTREAM_5XX"""
+        body = '{"error":"internal server error"}'
+        result = _status_feedback(500, body)
+        assert result.kind == ProxyFeedbackKind.UPSTREAM_5XX
+
+    # ============================================================
+    # 大小写不敏感
+    # ============================================================
+
+    def test_403_blocked_user_case_insensitive(self):
+        """body 检查应大小写不敏感"""
+        body = '{"error":"User Is BLOCKED [WKE=unauthorized:BLOCKED-USER]"}'
+        result = _status_feedback(403, body)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+
+    def test_403_email_domain_rejected_case_insensitive(self):
+        """body 检查应大小写不敏感"""
+        body = "EMAIL-DOMAIN-REJECTED"
+        result = _status_feedback(403, body)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
 
 
 if __name__ == "__main__":

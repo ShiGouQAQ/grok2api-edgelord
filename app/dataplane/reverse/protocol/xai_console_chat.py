@@ -35,6 +35,7 @@ import orjson
 from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
+from app.dataplane.reverse.protocol.xai_usage import is_invalid_credentials_body
 
 
 # ---------------------------------------------------------------------------
@@ -44,36 +45,38 @@ from app.platform.config.snapshot import get_config
 # console.x.ai 上可用的模型（通过 grok.com SSO 免费访问）
 # key = grok2api 对外暴露的模型名，value = console.x.ai 实际 model 字段
 CONSOLE_MODELS: dict[str, str] = {
-    "grok-4.3-console":                     "grok-4.3",
-    "grok-4.3-low":                         "grok-4.3",
-    "grok-4.3-medium":                      "grok-4.3",
-    "grok-4.3-high":                        "grok-4.3",
-    "grok-4.20-0309-reasoning-console":     "grok-4.20-0309-reasoning",
-    "grok-4.20-0309-console":               "grok-4.20-0309",
+    "grok-4.3-console": "grok-4.3",
+    "grok-4.3-low": "grok-4.3",
+    "grok-4.3-medium": "grok-4.3",
+    "grok-4.3-high": "grok-4.3",
+    "grok-4.20-0309-reasoning-console": "grok-4.20-0309-reasoning",
+    "grok-4.20-0309-console": "grok-4.20-0309",
     "grok-4.20-0309-non-reasoning-console": "grok-4.20-0309-non-reasoning",
-    "grok-4.20-multi-agent-console":        "grok-4.20-multi-agent-0309",
-    "grok-4.20-multi-agent-low":            "grok-4.20-multi-agent-0309",
-    "grok-4.20-multi-agent-medium":         "grok-4.20-multi-agent-0309",
-    "grok-4.20-multi-agent-high":           "grok-4.20-multi-agent-0309",
-    "grok-4.20-multi-agent-xhigh":          "grok-4.20-multi-agent-0309",
-    "grok-build-console":                   "grok-build-0.1",
+    "grok-4.20-multi-agent-console": "grok-4.20-multi-agent-0309",
+    "grok-4.20-multi-agent-low": "grok-4.20-multi-agent-0309",
+    "grok-4.20-multi-agent-medium": "grok-4.20-multi-agent-0309",
+    "grok-4.20-multi-agent-high": "grok-4.20-multi-agent-0309",
+    "grok-4.20-multi-agent-xhigh": "grok-4.20-multi-agent-0309",
+    "grok-build-console": "grok-build-0.1",
 }
 
 # 需要附带 reasoning 字段的模型（grok-4.3 系列需要，grok-4.20 系列不需要）
-_MODELS_WITH_REASONING_FIELD: frozenset[str] = frozenset({
-    "grok-4.3",
-    "grok-4.20-multi-agent-0309",
-})
+_MODELS_WITH_REASONING_FIELD: frozenset[str] = frozenset(
+    {
+        "grok-4.3",
+        "grok-4.20-multi-agent-0309",
+    }
+)
 
 # 模型名后缀 → 固定 effort 值（优先级高于用户传入的 reasoning_effort）
 _MODEL_FIXED_EFFORT: dict[str, str] = {
-    "grok-4.3-low":    "low",
+    "grok-4.3-low": "low",
     "grok-4.3-medium": "medium",
-    "grok-4.3-high":   "high",
-    "grok-4.20-multi-agent-low":    "low",
+    "grok-4.3-high": "high",
+    "grok-4.20-multi-agent-low": "low",
     "grok-4.20-multi-agent-medium": "medium",
-    "grok-4.20-multi-agent-high":   "high",
-    "grok-4.20-multi-agent-xhigh":  "xhigh",
+    "grok-4.20-multi-agent-high": "high",
+    "grok-4.20-multi-agent-xhigh": "xhigh",
 }
 
 # 特殊 max_output_tokens（默认 1_000_000）
@@ -83,29 +86,32 @@ _MODEL_MAX_OUTPUT_TOKENS: dict[str, int] = {
 }
 
 # 支持 web_search / x_search 工具的模型
-_MODELS_WITH_SEARCH_TOOLS: frozenset[str] = frozenset({
-    "grok-4.20-multi-agent-0309",
-    "grok-4.20-0309",
-    "grok-4.20-0309-reasoning",
-    "grok-4.20-0309-non-reasoning",
-    "grok-4.3",
-    "grok-build-0.1",
-})
+_MODELS_WITH_SEARCH_TOOLS: frozenset[str] = frozenset(
+    {
+        "grok-4.20-multi-agent-0309",
+        "grok-4.20-0309",
+        "grok-4.20-0309-reasoning",
+        "grok-4.20-0309-non-reasoning",
+        "grok-4.3",
+        "grok-build-0.1",
+    }
+)
 
 # reasoning effort 映射：OpenAI reasoning_effort → console API effort
 _EFFORT_MAP: dict[str, str] = {
-    "none":    "none",
+    "none": "none",
     "minimal": "low",
-    "low":     "low",
-    "medium":  "medium",
-    "high":    "high",
-    "xhigh":   "xhigh",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
 }
 
 
 # ---------------------------------------------------------------------------
 # Payload builder
 # ---------------------------------------------------------------------------
+
 
 def build_console_payload(
     *,
@@ -145,7 +151,9 @@ def build_console_payload(
                     continue
                 btype = block.get("type", "")
                 if btype == "text":
-                    content_blocks.append({"type": "input_text", "text": block.get("text", "")})
+                    content_blocks.append(
+                        {"type": "input_text", "text": block.get("text", "")}
+                    )
                 elif btype == "image_url":
                     url = (block.get("image_url") or {}).get("url", "")
                     if url:
@@ -161,7 +169,9 @@ def build_console_payload(
             input_items.append({"role": api_role, "content": content_blocks})
 
     # reasoning effort：模型名固定值优先，其次用户传入，最后默认 medium
-    effort = _MODEL_FIXED_EFFORT.get(model) or _EFFORT_MAP.get(reasoning_effort or "medium", "medium")
+    effort = _MODEL_FIXED_EFFORT.get(model) or _EFFORT_MAP.get(
+        reasoning_effort or "medium", "medium"
+    )
 
     # 获取 console 实际模型名
     console_model = CONSOLE_MODELS.get(model, model)
@@ -191,7 +201,10 @@ def build_console_payload(
 
     logger.debug(
         "console payload built: model={} console_model={} input_items={} has_reasoning={}",
-        model, console_model, len(input_items), console_model in _MODELS_WITH_REASONING_FIELD,
+        model,
+        console_model,
+        len(input_items),
+        console_model in _MODELS_WITH_REASONING_FIELD,
     )
     return payload
 
@@ -199,6 +212,7 @@ def build_console_payload(
 # ---------------------------------------------------------------------------
 # SSE stream adapter
 # ---------------------------------------------------------------------------
+
 
 class ConsoleStreamAdapter:
     """Parse console.x.ai SSE events and yield text tokens.
@@ -278,7 +292,10 @@ async def stream_console_chat(
     """
     from app.dataplane.proxy import get_proxy_runtime
     from app.dataplane.proxy.adapters.headers import build_console_headers
-    from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+    from app.dataplane.proxy.adapters.session import (
+        ResettableSession,
+        build_session_kwargs,
+    )
     from app.dataplane.reverse.runtime.endpoint_table import CONSOLE_RESPONSES
 
     proxy = await get_proxy_runtime()
@@ -306,7 +323,7 @@ async def stream_console_chat(
                 body = response.content.decode("utf-8", "replace")[:400]
             except Exception:
                 body = ""
-            await proxy.feedback(lease, _status_feedback(response.status_code))
+            await proxy.feedback(lease, _status_feedback(response.status_code, body))
             raise UpstreamError(
                 f"Console API returned {response.status_code}",
                 status=response.status_code,
@@ -333,21 +350,31 @@ async def stream_console_chat(
                 elif kind == "done":
                     return
         except Exception as exc:
-            raise UpstreamError(f"Console stream read failed: {exc}", status=502) from exc
+            raise UpstreamError(
+                f"Console stream read failed: {exc}", status=502
+            ) from exc
 
 
 def _success_feedback():
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
+
     return ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200)
+
 
 def _transport_error_feedback():
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
+
     return ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
 
-def _status_feedback(status: int):
+
+def _status_feedback(status: int, body: str = ""):
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
+
     if status == 403:
-        kind = ProxyFeedbackKind.CHALLENGE
+        if body and is_invalid_credentials_body(body):
+            kind = ProxyFeedbackKind.FORBIDDEN
+        else:
+            kind = ProxyFeedbackKind.CHALLENGE
     elif status == 429:
         kind = ProxyFeedbackKind.RATE_LIMITED
     elif status >= 500:
