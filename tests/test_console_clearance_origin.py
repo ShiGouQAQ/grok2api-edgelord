@@ -601,7 +601,7 @@ async def test_refresh_clearance_safe_updates_stats():
         "solver_failures": 0,
         "precheck_skips": 0,
     }
-    mock_directory._last_check_time = 0
+    mock_directory._last_check_time = {}
     mock_directory._mihomo = MagicMock()
     mock_directory._mihomo._enabled.return_value = False
     mock_directory._get_proxy_url.return_value = ""
@@ -618,7 +618,8 @@ async def test_refresh_clearance_safe_updates_stats():
     assert mock_directory._stats["solver_success"] == 1
     assert mock_directory._stats["solver_failures"] == 0
     assert mock_directory._stats["total_checks"] == 1
-    assert mock_directory._last_check_time > 0
+    assert mock_directory._stats["cache_misses"] == 1
+    assert len(mock_directory._last_check_time) > 0
 
 
 @pytest.mark.asyncio
@@ -637,7 +638,7 @@ async def test_refresh_clearance_safe_tracks_failures():
         "solver_failures": 0,
         "precheck_skips": 0,
     }
-    mock_directory._last_check_time = 0
+    mock_directory._last_check_time = {}
     mock_directory._mihomo = MagicMock()
     mock_directory._mihomo._enabled.return_value = False
     mock_directory._get_proxy_url.return_value = ""
@@ -654,7 +655,7 @@ async def test_refresh_clearance_safe_tracks_failures():
     assert mock_directory._stats["solver_success"] == 0
     assert mock_directory._stats["solver_failures"] == 1
     assert mock_directory._stats["total_checks"] == 1
-    assert mock_directory._last_check_time == 0
+    assert len(mock_directory._last_check_time) == 0
 
 
 @pytest.mark.asyncio
@@ -675,6 +676,24 @@ async def test_refresh_clearance_safe_no_update_on_none_mode():
     assert mock_directory._stats["solver_success"] == 0
     assert mock_directory._stats["solver_failures"] == 0
     assert mock_directory._stats["total_checks"] == 0
+
+
+@pytest.mark.asyncio
+async def test_admin_refresh_uses_force_to_skip_cache():
+    """验证手动刷新时使用 force=True 跳过缓存"""
+    from app.products.web.admin.clearance import refresh_cf_clearance
+
+    mock_directory = AsyncMock()
+    mock_directory.ensure_valid_clearance.return_value = True
+
+    with patch("app.control.proxy.get_proxy_directory", return_value=mock_directory):
+        result = await refresh_cf_clearance()
+
+    assert result["success"] is True
+    calls = mock_directory.ensure_valid_clearance.call_args_list
+    assert len(calls) == 2
+    assert calls[0].kwargs.get("force") is True or calls[0][1].get("force") is True
+    assert calls[1].kwargs.get("force") is True or calls[1][1].get("force") is True
 
 
 if __name__ == "__main__":

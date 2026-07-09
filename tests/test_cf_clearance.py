@@ -20,7 +20,7 @@ def directory():
         "solver_failures": 0,
         "precheck_skips": 0,
     }
-    dir._last_check_time = 0
+    dir._last_check_time = {}
     dir._check_interval = 3600
     dir._lock = asyncio.Lock()
     dir._clearance_mode = MagicMock()
@@ -40,7 +40,7 @@ async def test_ensure_valid_clearance_disabled(directory):
 @pytest.mark.asyncio
 async def test_ensure_valid_clearance_cache_hit(directory):
     """测试缓存命中"""
-    directory._last_check_time = time.time()
+    directory._last_check_time = {"https://grok.com": time.time()}
 
     result = await directory.ensure_valid_clearance()
     assert result is True
@@ -142,7 +142,7 @@ async def test_refresh_clearance_handles_exception(directory):
 @pytest.mark.asyncio
 async def test_ensure_valid_clearance_force_ignores_cache(directory):
     """测试force=True时忽略缓存"""
-    directory._last_check_time = time.time()
+    directory._last_check_time = {"https://grok.com": time.time()}
 
     with patch.object(
         directory, "_refresh_clearance", return_value=True

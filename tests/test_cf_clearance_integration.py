@@ -22,7 +22,7 @@ class TestCFClearanceIntegration:
             "solver_failures": 0,
             "precheck_skips": 0,
         }
-        directory._last_check_time = 0
+        directory._last_check_time = {}
         directory._check_interval = 3600
         directory._lock = asyncio.Lock()
         directory._clearance_mode = MagicMock()
@@ -54,7 +54,7 @@ class TestCFClearanceIntegration:
             "solver_failures": 0,
             "precheck_skips": 0,
         }
-        directory._last_check_time = 0
+        directory._last_check_time = {}
         directory._check_interval = 3600
         directory._lock = asyncio.Lock()
         directory._clearance_mode = MagicMock()
@@ -84,7 +84,7 @@ class TestCFClearanceIntegration:
             "solver_failures": 0,
             "precheck_skips": 0,
         }
-        directory._last_check_time = 0
+        directory._last_check_time = {}
         directory._check_interval = 3600
         directory._lock = asyncio.Lock()
         directory._clearance_mode = MagicMock()
@@ -114,7 +114,7 @@ class TestCFClearanceIntegration:
             "solver_failures": 0,
             "precheck_skips": 0,
         }
-        directory._last_check_time = 0
+        directory._last_check_time = {}
         directory._check_interval = 3600
         directory._lock = asyncio.Lock()
         directory._clearance_mode = MagicMock()

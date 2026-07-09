@@ -308,7 +308,7 @@ def _make_directory(db_path):
         "solver_failures": 0,
         "precheck_skips": 0,
     }
-    directory._last_check_time = 0
+    directory._last_check_time = {}
     directory._check_interval = 3600
     directory._lock = asyncio.Lock()
     directory._clearance_mode = MagicMock()
@@ -448,7 +448,7 @@ def test_get_stats_db_error_graceful():
         "solver_failures": 0,
         "precheck_skips": 0,
     }
-    directory._last_check_time = 0
+    directory._last_check_time = {}
     directory._check_interval = 3600
     directory._lock = asyncio.Lock()
     directory._clearance_mode = MagicMock()

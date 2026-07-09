@@ -78,7 +78,7 @@ class ProxyDirectory:
             "solver_failures": 0,
             "precheck_skips": 0,
         }
-        self._last_check_time: float = 0
+        self._last_check_time: dict[str, float] = {}  # 按域名维护
         self._check_interval: int = 3600
         self._init_history_database()
 
@@ -592,7 +592,8 @@ class ProxyDirectory:
         self._stats["total_checks"] += success_count + fail_count
         self._stats["cache_misses"] += success_count + fail_count
         if success_count > 0:
-            self._last_check_time = time.time()
+            for key, (proxy_url, clearance_origin) in refresh_targets.items():
+                self._last_check_time[clearance_origin] = time.time()
 
     # ------------------------------------------------------------------
     # Stats and history
@@ -626,19 +627,25 @@ class ProxyDirectory:
         except Exception:
             pass
         total = stats["total_checks"]
+        last_check_time = (
+            max(self._last_check_time.values()) if self._last_check_time else None
+        )
         return {
             "enabled": self._clearance_mode != ClearanceMode.NONE,
-            "cache_valid": self._is_cache_valid(),
-            "last_check_time": self._last_check_time or None,
+            "cache_valid": any(
+                self._is_cache_valid(origin) for origin in self._last_check_time
+            ),
+            "last_check_time": last_check_time,
             "stats": stats,
             "hit_rate": self._stats["cache_hits"] / max(total, 1),
         }
 
-    def _is_cache_valid(self) -> bool:
+    def _is_cache_valid(self, origin: str = "https://grok.com") -> bool:
         """检查缓存是否有效"""
-        if not self._last_check_time:
+        last_check = self._last_check_time.get(origin, 0)
+        if not last_check:
             return False
-        elapsed = time.time() - self._last_check_time
+        elapsed = time.time() - last_check
         return elapsed < self._check_interval
 
     async def _check_cf_challenge(self, test_url: str = "https://grok.com") -> bool:
@@ -730,20 +737,20 @@ class ProxyDirectory:
 
         self._stats["total_checks"] += 1
 
-        if not force and self._is_cache_valid():
+        if not force and self._is_cache_valid(origin):
             self._stats["cache_hits"] += 1
             return True
 
         self._stats["cache_misses"] += 1
 
         async with self._lock:
-            if not force and self._is_cache_valid():
+            if not force and self._is_cache_valid(origin):
                 return True
 
             success = await self._refresh_clearance(origin)
             if success:
                 self._stats["solver_success"] += 1
-                self._last_check_time = time.time()
+                self._last_check_time[origin] = time.time()
             else:
                 self._stats["solver_failures"] += 1
 
@@ -760,7 +767,7 @@ class ProxyDirectory:
                     clearance_origin,
                 )
                 self._stats["precheck_skips"] += 1
-                self._last_check_time = time.time()
+                self._last_check_time[clearance_origin] = time.time()
                 return True
 
             bundle = await self._refresh_bundle_with_node_fallback(
