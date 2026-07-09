@@ -326,12 +326,6 @@ async def stream_console_chat(
                 body = response.content.decode("utf-8", "replace")[:400]
             except Exception:
                 body = ""
-            logger.warning(
-                "console chat error response: status={} headers={} body={}",
-                response.status_code,
-                dict(response.headers),
-                body,
-            )
             await proxy.feedback(lease, _status_feedback(response.status_code, body))
             raise UpstreamError(
                 f"Console API returned {response.status_code}",
@@ -342,7 +336,6 @@ async def stream_console_chat(
         await proxy.feedback(lease, _success_feedback())
 
         current_event = ""
-        first_data = True
         try:
             async for raw_line in response.aiter_lines():
                 # curl-cffi 的 aiter_lines 返回 bytes，先解码为 str
@@ -355,13 +348,6 @@ async def stream_console_chat(
                 if kind == "event":
                     current_event = value
                 elif kind == "data":
-                    if first_data:
-                        logger.debug(
-                            "console chat first data: event={} data={}",
-                            current_event,
-                            value[:200],
-                        )
-                        first_data = False
                     yield current_event, value
                     current_event = ""
                 elif kind == "done":
