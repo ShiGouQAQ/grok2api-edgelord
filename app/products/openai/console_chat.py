@@ -207,6 +207,13 @@ async def completions(
 
                     except UpstreamError as exc:
                         fail_exc = exc
+                        # 调试日志：记录完整的错误信息
+                        logger.debug(
+                            "console chat error details: status={} details={} message={}",
+                            exc.status,
+                            exc.details,
+                            str(exc),
+                        )
                         if (
                             _should_retry_upstream(exc, retry_codes)
                             and attempt < max_retries
