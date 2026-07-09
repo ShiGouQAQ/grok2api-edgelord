@@ -42,7 +42,12 @@ from ._format import (
 
 
 def _body_excerpt(exc: BaseException, limit: int = 200) -> str:
+    # ponytail: UpstreamError.body 存储在 details["body"] 中
     body = getattr(exc, "body", "") or ""
+    if not body and hasattr(exc, "details"):
+        details = getattr(exc, "details", None) or {}
+        if isinstance(details, dict):
+            body = details.get("body", "")
     if not body:
         return ""
     return body[:limit] + ("..." if len(body) > limit else "")
