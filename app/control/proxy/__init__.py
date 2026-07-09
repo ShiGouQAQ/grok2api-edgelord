@@ -590,6 +590,7 @@ class ProxyDirectory:
         self._stats["solver_success"] += success_count
         self._stats["solver_failures"] += fail_count
         self._stats["total_checks"] += success_count + fail_count
+        self._stats["cache_misses"] += success_count + fail_count
         if success_count > 0:
             self._last_check_time = time.time()
 
