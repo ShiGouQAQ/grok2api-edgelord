@@ -339,6 +339,62 @@ class TestStatusFeedbackBodyCheck:
         result = _status_feedback(403, body)
         assert result.kind == ProxyFeedbackKind.FORBIDDEN
 
+    # ============================================================
+    # 500+ 状态码 + transport error body → TRANSPORT_ERROR
+    # ============================================================
+
+    def test_502_curl_error_returns_transport_error(self):
+        """502 + curl 错误应返回 TRANSPORT_ERROR"""
+        body = "Failed to perform, curl: (92) HTTP/2 stream 1 was not closed cleanly: INTERNAL_ERROR"
+        result = _status_feedback(502, body)
+        assert result.kind == ProxyFeedbackKind.TRANSPORT_ERROR
+
+    def test_502_http2_stream_returns_transport_error(self):
+        """502 + HTTP/2 stream 错误应返回 TRANSPORT_ERROR"""
+        body = "HTTP/2 stream 1 was not closed cleanly"
+        result = _status_feedback(502, body)
+        assert result.kind == ProxyFeedbackKind.TRANSPORT_ERROR
+
+    def test_502_connection_refused_returns_transport_error(self):
+        """502 + connection refused 应返回 TRANSPORT_ERROR"""
+        body = "connection refused"
+        result = _status_feedback(502, body)
+        assert result.kind == ProxyFeedbackKind.TRANSPORT_ERROR
+
+    def test_502_ssl_error_returns_transport_error(self):
+        """502 + SSL 错误应返回 TRANSPORT_ERROR"""
+        body = "SSL certificate problem"
+        result = _status_feedback(502, body)
+        assert result.kind == ProxyFeedbackKind.TRANSPORT_ERROR
+
+    def test_502_upstream_error_returns_upstream_5xx(self):
+        """502 + 非 transport 错误应返回 UPSTREAM_5XX"""
+        body = '{"error":"Bad Gateway"}'
+        result = _status_feedback(502, body)
+        assert result.kind == ProxyFeedbackKind.UPSTREAM_5XX
+
+    def test_500_empty_body_returns_upstream_5xx(self):
+        """500 + 空 body 应返回 UPSTREAM_5XX"""
+        result = _status_feedback(500, "")
+        assert result.kind == ProxyFeedbackKind.UPSTREAM_5XX
+
+    def test_500_no_body_returns_upstream_5xx(self):
+        """500 + 无 body 应返回 UPSTREAM_5XX"""
+        result = _status_feedback(500)
+        assert result.kind == ProxyFeedbackKind.UPSTREAM_5XX
+
+    def test_503_connection_reset_returns_transport_error(self):
+        """503 + connection reset 应返回 TRANSPORT_ERROR"""
+        body = "connection reset by peer"
+        result = _status_feedback(503, body)
+        assert result.kind == ProxyFeedbackKind.TRANSPORT_ERROR
+
+    def test_504_timeout_returns_transport_error(self):
+        """504 + timeout 应返回 TRANSPORT_ERROR"""
+        body = "connection timed out"
+        result = _status_feedback(504, body)
+        assert result.kind == ProxyFeedbackKind.TRANSPORT_ERROR
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

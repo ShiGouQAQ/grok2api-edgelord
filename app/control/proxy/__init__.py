@@ -565,6 +565,8 @@ class ProxyDirectory:
                 ("" if affinity == "direct" else affinity, f"https://{clearance_host}"),
             )
 
+        success_count = 0
+        fail_count = 0
         for key, (proxy_url, clearance_origin) in refresh_targets.items():
             affinity, clearance_host = key
             new_bundle = await self._refresh_bundle_with_node_fallback(
@@ -576,11 +578,20 @@ class ProxyDirectory:
                 async with self._lock:
                     self._bundles[key] = new_bundle
                 logger.debug("clearance bundle refreshed: bundle={}", key)
+                success_count += 1
             else:
                 logger.warning(
                     "clearance refresh failed, keeping old bundle: bundle={}",
                     key,
                 )
+                fail_count += 1
+
+        # 更新内存统计
+        self._stats["solver_success"] += success_count
+        self._stats["solver_failures"] += fail_count
+        self._stats["total_checks"] += success_count + fail_count
+        if success_count > 0:
+            self._last_check_time = time.time()
 
     # ------------------------------------------------------------------
     # Stats and history

@@ -296,10 +296,13 @@ async def stream_console_chat(
         ResettableSession,
         build_session_kwargs,
     )
-    from app.dataplane.reverse.runtime.endpoint_table import CONSOLE_RESPONSES
+    from app.dataplane.reverse.runtime.endpoint_table import (
+        CONSOLE_RESPONSES,
+        CONSOLE_BASE,
+    )
 
     proxy = await get_proxy_runtime()
-    lease = await proxy.acquire()
+    lease = await proxy.acquire(clearance_origin=CONSOLE_BASE)
 
     headers = build_console_headers(token, lease=lease)
     payload_bytes = orjson.dumps(payload)
@@ -369,6 +372,7 @@ def _transport_error_feedback():
 
 def _status_feedback(status: int, body: str = ""):
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
+    from app.dataplane.reverse.transport._proxy_feedback import _is_transport_error
 
     if status == 403:
         if body and is_invalid_credentials_body(body):
@@ -378,7 +382,10 @@ def _status_feedback(status: int, body: str = ""):
     elif status == 429:
         kind = ProxyFeedbackKind.RATE_LIMITED
     elif status >= 500:
-        kind = ProxyFeedbackKind.UPSTREAM_5XX
+        if body and _is_transport_error(body):
+            kind = ProxyFeedbackKind.TRANSPORT_ERROR
+        else:
+            kind = ProxyFeedbackKind.UPSTREAM_5XX
     else:
         kind = ProxyFeedbackKind.FORBIDDEN
     return ProxyFeedback(kind=kind, status_code=status)

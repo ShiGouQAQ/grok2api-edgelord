@@ -18,12 +18,21 @@ async def get_cf_clearance_status():
 
 @router.post("/cf-clearance/refresh")
 async def refresh_cf_clearance():
-    """手动刷新cf_clearance"""
-    from app.control.proxy import get_proxy_directory
+    """手动刷新cf_clearance（grok.com + console.x.ai）"""
+    from app.control.proxy import (
+        get_proxy_directory,
+        _DEFAULT_CLEARANCE_ORIGIN,
+        _CONSOLE_CLEARANCE_ORIGIN,
+    )
 
     try:
         directory = await get_proxy_directory()
-        success = await directory.ensure_valid_clearance()
+        # ponytail: 刷新两个域名的 clearance
+        success_grok = await directory.ensure_valid_clearance(_DEFAULT_CLEARANCE_ORIGIN)
+        success_console = await directory.ensure_valid_clearance(
+            _CONSOLE_CLEARANCE_ORIGIN
+        )
+        success = success_grok or success_console
         if success:
             return {"success": True, "message": "刷新成功"}
         else:

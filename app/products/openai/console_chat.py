@@ -41,6 +41,13 @@ from ._format import (
 )
 
 
+def _body_excerpt(exc: BaseException, limit: int = 200) -> str:
+    body = getattr(exc, "body", "") or ""
+    if not body:
+        return ""
+    return body[:limit] + ("..." if len(body) > limit else "")
+
+
 def _log_task_exception(task: "asyncio.Task") -> None:
     exc = task.exception() if not task.cancelled() else None
     if exc:
@@ -68,7 +75,9 @@ async def _quota_sync(token: str, mode_id: int) -> None:
         )
 
 
-async def _fail_sync(token: str, mode_id: int, exc: BaseException | None = None) -> None:
+async def _fail_sync(
+    token: str, mode_id: int, exc: BaseException | None = None
+) -> None:
     """Fire-and-forget: 失败后持久化失败计数。"""
     try:
         svc = get_refresh_service()
@@ -113,16 +122,20 @@ async def completions(
 
     logger.info(
         "console chat request: model={} stream={} messages={}",
-        model, stream, len(messages),
+        model,
+        stream,
+        len(messages),
     )
 
     from app.dataplane.account import _directory as _acct_dir
+
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
     # ── Streaming path ────────────────────────────────────────────────────────
     if stream:
+
         async def _run_stream() -> AsyncGenerator[str, None]:
             excluded: list[str] = []
             for attempt in range(max_retries + 1):
@@ -164,50 +177,67 @@ async def completions(
                         # 流结束，发送 final chunk
                         usage_data = adapter.usage
                         prompt_tokens = (
-                            usage_data.get("input_tokens", 0) if usage_data else
-                            estimate_prompt_tokens(messages)
+                            usage_data.get("input_tokens", 0)
+                            if usage_data
+                            else estimate_prompt_tokens(messages)
                         )
                         completion_tokens = (
-                            usage_data.get("output_tokens", 0) if usage_data else
-                            estimate_tokens(adapter.full_text)
+                            usage_data.get("output_tokens", 0)
+                            if usage_data
+                            else estimate_tokens(adapter.full_text)
                         )
                         usage = build_usage(prompt_tokens, completion_tokens)
-                        final = make_stream_chunk(
-                            response_id, model, "", is_final=True
-                        )
+                        final = make_stream_chunk(response_id, model, "", is_final=True)
                         final["usage"] = usage
                         yield f"data: {orjson.dumps(final).decode()}\n\n"
                         yield "data: [DONE]\n\n"
                         success = True
                         logger.info(
                             "console chat stream completed: attempt={}/{} model={} tokens={}",
-                            attempt + 1, max_retries + 1, model,
+                            attempt + 1,
+                            max_retries + 1,
+                            model,
                             (usage_data or {}).get("total_tokens", "?"),
                         )
 
                     except UpstreamError as exc:
                         fail_exc = exc
-                        if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                        if (
+                            _should_retry_upstream(exc, retry_codes)
+                            and attempt < max_retries
+                        ):
                             _retry = True
                             logger.warning(
-                                "console chat retry: attempt={}/{} status={} token={}...",
-                                attempt + 1, max_retries, exc.status, token[:8],
+                                "console chat retry: attempt={}/{} status={} body={} token={}...",
+                                attempt + 1,
+                                max_retries,
+                                exc.status,
+                                _body_excerpt(exc),
+                                token[:8],
                             )
                         else:
                             logger.warning(
-                                "console chat upstream failed: model={} status={} attempt={}/{}",
-                                model, exc.status, attempt + 1, max_retries + 1,
+                                "console chat upstream failed: model={} status={} attempt={}/{} body={}",
+                                model,
+                                exc.status,
+                                attempt + 1,
+                                max_retries + 1,
+                                _body_excerpt(exc),
                             )
                             raise
 
                 finally:
                     await directory.release(acct)
                     kind = (
-                        FeedbackKind.SUCCESS if success
-                        else feedback_kind_for_error(fail_exc) if fail_exc
+                        FeedbackKind.SUCCESS
+                        if success
+                        else feedback_kind_for_error(fail_exc)
+                        if fail_exc
                         else FeedbackKind.SERVER_ERROR
                     )
-                    await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
+                    await directory.feedback(
+                        token, kind, selected_mode_id, now_s_val=now_s()
+                    )
                     if success:
                         asyncio.create_task(
                             _quota_sync(token, selected_mode_id)
@@ -258,12 +288,14 @@ async def completions(
 
                 usage_data = adapter.usage
                 prompt_tokens = (
-                    usage_data.get("input_tokens", 0) if usage_data else
-                    estimate_prompt_tokens(messages)
+                    usage_data.get("input_tokens", 0)
+                    if usage_data
+                    else estimate_prompt_tokens(messages)
                 )
                 completion_tokens = (
-                    usage_data.get("output_tokens", 0) if usage_data else
-                    estimate_tokens(adapter.full_text)
+                    usage_data.get("output_tokens", 0)
+                    if usage_data
+                    else estimate_tokens(adapter.full_text)
                 )
                 usage = build_usage(prompt_tokens, completion_tokens)
                 result = make_chat_response(
@@ -272,7 +304,8 @@ async def completions(
                 success = True
                 logger.info(
                     "console chat non-stream completed: model={} tokens={}",
-                    model, (usage_data or {}).get("total_tokens", "?"),
+                    model,
+                    (usage_data or {}).get("total_tokens", "?"),
                 )
                 return result
 
@@ -280,8 +313,11 @@ async def completions(
                 fail_exc = exc
                 if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
                     logger.warning(
-                        "console chat non-stream retry: attempt={}/{} status={}",
-                        attempt + 1, max_retries, exc.status,
+                        "console chat non-stream retry: attempt={}/{} status={} body={}",
+                        attempt + 1,
+                        max_retries,
+                        exc.status,
+                        _body_excerpt(exc),
                     )
                     excluded.append(token)
                     continue
@@ -290,8 +326,10 @@ async def completions(
         finally:
             await directory.release(acct)
             kind = (
-                FeedbackKind.SUCCESS if success
-                else feedback_kind_for_error(fail_exc) if fail_exc
+                FeedbackKind.SUCCESS
+                if success
+                else feedback_kind_for_error(fail_exc)
+                if fail_exc
                 else FeedbackKind.SERVER_ERROR
             )
             await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())

@@ -40,6 +40,20 @@ _CF_BANNED_MARKERS = (
     "you have been blocked",
 )
 
+# Transport error markers — curl/HTTP2/connection failures
+# These should trigger proxy rotation, not be treated as upstream server errors
+_TRANSPORT_ERROR_MARKERS = (
+    "curl:",
+    "http/2 stream",
+    "internal_error",
+    "failed to perform",
+    "connection refused",
+    "connection reset",
+    "connection timed out",
+    "ssl",
+    "certificate",
+)
+
 
 def _is_cf_challenge(body: str) -> bool:
     """Return *True* if *body* looks like a solvable Cloudflare challenge page."""
@@ -56,13 +70,19 @@ def _is_node_banned(body: str) -> bool:
     return any(m in lower for m in _CF_BANNED_MARKERS)
 
 
+def _is_transport_error(body: str) -> bool:
+    """Return *True* if *body* indicates a transport-level error (curl/HTTP2/connection)."""
+    lower = body.lower()[:500]
+    return any(m in lower for m in _TRANSPORT_ERROR_MARKERS)
+
+
 def upstream_feedback(exc: UpstreamError) -> ProxyFeedback:
     """Return a ``ProxyFeedback`` for an ``UpstreamError`` response."""
     status = exc.status or 0
+    body = exc.details.get("body", "") if hasattr(exc, "details") else ""
     if status == 401:
         kind = ProxyFeedbackKind.UNAUTHORIZED
     elif status == 403:
-        body = getattr(exc, "body", "") or ""
         if _is_node_banned(body):
             kind = ProxyFeedbackKind.NODE_BANNED
         elif _is_cf_challenge(body):
@@ -72,7 +92,10 @@ def upstream_feedback(exc: UpstreamError) -> ProxyFeedback:
     elif status == 429:
         kind = ProxyFeedbackKind.RATE_LIMITED
     elif status >= 500:
-        kind = ProxyFeedbackKind.UPSTREAM_5XX
+        if _is_transport_error(body):
+            kind = ProxyFeedbackKind.TRANSPORT_ERROR
+        else:
+            kind = ProxyFeedbackKind.UPSTREAM_5XX
     else:
         kind = ProxyFeedbackKind.TRANSPORT_ERROR
     return ProxyFeedback(kind=kind, status_code=status or None)
