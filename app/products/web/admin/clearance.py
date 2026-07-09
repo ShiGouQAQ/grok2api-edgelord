@@ -27,10 +27,12 @@ async def refresh_cf_clearance():
 
     try:
         directory = await get_proxy_directory()
-        # ponytail: 刷新两个域名的 clearance
-        success_grok = await directory.ensure_valid_clearance(_DEFAULT_CLEARANCE_ORIGIN)
+        # ponytail: 刷新两个域名的 clearance，force=True 跳过缓存
+        success_grok = await directory.ensure_valid_clearance(
+            _DEFAULT_CLEARANCE_ORIGIN, force=True
+        )
         success_console = await directory.ensure_valid_clearance(
-            _CONSOLE_CLEARANCE_ORIGIN
+            _CONSOLE_CLEARANCE_ORIGIN, force=True
         )
         success = success_grok or success_console
         if success:
