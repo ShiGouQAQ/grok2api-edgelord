@@ -215,6 +215,12 @@ def is_invalid_credentials_body(body: str) -> bool:
     )
 
 
+def is_content_violation_body(body: str) -> bool:
+    """Return whether *body* indicates content violation (not CF challenge)."""
+    text = str(body or "").lower()
+    return "permission-denied" in text or "content violates" in text
+
+
 def is_invalid_credentials_error(exc: BaseException) -> bool:
     """Return whether *exc* indicates the account is invalid or blocked."""
     if not isinstance(exc, UpstreamError):

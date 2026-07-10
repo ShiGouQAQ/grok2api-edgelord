@@ -35,7 +35,10 @@ import orjson
 from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
-from app.dataplane.reverse.protocol.xai_usage import is_invalid_credentials_body
+from app.dataplane.reverse.protocol.xai_usage import (
+    is_invalid_credentials_body,
+    is_content_violation_body,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +326,8 @@ async def stream_console_chat(
 
         if response.status_code != 200:
             try:
-                body = response.content.decode("utf-8", "replace")[:400]
+                body = await response.atext()
+                body = body[:400]
             except Exception:
                 body = ""
             await proxy.feedback(lease, _status_feedback(response.status_code, body))
@@ -370,12 +374,27 @@ def _transport_error_feedback():
     return ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
 
 
+def _parse_body_code(body: str) -> str:
+    """Extract the 'code' field from an upstream JSON error body."""
+    if not body:
+        return ""
+    try:
+        parsed = orjson.loads(body)
+        code = parsed.get("code", "")
+        return str(code) if code else ""
+    except (orjson.JSONDecodeError, TypeError, AttributeError):
+        return ""
+
+
 def _status_feedback(status: int, body: str = ""):
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
     from app.dataplane.reverse.transport._proxy_feedback import _is_transport_error
 
+    reason = _parse_body_code(body) if body else ""
     if status == 403:
         if body and is_invalid_credentials_body(body):
+            kind = ProxyFeedbackKind.FORBIDDEN
+        elif body and is_content_violation_body(body):
             kind = ProxyFeedbackKind.FORBIDDEN
         else:
             kind = ProxyFeedbackKind.CHALLENGE
@@ -388,7 +407,7 @@ def _status_feedback(status: int, body: str = ""):
             kind = ProxyFeedbackKind.UPSTREAM_5XX
     else:
         kind = ProxyFeedbackKind.FORBIDDEN
-    return ProxyFeedback(kind=kind, status_code=status)
+    return ProxyFeedback(kind=kind, status_code=status, reason=reason)
 
 
 __all__ = [
