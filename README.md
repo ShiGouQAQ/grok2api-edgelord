@@ -3,8 +3,7 @@
 <img alt="Grok2API" src="https://github.com/user-attachments/assets/037a0a6e-7986-41cc-b4af-04df612ee886" />
 
 <h1>Grok Web 能力的 OpenAI 兼容网关</h1>
-
-<h3>多账号池、智能选号、自动维护</h3>
+<h3>edgelord — 巨魔版 · 个人自用 · AI Vibe 编程</h3>
 
 <p>
 将 grok.com 与 console.x.ai 的聊天、图像、视频能力，<br>
@@ -14,13 +13,18 @@
 <p>
 <a href="https://www.python.org/"><img alt="Python" src="https://img.shields.io/badge/python-3.13%2B-3776AB?logo=python&logoColor=white"></a>
 <a href="https://fastapi.tiangolo.com/"><img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.119%2B-009688?logo=fastapi&logoColor=white"></a>
-<a href="https://github.com/jiujiu532/grok2api/pkgs/container/grok2api"><img alt="Docker" src="https://img.shields.io/badge/ghcr.io-jiujiu532%2Fgrok2api-2496ED?logo=docker&logoColor=white"></a>
 <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-16a34a"></a>
+<a href="https://github.com/ShiGouQAQ/grok2api-edgelord"><img alt="GitHub" src="https://img.shields.io/badge/edgelord-111827?logo=github&logoColor=white"></a>
+<a href="#"><img alt="Personal Use" src="https://img.shields.io/badge/for_personal_use_only-FF4500"></a>
+<a href="#"><img alt="AI Vibe" src="https://img.shields.io/badge/AI_Vibe_Coding-8A2BE2"></a>
 </p>
 
 <p>
+<a href="#分支架构">分支架构</a> ·
 <a href="#核心特性">核心特性</a> ·
+<a href="#本分支增强">本分支增强</a> ·
 <a href="#部署指南">部署指南</a> ·
+<a href="#上游同步">上游同步</a> ·
 <a href="#模型列表">模型列表</a> ·
 <a href="#账号配置">账号配置</a> ·
 <a href="#api-端点">API 端点</a> ·
@@ -29,10 +33,44 @@
 
 </div>
 
-> [!NOTE]
-> 本项目仅供学习与研究交流。请务必遵守 Grok 的使用条款及当地法律法规，不得用于非法用途。
+> [!CAUTION]
+> **仅供个人使用。** 本项目为 AI Vibe 编程产物，大部分代码由大模型生成，作者对代码质量、安全性、稳定性不作任何保证。请自行评估风险。
+>
+> 使用 grok.com 和 console.x.ai 的能力时请遵守其服务条款及当地法律法规。
 
-本仓库基于上游 [chenyme/grok2api](https://github.com/chenyme/grok2api) 二次开发，新增多账号池管理、Console 免费模型、配额轮换、防封部署等能力。欢迎 PR 和 Fork，二开请保留原作者与前端标识。
+本仓库是 [jiujiu532/grok2api](https://github.com/jiujiu532/grok2api)（基于 [chenyme/grok2api](https://github.com/chenyme/grok2api)）的**个人巨魔版（Fork）**，采用多层分支架构同步上游功能并在其上叠加本地增强。欢迎 PR 和 Fork，二开请保留原作者与前端标识。
+
+---
+
+## 分支架构
+
+本仓库采用多层上游同步架构，实现与多个上游仓库的持续集成：
+
+```
+上游源 (chenyme 停更) ──→  提取有价值功能
+                              ↓
+活跃上游 (jiujiu532) ──────→  main (合并层 + 本地增强)
+```
+
+| 层级 | 分支 | 来源 | 作用 | 状态 |
+|:---|:---|:---|:---|:---|
+| L1 | `upstream/source` | [chenyme/grok2api](https://github.com/chenyme/grok2api) | 原上游镜像，基础架构来源 | 只读，无新提交 |
+| L2 | `upstream/active` | [jiujiu532/grok2api](https://github.com/jiujiu532/grok2api) | 活跃上游镜像，持续同步功能更新 | 只读，定期同步 |
+| L3 | **`main`** | 合并层 + 本地增强 | **主要开发分支**，接收上游合并并在其上叠加修复/优化 | 活跃 |
+
+**同步方式：**
+
+```bash
+# 1. 获取上游最新代码
+git fetch jiujiu532 && git branch -f upstream/active jiujiu532/main
+
+# 2. 合并到 main
+git checkout main && git merge upstream/active
+
+# 3. 合并完成
+```
+
+> 上游同步工作流（`.github/workflows/branch-stacking-sync.yml`）每日 04:00 UTC 自动检查上游更新，检测到新提交时创建 GitHub Issue 通知。
 
 ---
 
@@ -49,6 +87,32 @@
 | 管理后台 | Admin 配置、账号管理、Web Chat、Masonry 画廊、ChatKit 语音 |
 | CF Clearance 监控 | Cloudflare 求解器状态、历史记录、一键刷新 |
 | Mihomo 代理管理 | 代理节点状态、切换、黑名单管理 |
+
+---
+
+## 本分支增强 vs 上游
+
+| 方面 | jiujiu532/grok2api | edgelord |
+|:---|:---|:---|
+| 基础镜像 | `python:3.13-alpine` | `linuxserver/chrome:latest`（含 Chrome + Xvfb） |
+| 初始化 | 自定义 entrypoint.sh | s6-overlay v3 标准框架 |
+| CF 求解 | FlareSolverr / 手动 | **新增 Turnstile 本地求解** |
+| 代理管理 | 基础代理池 | **新增 Mihomo 集成**（节点切换、黑名单、CF 回退） |
+| Clearance 监控 | 无 | **新增 SQLite 历史数据库 + 管理面板**（重启不丢） |
+| 403 处理 | 全部走 CHALLENGE | **智能分类**：IP 封禁走节点轮换 / CF 挑战走求解 / 违规不重试 |
+| 镜像 | `ghcr.io/jiujiu532/grok2api` | `ghcr.io/shigouqaq/grok2api-edgelord` |
+
+## 部署注意事项
+
+本分支使用 `linuxserver/chrome:latest` 基础镜像，与上游有以下差异：
+
+| 注意事项 | 说明 |
+|:---|:---|
+| **镜像体积较大** | 内置 Chrome 浏览器，镜像约 1.5GB+，拉取时间比上游长 |
+| **Docker 权限** | Chrome 启动需要 `SYS_PTRACE` 权限。如果使用 Turnstile 求解器，Compose 中建议添加 `cap_add: [SYS_PTRACE]`，否则浏览器可能崩溃 |
+| **使用上游镜像** | 本仓库未在 CI 中自动构建镜像，`docker-compose.yml` 默认仍指向 `ghcr.io/jiujiu532/grok2api:latest`。如需使用本分支镜像需自行构建或修改 `image` 字段 |
+| **Mihomo 集成** | 需要额外部署 [Mihomo](https://github.com/MetaCubeX/mihomo) 并暴露 REST API（默认 `127.0.0.1:9093`）。参考 `mihomo-xai.yaml` 配置 |
+| **Turnstile 求解** | 不使用 Turnstile 求解器时，`proxy.clearance.mode` 保持默认 `none`，可用 FlareSolverr 或手动模式，镜像差异不影响 |
 
 ---
 
@@ -71,11 +135,14 @@
 **Docker Compose（推荐）：**
 
 ```bash
-git clone https://github.com/jiujiu532/grok2api
-cd grok2api/grok2api-main/grok2api-main
+git clone https://github.com/ShiGouQAQ/grok2api-edgelord
+cd grok2api-edgelord
 cp .env.example .env
 docker compose up -d
 ```
+
+> `docker-compose.yml` 默认使用 `ghcr.io/jiujiu532/grok2api:latest` 镜像。
+> 如需使用本分支构建的镜像，修改 `image` 为 `ghcr.io/shigouqaq/grok2api-edgelord:latest` 或自行构建。
 
 查看日志：
 
@@ -119,8 +186,8 @@ docker run -d `
 > **前置要求**：服务器需支持 `NET_ADMIN` + `SYS_MODULE` 权限（KVM/XEN 虚拟化均支持，OpenVZ/LXC 不支持）。
 
 ```bash
-git clone https://github.com/jiujiu532/grok2api
-cd grok2api/grok2api-main/grok2api-main
+git clone https://github.com/ShiGouQAQ/grok2api-edgelord
+cd grok2api-edgelord
 docker compose -f docker-compose.warp.yml up -d
 ```
 
@@ -160,38 +227,20 @@ docker compose -f docker-compose.warp.yml up -d --no-deps grok2api
 ```
 
 > `--no-deps` 确保只重启 grok2api，WARP/Privoxy/FlareSolverr 继续运行不中断。
-> 
+>
 > `./data/` 中的配置（`config.toml`）和数据库（`accounts.db`）挂载在 volume 中，升级不会覆盖。
 
 ### 回滚
 
 ```bash
-# 查看可用版本：https://github.com/jiujiu532/grok2api/pkgs/container/grok2api
 docker pull ghcr.io/jiujiu532/grok2api:<tag>
-
-# 标准版回滚
 docker compose up -d --no-deps grok2api
-
-# 防封版回滚
-docker compose -f docker-compose.warp.yml up -d --no-deps grok2api
 ```
 
 ### 卸载
 
-**标准版卸载：**
-
 ```bash
-cd grok2api/grok2api-main/grok2api-main
 docker compose down
-# 如需删除数据（不可恢复）：
-rm -rf ./data ./logs
-```
-
-**防封版卸载：**
-
-```bash
-cd grok2api/grok2api-main/grok2api-main
-docker compose -f docker-compose.warp.yml down
 # 如需删除数据（不可恢复）：
 rm -rf ./data ./logs
 ```
@@ -201,10 +250,7 @@ rm -rf ./data ./logs
 数据完全保留，无需重新配置：
 
 ```bash
-# 停止标准版
 docker compose down
-
-# 用防封版启动（自动检测已有配置，不覆盖）
 docker compose -f docker-compose.warp.yml up -d
 ```
 
@@ -217,8 +263,8 @@ docker compose -f docker-compose.warp.yml up -d
 前置：Python 3.13+、[uv](https://docs.astral.sh/uv/getting-started/installation/)
 
 ```bash
-git clone https://github.com/jiujiu532/grok2api
-cd grok2api/grok2api-main/grok2api-main
+git clone https://github.com/ShiGouQAQ/grok2api-edgelord
+cd grok2api-edgelord
 cp .env.example .env && uv sync
 uv run granian --interface asgi --host 0.0.0.0 --port 8000 --workers 1 app.main:app
 ```
@@ -237,19 +283,36 @@ uv run granian --interface asgi --host 0.0.0.0 --port 8000 --workers 1 app.main:
 
 ---
 
+## 上游同步
+
+本仓库使用 `branch-stacking-maintenance` 工作流管理多层上游同步：
+
+| 机制 | 说明 |
+| :-- | :-- |
+| **GitHub Actions** | 每日 04:00 UTC 自动检测 [jiujiu532/grok2api](https://github.com/jiujiu532/grok2api) 的新提交，检测到时创建 Issue 通知 |
+| **手动同步** | 见 [upstream-sync-guide.md](upstream-sync-guide.md) |
+
+**格式保护策略：**
+
+> [!IMPORTANT]
+> **禁止对上游代码运行 `ruff format`**。上游代码有自己的格式风格，自动格式化会导致大量无意义 diff 和合并冲突。
+> 详情见 [upstream-sync-guide.md](upstream-sync-guide.md)。
+
+---
+
 ## 模型列表
 
-### Chat（ grok.com）
+### Chat（grok.com）
 
-basic表示free账号，spuer和heavy 为付费
+basic 表示 free 账号，super 和 heavy 为付费。
 
 | 模型名 | mode | 账号等级 | 备注 |
 | :-- | :-- | :-- | :-- |
-| `grok-4.20-fast` / `grok-4.3-fast` | fast | basic（优先高等级） | 
-| `grok-4.20-auto` | auto | super | 
-| `grok-4.20-expert` | expert | super | 
-| `grok-4.20-heavy` | heavy | heavy | |
-| `grok-4.3-beta` | grok-420-computer-use-sa | super | 
+| `grok-4.20-fast` / `grok-4.3-fast` | fast | basic（优先高等级） |
+| `grok-4.20-auto` | auto | super |
+| `grok-4.20-expert` | expert | super |
+| `grok-4.20-heavy` | heavy | heavy |
+| `grok-4.3-beta` | grok-420-computer-use-sa | super |
 | `grok-4.20-multi-agent-0309` | heavy | heavy |
 | `grok-4.20-0309-non-reasoning` | fast | basic |
 | `grok-4.20-0309` | auto | super |
@@ -261,7 +324,7 @@ basic表示free账号，spuer和heavy 为付费
 | `grok-4.20-0309-heavy` | auto | heavy |
 | `grok-4.20-0309-reasoning-heavy` | expert | heavy |
 
-### Chat（ console.x.ai）
+### Chat（console.x.ai）
 
 通过 SSO Token 免费访问，不消耗付费额度。所有免费模型使用 **basic** 等级账号。
 
@@ -274,16 +337,16 @@ basic表示free账号，spuer和heavy 为付费
 | `grok-4.20-0309-console` | 默认 | basic |
 | `grok-4.20-0309-reasoning-console` | 固定 reasoning | basic |
 | `grok-4.20-0309-non-reasoning-console` | 无 reasoning | basic |
-| `grok-4.20-multi-agent-console` | 用户传入（默认 medium） | basic|
-| `grok-4.20-multi-agent-low` | low（固定）→ 4 agents | basic|
-| `grok-4.20-multi-agent-medium` | medium（固定）→ 4 agents | basic|
+| `grok-4.20-multi-agent-console` | 用户传入（默认 medium） | basic |
+| `grok-4.20-multi-agent-low` | low（固定）→ 4 agents | basic |
+| `grok-4.20-multi-agent-medium` | medium（固定）→ 4 agents | basic |
 | `grok-4.20-multi-agent-high` | high（固定）→ 16 agents | basic |
-| `grok-4.20-multi-agent-xhigh` | xhigh（固定）→ 16 agents | basic|
+| `grok-4.20-multi-agent-xhigh` | xhigh（固定）→ 16 agents | basic |
 | `grok-build-console` | 默认 | basic |
 
 **Console 配额**：20 次 / 60 分钟窗口，采用延迟恢复轮换策略（消耗至剩余 12 次时启动计时器，评分机制自动轮换到其他账号）。后台每 30 秒巡检并自动重置过期配额。
 
-### Image / Video（ grok.com）
+### Image / Video（grok.com）
 
 | 模型名 | 能力 | 账号等级 |
 | :-- | :-- | :-- |
@@ -294,8 +357,6 @@ basic表示free账号，spuer和heavy 为付费
 
 ---
 
-
-
 ## 账号配置
 
 | 类型 | 等级 | 适用模型 |
@@ -303,7 +364,7 @@ basic表示free账号，spuer和heavy 为付费
 | 付费账号（x.ai 官方） | super / heavy | `grok-4.20-*`、`grok-4.3-beta`、`grok-4.3-fast` |
 | 免费账号（console.x.ai SSO） | basic | 所有 `*-console` / `*-low` / `*-medium` / `*-high` / `*-xhigh` |
 
-**免费账号获取方式**：
+**免费账号获取方式：**
 
 1. 浏览器 F12 打开开发者工具
 2. 访问 `https://console.x.ai/`
@@ -407,80 +468,76 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## 更新日志
 
-### v0.1.7
+### Beyond v0.2.2 — edgelord 本地增强
+
+**CF Clearance 增强**
+- CF Clearance 统计改为从 SQLite 实时聚合，修复重启后 stats 归零
+- 手动刷新时跳过缓存，确保同时刷新 grok.com 和 x.ai 两个域名
+- 监控 API 补充 `last_check_time` 字段
+- CF Clearance 页面修复 i18n 初始化回调错误
+- 新增 CF Clearance get_stats() SQLite 聚合测试
+
+**Console 稳定性**
+- 区分 Console 403 内容违规与 CF 挑战，解析 429/403 body code 并传入 reason
+- 修复 Console 代理轮换与 CF 刷新问题
+- Console 403 账号封禁与 CF 挑战区分
+
+**代理层**
+- `_last_check_time` 改为按域名维护字典
+- 自动刷新更新 `cache_misses` 统计
+
+**工程基础**
+- 添加 CLAUDE.md 项目规则文档，便于 AI 协作开发
+- 添加上游代码同步与格式规范文档（`upstream-sync-guide.md`）
+- 升级全部依赖到最新版本
+- 上游同步 GitHub Actions 工作流
+
+### v0.2.2 (jiujiu532)
+
+- SQLite WAL 模式在 NFS/特殊 Docker 挂载时静默 fallback，修复 issue #31
+- 新增已删除账号定时物理清理
+- 账号列表加载性能优化
+
+### v0.2.1 (jiujiu532)
+
+- Console 429 误判缓和 — 滑动窗口 + 自动恢复
+- Console 429 EXPIRED 判定改用独立计数器，阈值放宽到 3 次
+- 优化账号选号机制
+
+### v0.1.8 (jiujiu532)
+
+- 配额机制深度审查修复 10 个 bug
+- Console 429 直接清零配额的 bug 修复
+- Console 配额巡检优化 — 直接 SQL 批量重置
+- 批量导入账号性能优化 — executemany + 配额缓存
+
+### v0.1.7 (jiujiu532)
 
 **新功能**
-
-- 🔌 **Console 原生工具调用支持**（[PR#24](https://github.com/jiujiu532/grok2api/pull/24)，感谢 @daoguademeng）
-  - Console 模型支持 OpenAI 兼容的 `tools` / `tool_choice` 参数
-  - 客户端 function tools（如 bash、read）可稳定产出 `tool_calls`
-  - Grok 内置工具（web_search、x_search 等 19 个）保持内部语义，不泄露为客户端 tool_calls
-  - 支持多轮 tool-call 上下文（assistant tool_calls + tool result 正确转换）
-  - 新增 738 行回归测试覆盖核心逻辑
+- Console 原生工具调用支持（OpenAI 兼容的 `tools` / `tool_choice` 参数）
+- 客户端 function tools（如 bash、read）可稳定产出 `tool_calls`
+- Grok 内置工具（web_search、x_search 等 19 个）保持内部语义，不泄露为客户端 tool_calls
+- 新增 738 行回归测试覆盖核心逻辑
 
 **优化**
-
-- 🔧 **Console 配额参数调整**：恢复周期从 15 分钟改为 30 分钟，轮换阈值从 15 改为 20，降低单号负载
-- 💓 **SSE 心跳保活**：所有流式接口在数据开始前发送心跳注释，防止思考期间连接超时
-- ⚡ **TXT 导入异步化**：大批量导入不再阻塞，接口立即返回，刷新在后台进行
-- 🔒 **依赖安全升级**：cryptography 48.0.1+、starlette 1.1.0+、python-multipart 0.0.31+
-
-**修复**
-
-- 🐛 修复 NSFW 初始化时生日已锁定的 429 报错（[PR#25](https://github.com/jiujiu532/grok2api/pull/25)，感谢 @Xaihi-nun）
-- 🐛 修复批量刷新结果未区分异常与临时失败的问题
-
-### v0.1.6 (2026-06-20)
+- Console 配额参数调整：恢复周期 30 分钟，轮换阈值 20
+- SSE 心跳保活，防止思考期间连接超时
+- TXT 导入异步化，大批量导入不再阻塞
+- 依赖安全升级
 
 **修复**
-
-- 🐛 恢复 Mihomo 代理节点管理 API（`/mihomo/status`, `/mihomo/switch`, `/mihomo/blacklist/clear`）
-- 🐛 补全 CF Clearance 监控页面的多语言翻译（ja/de/fr/es）
-- 🐛 修复上游同步工作流的变量引用问题
-
-**新增**
-
-- ✨ 添加 CLAUDE.md 项目规则文档，便于 AI 协作开发
-
-### v0.1.5 (2025-06-13)
-
-**优化**
-
-- 🔧 **批量刷新结果优化**：刷新账户时区分"凭证失效（异常）"和"临时失败（网络波动）"两种状态
-  - 前端提示更清晰：`刷新完成：成功 906，异常 40，临时失败 54`
-  - 后端性能优化：批量查询失败账户状态（从 N 次数据库查询降为 1 次）
-  - 异常账户自动进入"异常"筛选组，临时失败不影响账户状态
-
-- 🎯 **导入账户交互改进**（基于 [PR#13](https://github.com/jiujiu532/grok2api/pull/13)）
-  - 新增/导入弹窗中加入"导入后自动开启 NSFW"复选框（默认不勾选）
-  - 工具栏按钮互斥显示：勾选账号时显示批量操作按钮，未勾选显示全局按钮
-  - 去除全局配置 `account.auto_nsfw_on_import`，改为每次导入时手动选择
-
-- ⚙️ **并发数限制调整**
-  - 批量操作硬限制从 50 调整为 80
-  - 配置页并发数输入框添加 `min: 1, max: 80` 强制限制
-  - 防止用户输入超出范围的并发值导致后端压力过大
-
-**修复**
-
-- 🐛 修复配置页数字输入框 `min/max` 属性未生效的问题
-- 🐛 补充 `tokens.py` 缺失的 `Query` 导入（导致服务启动失败）
-- 🐛 补充翻译文件中缺失的 `autoNsfwOnImport` 和 `autoNsfwHint` 键
+- 修复 NSFW 初始化时生日已锁定的 429 报错
+- 修复批量刷新结果未区分异常与临时失败的问题
 
 ---
 
 ## 致谢
 
-- 上游：[chenyme/grok2api](https://github.com/chenyme/grok2api)
+- 上游活跃： [jiujiu532/grok2api](https://github.com/jiujiu532/grok2api)
+- 上游源： [chenyme/grok2api](https://github.com/chenyme/grok2api)
 - DeepWiki：[chenyme/grok2api](https://deepwiki.com/chenyme/grok2api)
 - 项目文档：[blog.cheny.me](https://blog.cheny.me/blog/posts/grok2api)
 - 社区：[Linux.do](https://linux.do)
-
----
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=jiujiu532/grok2api&type=Date)](https://star-history.com/#jiujiu532/grok2api&Date)
 
 ---
 

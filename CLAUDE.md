@@ -10,8 +10,6 @@ Grok2API is an OpenAI/Anthropic-compatible API gateway that proxies grok.com and
 upstream/source (chenyme 停更)  ──┐
                                   ↓ 提取有价值功能
 upstream/active (jiujiu532 活跃) ──→  main (合并层)
-                                        ↓ 个人定制
-                                  custom/my-build (部署层)
 ```
 
 | 层级 | 分支 | 作用 | 状态 |
@@ -19,8 +17,6 @@ upstream/active (jiujiu532 活跃) ──→  main (合并层)
 | L1 | `upstream/source` | 停更上游镜像 (chenyme) | 只读，无新提交 |
 | L2 | `upstream/active` | 活跃上游镜像 (jiujiu532) | 只读，定期同步 |
 | L3 | `main` | 合并层，基于停更上游 + 本地功能 | **主要开发分支** |
-| L5 | `custom/my-build` | 个人定制层，实际部署 | 按需创建 |
-
 **同步命令：**
 ```bash
 # 更新活跃上游
@@ -29,8 +25,7 @@ git fetch jiujiu532 && git branch -f upstream/active jiujiu532/main
 # 合并上游到 main
 git checkout main && git merge upstream/active
 
-# 级联到 custom 分支（如有）
-git checkout custom/my-build && git rebase main
+# 合并完成
 ```
 
 ## Architecture
