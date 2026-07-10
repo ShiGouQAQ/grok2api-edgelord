@@ -327,7 +327,6 @@ async def stream_console_chat(
         if response.status_code != 200:
             try:
                 body = await response.atext()
-                body = body[:400]
             except Exception:
                 body = ""
             await proxy.feedback(lease, _status_feedback(response.status_code, body))

@@ -36,8 +36,9 @@ class AppError(Exception):
             "type":    self.kind,
             "code":    self.code,
         }
-        if "param" in self.details:
-            err["param"] = self.details["param"]
+        for k in ("param", "body"):
+            if k in self.details:
+                err[k] = self.details[k]
         return {"error": err}
 
 

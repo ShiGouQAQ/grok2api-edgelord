@@ -266,11 +266,14 @@ async def test_stream_blocked_user_sends_forbidden():
     mock_lease = MagicMock()
     mock_proxy.acquire.return_value = mock_lease
 
+    body = b'{"error":"User is blocked [WKE=unauthorized:blocked-user]"}'
     mock_response = MagicMock()
     mock_response.status_code = 403
-    mock_response.content = (
-        b'{"error":"User is blocked [WKE=unauthorized:blocked-user]"}'
-    )
+
+    async def mock_atext():
+        return body.decode()
+
+    mock_response.atext = mock_atext
 
     mock_session = AsyncMock()
     mock_session.post.return_value = mock_response
@@ -310,11 +313,14 @@ async def test_stream_email_domain_rejected_sends_forbidden():
     mock_lease = MagicMock()
     mock_proxy.acquire.return_value = mock_lease
 
+    body = b'{"error":"email domain rejected [WKE=account:email-domain-rejected]"}'
     mock_response = MagicMock()
     mock_response.status_code = 403
-    mock_response.content = (
-        b'{"error":"email domain rejected [WKE=account:email-domain-rejected]"}'
-    )
+
+    async def mock_atext():
+        return body.decode()
+
+    mock_response.atext = mock_atext
 
     mock_session = AsyncMock()
     mock_session.post.return_value = mock_response
@@ -694,6 +700,56 @@ async def test_admin_refresh_uses_force_to_skip_cache():
     assert len(calls) == 2
     assert calls[0].kwargs.get("force") is True or calls[0][1].get("force") is True
     assert calls[1].kwargs.get("force") is True or calls[1][1].get("force") is True
+
+
+# ── Body 透传测试 ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stream_non200_body_not_truncated():
+    """验证非200响应 body 不再被截断（>= 400 字符）"""
+    mock_proxy = AsyncMock()
+    mock_lease = MagicMock()
+    mock_proxy.acquire.return_value = mock_lease
+
+    long_body = "x" * 1000
+    mock_response = MagicMock()
+
+    async def mock_atext():
+        return long_body
+
+    mock_response.status_code = 403
+    mock_response.atext = mock_atext
+
+    mock_session = AsyncMock()
+    mock_session.post.return_value = mock_response
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("app.dataplane.proxy.get_proxy_runtime", return_value=mock_proxy),
+        patch(
+            "app.dataplane.proxy.adapters.session.ResettableSession",
+            return_value=mock_session,
+        ),
+        patch(
+            "app.dataplane.proxy.adapters.headers.build_console_headers",
+            return_value={},
+        ),
+        patch(
+            "app.dataplane.proxy.adapters.session.build_session_kwargs", return_value={}
+        ),
+    ):
+        from app.dataplane.reverse.protocol.xai_console_chat import stream_console_chat
+        from app.platform.errors import UpstreamError
+
+        payload = {"model": "grok-4.3", "input": []}
+        with pytest.raises(UpstreamError) as exc_info:
+            async for _ in stream_console_chat("test-token", payload):
+                pass
+
+        assert exc_info.value.details["body"] == long_body
+        assert len(exc_info.value.details["body"]) == 1000
 
 
 if __name__ == "__main__":

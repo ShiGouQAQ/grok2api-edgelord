@@ -114,5 +114,26 @@ class TestUpstreamFeedbackTransportErrors:
         assert result.kind == ProxyFeedbackKind.FORBIDDEN
 
 
+class TestUpstreamErrorToDict:
+    """测试 UpstreamError.to_dict() 包含 body"""
+
+    def test_to_dict_includes_body(self):
+        exc = UpstreamError("test", status=403, body='{"error":"blocked"}')
+        result = exc.to_dict()
+        assert result["error"]["body"] == '{"error":"blocked"}'
+
+    def test_to_dict_includes_long_body(self):
+        long_body = "x" * 1000
+        exc = UpstreamError("test", status=403, body=long_body)
+        result = exc.to_dict()
+        assert result["error"]["body"] == long_body
+        assert len(result["error"]["body"]) == 1000
+
+    def test_to_dict_empty_body(self):
+        exc = UpstreamError("test", status=502, body="")
+        result = exc.to_dict()
+        assert result["error"]["body"] == ""
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

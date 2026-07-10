@@ -86,12 +86,12 @@ def _log_task_exception(task: "asyncio.Task") -> None:
         logger.warning("background task failed: task={} error={}", task.get_name(), exc)
 
 
-def _upstream_body_excerpt(exc: UpstreamError, *, limit: int = 240) -> str:
+def _upstream_body_excerpt(exc: UpstreamError) -> str:
+    # ponytail: 返回完整 body，方便日志审查
     details = getattr(exc, "details", {})
     if not isinstance(details, dict):
         return "-"
-    body = str(details.get("body", "") or "").replace("\n", "\\n")
-    return body[:limit] or "-"
+    return str(details.get("body", "") or "").replace("\n", "\\n") or "-"
 
 
 def _transport_upstream_error(exc: BaseException, *, context: str) -> UpstreamError:
