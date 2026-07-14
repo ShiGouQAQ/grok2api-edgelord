@@ -329,12 +329,15 @@ async def stream_console_chat(
                 body = await response.atext()
             except Exception:
                 body = ""
-            await proxy.feedback(lease, _status_feedback(response.status_code, body))
-            raise UpstreamError(
+            exc = UpstreamError.from_http_response(
                 f"Console API returned {response.status_code}",
                 status=response.status_code,
                 body=body,
             )
+            await proxy.feedback(
+                lease, _status_feedback(response.status_code, body, exc=exc)
+            )
+            raise exc
 
         await proxy.feedback(lease, _success_feedback())
 
@@ -385,9 +388,34 @@ def _parse_body_code(body: str) -> str:
         return ""
 
 
-def _status_feedback(status: int, body: str = ""):
+def _status_feedback(status: int, body: str = "", exc: UpstreamError | None = None):
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
-    from app.dataplane.reverse.transport._proxy_feedback import _is_transport_error
+    from app.dataplane.reverse.transport._proxy_feedback import (
+        _is_cf_challenge,
+        _is_node_banned,
+        _is_transport_error,
+    )
+
+    if exc is not None:
+        if status == 403:
+            if exc.credential_rejected:
+                kind = ProxyFeedbackKind.FORBIDDEN
+            elif _is_node_banned(body):
+                kind = ProxyFeedbackKind.NODE_BANNED
+            elif _is_cf_challenge(body):
+                kind = ProxyFeedbackKind.CHALLENGE
+            else:
+                kind = ProxyFeedbackKind.CHALLENGE
+        elif status == 429 or exc.quota_exhausted:
+            kind = ProxyFeedbackKind.RATE_LIMITED
+        elif status >= 500:
+            if _is_transport_error(body):
+                kind = ProxyFeedbackKind.TRANSPORT_ERROR
+            else:
+                kind = ProxyFeedbackKind.UPSTREAM_5XX
+        else:
+            kind = ProxyFeedbackKind.FORBIDDEN
+        return ProxyFeedback(kind=kind, status_code=status, reason=exc.upstream_code)
 
     reason = _parse_body_code(body) if body else ""
     if status == 403:

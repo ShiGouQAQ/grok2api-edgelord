@@ -78,25 +78,16 @@ def _is_transport_error(body: str) -> bool:
 
 def upstream_feedback(exc: UpstreamError) -> ProxyFeedback:
     """Return a ``ProxyFeedback`` for an ``UpstreamError`` response."""
+    kind = exc.to_proxy_feedback_kind()
     status = exc.status or 0
     body = exc.details.get("body", "") if hasattr(exc, "details") else ""
-    if status == 401:
-        kind = ProxyFeedbackKind.UNAUTHORIZED
-    elif status == 403:
+    # Proxy-layer overrides — UpstreamError fields don't know about CF/transport
+    if status == 403:
         if _is_node_banned(body):
             kind = ProxyFeedbackKind.NODE_BANNED
         elif _is_cf_challenge(body):
             kind = ProxyFeedbackKind.CHALLENGE
-        else:
-            kind = ProxyFeedbackKind.FORBIDDEN
-    elif status == 429:
-        kind = ProxyFeedbackKind.RATE_LIMITED
-    elif status >= 500:
-        if _is_transport_error(body):
-            kind = ProxyFeedbackKind.TRANSPORT_ERROR
-        else:
-            kind = ProxyFeedbackKind.UPSTREAM_5XX
-    else:
+    elif status >= 500 and _is_transport_error(body):
         kind = ProxyFeedbackKind.TRANSPORT_ERROR
     return ProxyFeedback(kind=kind, status_code=status or None)
 

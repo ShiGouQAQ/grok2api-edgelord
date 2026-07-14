@@ -59,7 +59,7 @@ async def post_stream(
                 body,
             )
             await session.close()
-            raise UpstreamError(
+            raise UpstreamError.from_http_response(
                 f"Upstream returned {response.status_code}",
                 status=response.status_code,
                 body=body,
@@ -115,7 +115,7 @@ async def post_json(
             logger.warning(
                 "http json post failed: url={} status={}", url, response.status_code
             )
-            raise UpstreamError(
+            raise UpstreamError.from_http_response(
                 f"Upstream returned {response.status_code}",
                 status=response.status_code,
                 body=body_text,
@@ -166,7 +166,7 @@ async def get_json(
                 response.status_code,
                 body_text,
             )
-            raise UpstreamError(
+            raise UpstreamError.from_http_response(
                 f"Upstream returned {response.status_code}",
                 status=response.status_code,
                 body=body_text,
@@ -212,7 +212,7 @@ async def delete_json(
                 response.status_code,
                 body_text,
             )
-            raise UpstreamError(
+            raise UpstreamError.from_http_response(
                 f"Upstream returned {response.status_code}",
                 status=response.status_code,
                 body=body_text,
@@ -274,7 +274,7 @@ async def get_bytes_stream(
                 body,
             )
             await session.close()
-            raise UpstreamError(
+            raise UpstreamError.from_http_response(
                 f"Upstream returned {response.status_code}",
                 status=response.status_code,
                 body=body,

@@ -121,7 +121,7 @@ async def _execute_transport(
             payload=raw,
         )
     except UpstreamError as exc:
-        category = classify_result(exc.status, exc.details.get("body", ""))
+        category = classify_result(exc.status, exc.details.get("body", ""), exc=exc)
         return ReverseResult(
             category=category,
             status_code=exc.status,

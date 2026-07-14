@@ -52,38 +52,6 @@ class AccountFeedback:
     confirm_expired: bool = False
     apply_usage: bool = True
 
-    @classmethod
-    def from_status_code(
-        cls,
-        status_code: int,
-        mode_id: int = 0,
-        *,
-        reason: str = "",
-        retry_after_ms: int | None = None,
-        confirm_expired: bool = False,
-    ) -> "AccountFeedback":
-        if status_code == 401:
-            kind = FeedbackKind.UNAUTHORIZED
-        elif status_code == 403:
-            kind = FeedbackKind.FORBIDDEN
-        elif status_code == 429:
-            kind = FeedbackKind.RATE_LIMITED
-        elif status_code >= 500:
-            kind = FeedbackKind.SERVER_ERROR
-        elif 200 <= status_code < 300:
-            kind = FeedbackKind.SUCCESS
-        else:
-            kind = FeedbackKind.SERVER_ERROR
-        return cls(
-            kind=kind,
-            mode_id=mode_id,
-            status_code=status_code,
-            reason=reason,
-            retry_after_ms=retry_after_ms,
-            confirm_expired=confirm_expired,
-            apply_usage=False,
-        )
-
 
 # ---------------------------------------------------------------------------
 # State helpers
