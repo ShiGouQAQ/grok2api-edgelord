@@ -17,7 +17,12 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from app.platform.runtime.clock import now_ms
-from ..commands import AccountPatch, AccountUpsert, BulkReplacePoolCommand, ListAccountsQuery
+from ..commands import (
+    AccountPatch,
+    AccountUpsert,
+    BulkReplacePoolCommand,
+    ListAccountsQuery,
+)
 from ..enums import AccountStatus
 from ..models import (
     AccountChangeSet,
@@ -26,46 +31,50 @@ from ..models import (
     AccountRecord,
     RuntimeSnapshot,
 )
-from ..quota_defaults import default_quota_set, BASIC_CONSOLE_LIMIT, BASIC_CONSOLE_WINDOW_SECONDS
+from ..quota_defaults import (
+    default_quota_set,
+    BASIC_CONSOLE_LIMIT,
+    BASIC_CONSOLE_WINDOW_SECONDS,
+)
 
 _TBL_ACCOUNTS = "accounts"
-_TBL_META     = "account_meta"
+_TBL_META = "account_meta"
 
 metadata = sa.MetaData()
 
 accounts_table = sa.Table(
     _TBL_ACCOUNTS,
     metadata,
-    sa.Column("token",            sa.String(512), primary_key=True),
-    sa.Column("pool",             sa.Text,    nullable=False, default="basic"),
-    sa.Column("status",           sa.Text,    nullable=False, default="active"),
-    sa.Column("created_at",       sa.BigInteger, nullable=False),
-    sa.Column("updated_at",       sa.BigInteger, nullable=False),
-    sa.Column("tags",             sa.Text,    nullable=False, default="[]"),
-    sa.Column("quota_auto",       sa.Text,    nullable=False, default="{}"),
-    sa.Column("quota_fast",       sa.Text,    nullable=False, default="{}"),
-    sa.Column("quota_expert",     sa.Text,    nullable=False, default="{}"),
-    sa.Column("quota_heavy",      sa.Text,    nullable=False, default="{}"),
-    sa.Column("quota_grok_4_3",   sa.Text,    nullable=False, default="{}"),
-    sa.Column("quota_console",    sa.Text,    nullable=False, default="{}"),
-    sa.Column("usage_use_count",  sa.Integer, nullable=False, default=0),
+    sa.Column("token", sa.String(512), primary_key=True),
+    sa.Column("pool", sa.Text, nullable=False, default="basic"),
+    sa.Column("status", sa.Text, nullable=False, default="active"),
+    sa.Column("created_at", sa.BigInteger, nullable=False),
+    sa.Column("updated_at", sa.BigInteger, nullable=False),
+    sa.Column("tags", sa.Text, nullable=False, default="[]"),
+    sa.Column("quota_auto", sa.Text, nullable=False, default="{}"),
+    sa.Column("quota_fast", sa.Text, nullable=False, default="{}"),
+    sa.Column("quota_expert", sa.Text, nullable=False, default="{}"),
+    sa.Column("quota_heavy", sa.Text, nullable=False, default="{}"),
+    sa.Column("quota_grok_4_3", sa.Text, nullable=False, default="{}"),
+    sa.Column("quota_console", sa.Text, nullable=False, default="{}"),
+    sa.Column("usage_use_count", sa.Integer, nullable=False, default=0),
     sa.Column("usage_fail_count", sa.Integer, nullable=False, default=0),
     sa.Column("usage_sync_count", sa.Integer, nullable=False, default=0),
-    sa.Column("last_use_at",      sa.BigInteger),
-    sa.Column("last_fail_at",     sa.BigInteger),
+    sa.Column("last_use_at", sa.BigInteger),
+    sa.Column("last_fail_at", sa.BigInteger),
     sa.Column("last_fail_reason", sa.Text),
-    sa.Column("last_sync_at",     sa.BigInteger),
-    sa.Column("last_clear_at",    sa.BigInteger),
-    sa.Column("state_reason",     sa.Text),
-    sa.Column("deleted_at",       sa.BigInteger),
-    sa.Column("ext",              sa.Text,    nullable=False, default="{}"),
-    sa.Column("revision",         sa.BigInteger, nullable=False, default=0),
+    sa.Column("last_sync_at", sa.BigInteger),
+    sa.Column("last_clear_at", sa.BigInteger),
+    sa.Column("state_reason", sa.Text),
+    sa.Column("deleted_at", sa.BigInteger),
+    sa.Column("ext", sa.Text, nullable=False, default="{}"),
+    sa.Column("revision", sa.BigInteger, nullable=False, default=0),
 )
 
 meta_table = sa.Table(
     _TBL_META,
     metadata,
-    sa.Column("key",   sa.String(128), primary_key=True),
+    sa.Column("key", sa.String(128), primary_key=True),
     sa.Column("value", sa.Text, nullable=False),
 )
 
@@ -187,7 +196,9 @@ def _normalize_ssl_mode(dialect: str, raw_mode: str) -> str:
     else:
         canonical = _PG_SSL_MODE_ALIASES.get(mode)
     if not canonical:
-        raise ValueError(f"Unsupported SSL mode {raw_mode!r} for SQL dialect {dialect!r}")
+        raise ValueError(
+            f"Unsupported SSL mode {raw_mode!r} for SQL dialect {dialect!r}"
+        )
     return canonical
 
 
@@ -206,7 +217,9 @@ def _parse_ssl_bool(name: str, raw_value: str | None) -> bool | None:
         return True
     if value in _SSL_BOOL_FALSE:
         return False
-    raise ValueError(f"Unsupported boolean value {raw_value!r} for SQL SSL option {name!r}")
+    raise ValueError(
+        f"Unsupported boolean value {raw_value!r} for SQL SSL option {name!r}"
+    )
 
 
 def _extract_sql_ssl_options(
@@ -214,7 +227,11 @@ def _extract_sql_ssl_options(
     url: str,
 ) -> tuple[str, dict[str, str]]:
     parsed = urlparse(url)
-    ssl_query_keys = _PG_SSL_QUERY_PARAM_KEYS if dialect == "postgresql" else _MYSQL_SSL_QUERY_PARAM_KEYS
+    ssl_query_keys = (
+        _PG_SSL_QUERY_PARAM_KEYS
+        if dialect == "postgresql"
+        else _MYSQL_SSL_QUERY_PARAM_KEYS
+    )
     ssl_options: dict[str, str] = {}
     filtered_query_items: list[tuple[str, str]] = []
     ssl_param_keys = {key.lower() for key in ssl_query_keys}
@@ -235,7 +252,11 @@ def _extract_sql_ssl_options(
 
 def _resolve_ssl_mode(dialect: str, ssl_options: dict[str, str]) -> str | None:
     raw_ssl_mode = next(
-        (ssl_options.get(key) for key in _SQL_SSL_MODE_PARAM_KEYS if ssl_options.get(key)),
+        (
+            ssl_options.get(key)
+            for key in _SQL_SSL_MODE_PARAM_KEYS
+            if ssl_options.get(key)
+        ),
         None,
     )
     if raw_ssl_mode:
@@ -243,23 +264,32 @@ def _resolve_ssl_mode(dialect: str, ssl_options: dict[str, str]) -> str | None:
 
     if ssl_options:
         if dialect == "postgresql":
-            raise ValueError("PostgreSQL SSL URL parameters require sslmode to be set explicitly")
-        raise ValueError("MySQL SSL URL parameters require ssl-mode to be set explicitly")
+            raise ValueError(
+                "PostgreSQL SSL URL parameters require sslmode to be set explicitly"
+            )
+        raise ValueError(
+            "MySQL SSL URL parameters require ssl-mode to be set explicitly"
+        )
     return None
 
 
 def _validate_pg_ssl_options(mode: str | None, ssl_options: dict[str, str]) -> None:
     unsupported = [
-        key for key in _PG_SSL_UNSUPPORTED_PARAM_KEYS
-        if ssl_options.get(key)
+        key for key in _PG_SSL_UNSUPPORTED_PARAM_KEYS if ssl_options.get(key)
     ]
     if unsupported:
         joined = ", ".join(sorted(unsupported))
         raise ValueError(f"Unsupported PostgreSQL SSL URL parameter(s): {joined}")
     if mode == "disable" and _has_ssl_options(ssl_options, _PG_SSL_CERT_PARAM_KEYS):
-        raise ValueError("PostgreSQL SSL certificate parameters cannot be used with sslmode=disable")
-    if mode in {"allow", "prefer"} and _has_ssl_options(ssl_options, _PG_SSL_CERT_PARAM_KEYS):
-        raise ValueError("PostgreSQL sslmode=allow/prefer is not supported with certificate URL parameters")
+        raise ValueError(
+            "PostgreSQL SSL certificate parameters cannot be used with sslmode=disable"
+        )
+    if mode in {"allow", "prefer"} and _has_ssl_options(
+        ssl_options, _PG_SSL_CERT_PARAM_KEYS
+    ):
+        raise ValueError(
+            "PostgreSQL sslmode=allow/prefer is not supported with certificate URL parameters"
+        )
 
 
 def _build_pg_ssl_context(mode: str, ssl_options: dict[str, str]) -> ssl.SSLContext:
@@ -284,10 +314,14 @@ def _build_pg_ssl_context(mode: str, ssl_options: dict[str, str]) -> ssl.SSLCont
     return ctx
 
 
-def _build_mysql_ssl_context(mode: str, ssl_options: dict[str, str]) -> ssl.SSLContext | None:
+def _build_mysql_ssl_context(
+    mode: str, ssl_options: dict[str, str]
+) -> ssl.SSLContext | None:
     if mode == "disabled":
         if _has_ssl_options(ssl_options, _MYSQL_SSL_CERT_PARAM_KEYS):
-            raise ValueError("MySQL SSL certificate parameters cannot be used with ssl-mode=disabled")
+            raise ValueError(
+                "MySQL SSL certificate parameters cannot be used with ssl-mode=disabled"
+            )
         return None
     if mode == "preferred":
         raise ValueError("MySQL ssl-mode=allow/prefer is not supported by aiomysql")
@@ -296,7 +330,9 @@ def _build_mysql_ssl_context(mode: str, ssl_options: dict[str, str]) -> ssl.SSLC
     ssl_capath = ssl_options.get("ssl-capath") or None
     ssl_cert = ssl_options.get("ssl-cert") or None
     ssl_key = ssl_options.get("ssl-key") or None
-    ssl_check_hostname = _parse_ssl_bool("ssl-check-hostname", ssl_options.get("ssl-check-hostname"))
+    ssl_check_hostname = _parse_ssl_bool(
+        "ssl-check-hostname", ssl_options.get("ssl-check-hostname")
+    )
     ssl_cipher = ssl_options.get("ssl-cipher") or None
 
     ctx = ssl.create_default_context(cafile=ssl_ca, capath=ssl_capath)
@@ -310,7 +346,9 @@ def _build_mysql_ssl_context(mode: str, ssl_options: dict[str, str]) -> ssl.SSLC
 
     if ssl_check_hostname is not None:
         if mode == "required" and ssl_check_hostname:
-            raise ValueError("MySQL ssl-check-hostname=true requires ssl-mode=verify_identity")
+            raise ValueError(
+                "MySQL ssl-check-hostname=true requires ssl-mode=verify_identity"
+            )
         ctx.check_hostname = ssl_check_hostname
     if ssl_cipher:
         ctx.set_ciphers(ssl_cipher)
@@ -368,8 +406,12 @@ def _sql_engine_kwargs(connect_args: dict[str, Any] | None) -> dict[str, Any]:
     # run concurrently.  Keep pools small to avoid exhausting DB connections.
     serverless = _is_serverless()
     kwargs: dict[str, Any] = {
-        "pool_size":    _get_env_int("ACCOUNT_SQL_POOL_SIZE",    1 if serverless else 5,  minimum=1),
-        "max_overflow": _get_env_int("ACCOUNT_SQL_MAX_OVERFLOW", 2 if serverless else 10, minimum=0),
+        "pool_size": _get_env_int(
+            "ACCOUNT_SQL_POOL_SIZE", 1 if serverless else 5, minimum=1
+        ),
+        "max_overflow": _get_env_int(
+            "ACCOUNT_SQL_MAX_OVERFLOW", 2 if serverless else 10, minimum=0
+        ),
         "pool_timeout": _get_env_int("ACCOUNT_SQL_POOL_TIMEOUT", 30, minimum=1),
         "pool_recycle": _get_env_int("ACCOUNT_SQL_POOL_RECYCLE", 1800, minimum=0),
         "pool_pre_ping": True,
@@ -405,20 +447,20 @@ def _evict_cached_engine(engine: AsyncEngine) -> None:
 
 def _row_to_record(row: Any) -> AccountRecord:
     d = dict(row._mapping)
-    d["tags"]  = json.loads(d.get("tags")  or "[]")
-    heavy_raw     = d.pop("quota_heavy",    "{}") or "{}"
-    grok_4_3_raw  = d.pop("quota_grok_4_3", "{}") or "{}"
-    console_raw   = d.pop("quota_console",  "{}") or "{}"
-    heavy_dict    = json.loads(heavy_raw)
+    d["tags"] = json.loads(d.get("tags") or "[]")
+    heavy_raw = d.pop("quota_heavy", "{}") or "{}"
+    grok_4_3_raw = d.pop("quota_grok_4_3", "{}") or "{}"
+    console_raw = d.pop("quota_console", "{}") or "{}"
+    heavy_dict = json.loads(heavy_raw)
     grok_4_3_dict = json.loads(grok_4_3_raw)
-    console_dict  = json.loads(console_raw)
+    console_dict = json.loads(console_raw)
     d["quota"] = {
-        "auto":   json.loads(d.pop("quota_auto",   "{}") or "{}"),
-        "fast":   json.loads(d.pop("quota_fast",   "{}") or "{}"),
+        "auto": json.loads(d.pop("quota_auto", "{}") or "{}"),
+        "fast": json.loads(d.pop("quota_fast", "{}") or "{}"),
         "expert": json.loads(d.pop("quota_expert", "{}") or "{}"),
-        **({"heavy":    heavy_dict}    if heavy_dict    else {}),
+        **({"heavy": heavy_dict} if heavy_dict else {}),
         **({"grok_4_3": grok_4_3_dict} if grok_4_3_dict else {}),
-        **({"console":  console_dict}  if console_dict  else {}),
+        **({"console": console_dict} if console_dict else {}),
     }
     d["ext"] = json.loads(d.get("ext") or "{}")
     return AccountRecord.model_validate(d)
@@ -434,12 +476,12 @@ class SqlAccountRepository:
         dialect: str = "mysql",
         dispose_engine: bool = True,
     ) -> None:
-        self._engine       = engine
-        self._dialect      = dialect   # "mysql" | "postgresql"
-        self._session      = async_sessionmaker(engine, expire_on_commit=False)
+        self._engine = engine
+        self._dialect = dialect  # "mysql" | "postgresql"
+        self._session = async_sessionmaker(engine, expire_on_commit=False)
         self._dispose_engine = dispose_engine
-        self._initialized  = False
-        self._init_lock    = asyncio.Lock()
+        self._initialized = False
+        self._init_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Revision helpers (run inside a transaction)
@@ -449,9 +491,9 @@ class SqlAccountRepository:
         await conn.execute(
             meta_table.update()
             .where(meta_table.c.key == "revision")
-            .values(value=sa.cast(
-                sa.cast(meta_table.c.value, sa.BigInteger) + 1, sa.Text
-            ))
+            .values(
+                value=sa.cast(sa.cast(meta_table.c.value, sa.BigInteger) + 1, sa.Text)
+            )
         )
         row = await conn.execute(
             sa.select(meta_table.c.value).where(meta_table.c.key == "revision")
@@ -472,15 +514,23 @@ class SqlAccountRepository:
     def _build_upsert(self, row: dict[str, Any]):
         if self._dialect == "postgresql":
             from sqlalchemy.dialects.postgresql import insert
+
             stmt = insert(accounts_table).values(**row)
             # On conflict, update all columns except token and created_at.
-            update_cols = {k: stmt.excluded[k] for k in row if k not in ("token", "created_at")}
-            return stmt.on_conflict_do_update(index_elements=["token"], set_=update_cols)
+            update_cols = {
+                k: stmt.excluded[k] for k in row if k not in ("token", "created_at")
+            }
+            return stmt.on_conflict_do_update(
+                index_elements=["token"], set_=update_cols
+            )
         else:
             # MySQL
             from sqlalchemy.dialects.mysql import insert
+
             stmt = insert(accounts_table).values(**row)
-            update_cols = {k: stmt.inserted[k] for k in row if k not in ("token", "created_at")}
+            update_cols = {
+                k: stmt.inserted[k] for k in row if k not in ("token", "created_at")
+            }
             return stmt.on_duplicate_key_update(**update_cols)
 
     # ------------------------------------------------------------------
@@ -510,6 +560,7 @@ class SqlAccountRepository:
             # Seed revision row.
             if self._dialect == "postgresql":
                 from sqlalchemy.dialects.postgresql import insert as pg_insert
+
                 await conn.execute(
                     pg_insert(meta_table)
                     .values(key="revision", value="0")
@@ -517,6 +568,7 @@ class SqlAccountRepository:
                 )
             else:
                 from sqlalchemy.dialects.mysql import insert as my_insert
+
                 await conn.execute(
                     my_insert(meta_table)
                     .values(key="revision", value="0")
@@ -529,8 +581,7 @@ class SqlAccountRepository:
         if "quota_grok_4_3" not in existing:
             if self._dialect == "mysql":
                 await conn.exec_driver_sql(
-                    f"ALTER TABLE {_TBL_ACCOUNTS} "
-                    f"ADD COLUMN quota_grok_4_3 TEXT"
+                    f"ALTER TABLE {_TBL_ACCOUNTS} ADD COLUMN quota_grok_4_3 TEXT"
                 )
                 await conn.exec_driver_sql(
                     f"UPDATE {_TBL_ACCOUNTS} "
@@ -549,8 +600,7 @@ class SqlAccountRepository:
         if "quota_console" not in existing:
             if self._dialect == "mysql":
                 await conn.exec_driver_sql(
-                    f"ALTER TABLE {_TBL_ACCOUNTS} "
-                    f"ADD COLUMN quota_console TEXT"
+                    f"ALTER TABLE {_TBL_ACCOUNTS} ADD COLUMN quota_console TEXT"
                 )
                 await conn.exec_driver_sql(
                     f"UPDATE {_TBL_ACCOUNTS} "
@@ -598,10 +648,16 @@ class SqlAccountRepository:
         await self._ensure_initialized()
         async with self._engine.connect() as conn:
             rev = await self._get_revision(conn)
-            rows = (await conn.execute(
-                sa.select(accounts_table).where(accounts_table.c.deleted_at.is_(None))
-            )).fetchall()
-            return RuntimeSnapshot(revision=rev, items=[_row_to_record(r) for r in rows])
+            rows = (
+                await conn.execute(
+                    sa.select(accounts_table).where(
+                        accounts_table.c.deleted_at.is_(None)
+                    )
+                )
+            ).fetchall()
+            return RuntimeSnapshot(
+                revision=rev, items=[_row_to_record(r) for r in rows]
+            )
 
     async def scan_changes(
         self,
@@ -612,12 +668,14 @@ class SqlAccountRepository:
         await self._ensure_initialized()
         async with self._engine.connect() as conn:
             rev = await self._get_revision(conn)
-            rows = (await conn.execute(
-                sa.select(accounts_table)
-                .where(accounts_table.c.revision > since_revision)
-                .order_by(accounts_table.c.revision)
-                .limit(limit)
-            )).fetchall()
+            rows = (
+                await conn.execute(
+                    sa.select(accounts_table)
+                    .where(accounts_table.c.revision > since_revision)
+                    .order_by(accounts_table.c.revision)
+                    .limit(limit)
+                )
+            ).fetchall()
             items: list[AccountRecord] = []
             deleted: list[str] = []
             batch_max_rev = 0
@@ -646,34 +704,42 @@ class SqlAccountRepository:
         await self._ensure_initialized()
         async with self._engine.begin() as conn:
             rev = await self._bump_revision(conn)
-            ts  = now_ms()
+            ts = now_ms()
             count = 0
             for item in items:
                 try:
-                    token = AccountRecord.model_validate({"token": item.token, "pool": item.pool}).token
+                    token = AccountRecord.model_validate(
+                        {"token": item.token, "pool": item.pool}
+                    ).token
                 except Exception:
                     continue
-                pool = item.pool if item.pool in ("basic", "super", "heavy") else "basic"
-                qs   = default_quota_set(pool)
-                row  = {
-                    "token":            token,
-                    "pool":             pool,
-                    "status":           "active",
-                    "created_at":       ts,
-                    "updated_at":       ts,
-                    "deleted_at":       None,   # clear soft-delete on re-import
-                    "tags":             json.dumps(item.tags),
-                    "quota_auto":       json.dumps(qs.auto.to_dict()),
-                    "quota_fast":       json.dumps(qs.fast.to_dict()),
-                    "quota_expert":     json.dumps(qs.expert.to_dict()),
-                    "quota_heavy":      json.dumps(qs.heavy.to_dict())    if qs.heavy    else "{}",
-                    "quota_grok_4_3":   json.dumps(qs.grok_4_3.to_dict()) if qs.grok_4_3 else "{}",
-                    "quota_console":    json.dumps(qs.console.to_dict())   if qs.console  else "{}",
-                    "usage_use_count":  0,
+                pool = (
+                    item.pool if item.pool in ("basic", "super", "heavy") else "basic"
+                )
+                qs = default_quota_set(pool)
+                row = {
+                    "token": token,
+                    "pool": pool,
+                    "status": "active",
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "deleted_at": None,  # clear soft-delete on re-import
+                    "tags": json.dumps(item.tags),
+                    "quota_auto": json.dumps(qs.auto.to_dict()),
+                    "quota_fast": json.dumps(qs.fast.to_dict()),
+                    "quota_expert": json.dumps(qs.expert.to_dict()),
+                    "quota_heavy": json.dumps(qs.heavy.to_dict()) if qs.heavy else "{}",
+                    "quota_grok_4_3": json.dumps(qs.grok_4_3.to_dict())
+                    if qs.grok_4_3
+                    else "{}",
+                    "quota_console": json.dumps(qs.console.to_dict())
+                    if qs.console
+                    else "{}",
+                    "usage_use_count": 0,
                     "usage_fail_count": 0,
                     "usage_sync_count": 0,
-                    "ext":              json.dumps(item.ext),
-                    "revision":         rev,
+                    "ext": json.dumps(item.ext),
+                    "revision": rev,
                 }
                 await conn.execute(self._build_upsert(row))
                 count += 1
@@ -688,18 +754,20 @@ class SqlAccountRepository:
         await self._ensure_initialized()
         async with self._engine.begin() as conn:
             rev = await self._bump_revision(conn)
-            ts  = now_ms()
+            ts = now_ms()
             count = 0
             for patch in patches:
                 # S3 修复：SELECT FOR UPDATE 锁行，避免多个并发 patch_accounts
                 # 在 read-modify-write 期间互相覆盖（JSON 列 / tags / ext 的 lost-update）。
                 # 数值列改用原子表达式 col=col+delta，无需依赖 Python 端计算。
                 # SQLite 在 SQL 后端不走这条路径（用 local.py 的 asyncio.Lock 串行化）。
-                row = (await conn.execute(
-                    sa.select(accounts_table)
-                    .where(accounts_table.c.token == patch.token)
-                    .with_for_update()
-                )).fetchone()
+                row = (
+                    await conn.execute(
+                        sa.select(accounts_table)
+                        .where(accounts_table.c.token == patch.token)
+                        .with_for_update()
+                    )
+                ).fetchone()
                 if row is None:
                     continue
                 record = _row_to_record(row)
@@ -738,18 +806,18 @@ class SqlAccountRepository:
                 # GREATEST 在 MySQL/PostgreSQL 上均原生支持。
                 if patch.usage_use_delta is not None:
                     delta = int(patch.usage_use_delta)
-                    updates["usage_use_count"] = sa.text(
-                        f"GREATEST(0, usage_use_count + {delta})"
+                    updates["usage_use_count"] = sa.func.greatest(
+                        0, accounts_table.c.usage_use_count + delta
                     )
                 if patch.usage_fail_delta is not None:
                     delta = int(patch.usage_fail_delta)
-                    updates["usage_fail_count"] = sa.text(
-                        f"GREATEST(0, usage_fail_count + {delta})"
+                    updates["usage_fail_count"] = sa.func.greatest(
+                        0, accounts_table.c.usage_fail_count + delta
                     )
                 if patch.usage_sync_delta is not None:
                     delta = int(patch.usage_sync_delta)
-                    updates["usage_sync_count"] = sa.text(
-                        f"GREATEST(0, usage_sync_count + {delta})"
+                    updates["usage_sync_count"] = sa.func.greatest(
+                        0, accounts_table.c.usage_sync_count + delta
                     )
 
                 tags = list(record.tags)
@@ -767,15 +835,22 @@ class SqlAccountRepository:
                 if patch.ext_merge:
                     ext.update(patch.ext_merge)
                 if patch.clear_failures:
-                    for k in ("cooldown_until", "cooldown_reason", "disabled_at",
-                              "disabled_reason", "expired_at", "expired_reason",
-                              "forbidden_strikes", "console_429_count"):
+                    for k in (
+                        "cooldown_until",
+                        "cooldown_reason",
+                        "disabled_at",
+                        "disabled_reason",
+                        "expired_at",
+                        "expired_reason",
+                        "forbidden_strikes",
+                        "console_429_count",
+                    ):
                         ext.pop(k, None)
-                    updates["status"]           = AccountStatus.ACTIVE.value
+                    updates["status"] = AccountStatus.ACTIVE.value
                     updates["usage_fail_count"] = 0
-                    updates["last_fail_at"]     = None
+                    updates["last_fail_at"] = None
                     updates["last_fail_reason"] = None
-                    updates["state_reason"]     = None
+                    updates["state_reason"] = None
                 updates["ext"] = json.dumps(ext)
 
                 await conn.execute(
@@ -795,7 +870,7 @@ class SqlAccountRepository:
         await self._ensure_initialized()
         async with self._engine.begin() as conn:
             rev = await self._bump_revision(conn)
-            ts  = now_ms()
+            ts = now_ms()
             result = await conn.execute(
                 accounts_table.update()
                 .where(
@@ -814,9 +889,11 @@ class SqlAccountRepository:
             return []
         await self._ensure_initialized()
         async with self._engine.connect() as conn:
-            rows = (await conn.execute(
-                sa.select(accounts_table).where(accounts_table.c.token.in_(tokens))
-            )).fetchall()
+            rows = (
+                await conn.execute(
+                    sa.select(accounts_table).where(accounts_table.c.token.in_(tokens))
+                )
+            ).fetchall()
             return [_row_to_record(r) for r in rows]
 
     async def list_accounts(
@@ -833,12 +910,16 @@ class SqlAccountRepository:
             if query.status:
                 stmt = stmt.where(accounts_table.c.status == query.status.value)
 
-            total_row = (await conn.execute(
-                sa.select(sa.func.count()).select_from(stmt.subquery())
-            )).scalar()
+            total_row = (
+                await conn.execute(
+                    sa.select(sa.func.count()).select_from(stmt.subquery())
+                )
+            ).scalar()
             total = int(total_row or 0)
 
-            sort_col = getattr(accounts_table.c, query.sort_by, accounts_table.c.updated_at)
+            sort_col = getattr(
+                accounts_table.c, query.sort_by, accounts_table.c.updated_at
+            )
             if query.sort_desc:
                 stmt = stmt.order_by(sort_col.desc())
             else:
@@ -847,7 +928,7 @@ class SqlAccountRepository:
             stmt = stmt.limit(query.page_size).offset(offset)
 
             rows = (await conn.execute(stmt)).fetchall()
-            rev  = await self._get_revision(conn)
+            rev = await self._get_revision(conn)
             return AccountPage(
                 items=[_row_to_record(r) for r in rows],
                 total=total,
@@ -864,7 +945,7 @@ class SqlAccountRepository:
         await self._ensure_initialized()
         async with self._engine.begin() as conn:
             rev = await self._bump_revision(conn)
-            ts  = now_ms()
+            ts = now_ms()
             del_result = await conn.execute(
                 accounts_table.update()
                 .where(
@@ -890,6 +971,7 @@ class SqlAccountRepository:
         2. 新条件 (M6)：reset_at 已过期（即使 remaining>0）→ 异常数据归位
         """
         import json as _json
+
         now = now_ms()
 
         if self._dialect == "postgresql":
@@ -977,20 +1059,25 @@ class SqlAccountRepository:
                 if count == 0:
                     return 0
 
-                reset_json = _json.dumps({
-                    "remaining": BASIC_CONSOLE_LIMIT,
-                    "total": BASIC_CONSOLE_LIMIT,
-                    "window_seconds": BASIC_CONSOLE_WINDOW_SECONDS,
-                    "reset_at": None,
-                    "synced_at": now,
-                    "source": 0,
-                })
+                reset_json = _json.dumps(
+                    {
+                        "remaining": BASIC_CONSOLE_LIMIT,
+                        "total": BASIC_CONSOLE_LIMIT,
+                        "window_seconds": BASIC_CONSOLE_WINDOW_SECONDS,
+                        "reset_at": None,
+                        "synced_at": now,
+                        "source": 0,
+                    }
+                )
                 rev = await self._bump_revision(session)
-                result = await session.execute(update_sql, {
-                    "reset_json": reset_json,
-                    "rev": rev,
-                    "now": now,
-                })
+                result = await session.execute(
+                    update_sql,
+                    {
+                        "reset_json": reset_json,
+                        "rev": rev,
+                        "now": now,
+                    },
+                )
                 return result.rowcount or count
 
     async def recover_console_expired_accounts(self) -> int:
@@ -1003,6 +1090,7 @@ class SqlAccountRepository:
         - ext.expired_at <= now - 1 hour
         """
         import json as _json
+
         now = now_ms()
         recovery_threshold = now - 3600 * 1000
 
@@ -1038,9 +1126,9 @@ class SqlAccountRepository:
 
         async with self._session() as session:
             async with session.begin():
-                rows = (await session.execute(
-                    select_sql, {"threshold": recovery_threshold}
-                )).fetchall()
+                rows = (
+                    await session.execute(select_sql, {"threshold": recovery_threshold})
+                ).fetchall()
 
                 if not rows:
                     return 0
@@ -1054,15 +1142,22 @@ class SqlAccountRepository:
                         ext = _json.loads(ext_raw) if ext_raw else {}
                     except (ValueError, TypeError):
                         ext = {}
-                    for k in ("expired_at", "expired_reason",
-                              "console_429_count", "console_429_last_at"):
+                    for k in (
+                        "expired_at",
+                        "expired_reason",
+                        "console_429_count",
+                        "console_429_last_at",
+                    ):
                         ext.pop(k, None)
-                    await session.execute(update_sql, {
-                        "ext_json": _json.dumps(ext),
-                        "rev": rev,
-                        "now": now,
-                        "token": token,
-                    })
+                    await session.execute(
+                        update_sql,
+                        {
+                            "ext_json": _json.dumps(ext),
+                            "rev": rev,
+                            "now": now,
+                            "token": token,
+                        },
+                    )
                     count += 1
                 return count
 
@@ -1073,22 +1168,38 @@ class SqlAccountRepository:
             await self._engine.dispose()
 
 
-def _engine_cache_key(dialect: str, normalized_url: str, connect_args: dict[str, Any] | None) -> tuple[str, str, str]:
+def _engine_cache_key(
+    dialect: str, normalized_url: str, connect_args: dict[str, Any] | None
+) -> tuple[str, str, str]:
     """Build a stable cache key from the normalized URL and connect args."""
-    args_key = str(sorted(connect_args.items(), key=lambda kv: kv[0])) if connect_args else ""
+    args_key = (
+        str(sorted(connect_args.items(), key=lambda kv: kv[0])) if connect_args else ""
+    )
     return (dialect, normalized_url, args_key)
 
 
 def create_mysql_engine(url: str) -> AsyncEngine:
     """Create an async SQLAlchemy engine for MySQL."""
-    normalized_url, connect_args = _prepare_sql_url_and_connect_args("mysql", (url or "").strip())
-    return _get_or_create_engine(_engine_cache_key("mysql", normalized_url, connect_args), normalized_url, connect_args)
+    normalized_url, connect_args = _prepare_sql_url_and_connect_args(
+        "mysql", (url or "").strip()
+    )
+    return _get_or_create_engine(
+        _engine_cache_key("mysql", normalized_url, connect_args),
+        normalized_url,
+        connect_args,
+    )
 
 
 def create_pgsql_engine(url: str) -> AsyncEngine:
     """Create an async SQLAlchemy engine for PostgreSQL."""
-    normalized_url, connect_args = _prepare_sql_url_and_connect_args("postgresql", (url or "").strip())
-    return _get_or_create_engine(_engine_cache_key("postgresql", normalized_url, connect_args), normalized_url, connect_args)
+    normalized_url, connect_args = _prepare_sql_url_and_connect_args(
+        "postgresql", (url or "").strip()
+    )
+    return _get_or_create_engine(
+        _engine_cache_key("postgresql", normalized_url, connect_args),
+        normalized_url,
+        connect_args,
+    )
 
 
 __all__ = ["SqlAccountRepository", "create_mysql_engine", "create_pgsql_engine"]

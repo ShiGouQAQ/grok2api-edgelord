@@ -1,0 +1,8 @@
+{
+    "formatter": false,
+    "lsp": {
+        "ruff": {
+            "disabled": true
+        }
+    }
+}

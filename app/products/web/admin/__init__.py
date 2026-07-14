@@ -277,7 +277,7 @@ async def mihomo_status():
     from app.control.proxy import get_proxy_directory
 
     directory = await get_proxy_directory()
-    mihomo = directory._mihomo
+    mihomo = directory.mihomo
 
     mode = get_config("proxy.egress.mode", "direct")
     enabled = mode == "mihomo"
@@ -313,7 +313,7 @@ async def mihomo_switch():
     from app.control.proxy import get_proxy_directory
 
     directory = await get_proxy_directory()
-    mihomo = directory._mihomo
+    mihomo = directory.mihomo
 
     if not mihomo._enabled():
         return {"success": False, "message": "Mihomo 未启用"}
@@ -334,7 +334,7 @@ async def mihomo_clear_blacklist():
     from app.control.proxy import get_proxy_directory
 
     directory = await get_proxy_directory()
-    mihomo = directory._mihomo
+    mihomo = directory.mihomo
 
     mihomo.clear_blacklist()
     return {"success": True, "message": "黑名单已清空"}

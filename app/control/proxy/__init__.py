@@ -578,6 +578,7 @@ class ProxyDirectory:
                 async with self._lock:
                     self._bundles[key] = new_bundle
                 logger.debug("clearance bundle refreshed: bundle={}", key)
+                self._last_check_time[clearance_origin] = time.time()
                 success_count += 1
             else:
                 logger.warning(
@@ -591,9 +592,6 @@ class ProxyDirectory:
         self._stats["solver_failures"] += fail_count
         self._stats["total_checks"] += success_count + fail_count
         self._stats["cache_misses"] += success_count + fail_count
-        if success_count > 0:
-            for key, (proxy_url, clearance_origin) in refresh_targets.items():
-                self._last_check_time[clearance_origin] = time.time()
 
     # ------------------------------------------------------------------
     # Stats and history
@@ -610,6 +608,7 @@ class ProxyDirectory:
             "solver_failures": 0,
             "precheck_skips": 0,
         }
+        conn = None
         try:
             conn = sqlite3.connect(db_path, check_same_thread=False)
             cursor = conn.cursor()
@@ -623,9 +622,11 @@ class ProxyDirectory:
                 else:
                     stats["solver_failures"] = count
             stats["total_checks"] = stats["solver_success"] + stats["solver_failures"]
-            conn.close()
         except Exception:
             pass
+        finally:
+            if conn:
+                conn.close()
         total = stats["total_checks"]
         last_check_time = (
             max(self._last_check_time.values()) if self._last_check_time else None
@@ -923,6 +924,11 @@ class ProxyDirectory:
     def bundles(self) -> dict[BundleKey, ClearanceBundle]:
         """Read-only snapshot of the current clearance bundles."""
         return dict(self._bundles)
+
+    @property
+    def mihomo(self):
+        """Return the Mihomo client instance."""
+        return self._mihomo
 
 
 # ---------------------------------------------------------------------------
