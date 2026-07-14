@@ -396,5 +396,123 @@ class TestStatusFeedbackBodyCheck:
         assert result.kind == ProxyFeedbackKind.TRANSPORT_ERROR
 
 
+class TestStatusFeedbackWithUpstreamError:
+    """测试 _status_feedback(status, body, exc=UpstreamError) 新代码路径"""
+
+    def test_403_credential_rejected_returns_forbidden(self):
+        """403 + credential_rejected → FORBIDDEN"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError(
+            "test", status=403, credential_rejected=True, upstream_code="cred_rejected"
+        )
+        result = _status_feedback(403, "", exc=exc)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+        assert result.reason == "cred_rejected"
+
+    def test_403_node_banned_returns_node_banned(self):
+        """403 + Cloudflare Attention body → NODE_BANNED"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError("test", status=403)
+        result = _status_feedback(403, "Attention Required! | Cloudflare", exc=exc)
+        assert result.kind == ProxyFeedbackKind.NODE_BANNED
+        assert result.reason == ""
+
+    def test_403_cf_challenge_returns_challenge(self):
+        """403 + Just a moment body → CHALLENGE"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError("test", status=403)
+        result = _status_feedback(403, "<html>Just a moment...</html>", exc=exc)
+        assert result.kind == ProxyFeedbackKind.CHALLENGE
+        assert result.reason == ""
+
+    def test_403_no_markers_returns_challenge(self):
+        """403 + empty body + no flags → CHALLENGE (fallback)"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError("test", status=403)
+        result = _status_feedback(403, "", exc=exc)
+        assert result.kind == ProxyFeedbackKind.CHALLENGE
+        assert result.reason == ""
+
+    def test_403_permanent_denial_returns_challenge(self):
+        """403 + permanent_account_denial → CHALLENGE (fallback, not credential)"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError(
+            "test", status=403, permanent_account_denial=True, upstream_code="perm_deny"
+        )
+        result = _status_feedback(403, "", exc=exc)
+        assert result.kind == ProxyFeedbackKind.CHALLENGE
+        assert result.reason == "perm_deny"
+
+    def test_429_returns_rate_limited(self):
+        """429 → RATE_LIMITED"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError("test", status=429, upstream_code="rate_limited")
+        result = _status_feedback(429, "", exc=exc)
+        assert result.kind == ProxyFeedbackKind.RATE_LIMITED
+        assert result.reason == "rate_limited"
+
+    def test_429_quota_exhausted_returns_rate_limited(self):
+        """429 + quota_exhausted → RATE_LIMITED"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError(
+            "test", status=429, quota_exhausted=True, upstream_code="quota"
+        )
+        result = _status_feedback(429, "", exc=exc)
+        assert result.kind == ProxyFeedbackKind.RATE_LIMITED
+        assert result.reason == "quota"
+
+    def test_500_transport_returns_transport_error(self):
+        """500 + connection refused body → TRANSPORT_ERROR"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError("test", status=500, upstream_code="transport")
+        result = _status_feedback(500, "connection refused", exc=exc)
+        assert result.kind == ProxyFeedbackKind.TRANSPORT_ERROR
+        assert result.reason == "transport"
+
+    def test_502_curl_returns_transport_error(self):
+        """502 + curl error body → TRANSPORT_ERROR"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError("test", status=502)
+        result = _status_feedback(502, "curl: (92) HTTP/2 stream error", exc=exc)
+        assert result.kind == ProxyFeedbackKind.TRANSPORT_ERROR
+        assert result.reason == ""
+
+    def test_500_json_returns_upstream_5xx(self):
+        """500 + JSON error body → UPSTREAM_5XX (no transport markers)"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError("test", status=500)
+        result = _status_feedback(500, '{"error":"internal"}', exc=exc)
+        assert result.kind == ProxyFeedbackKind.UPSTREAM_5XX
+        assert result.reason == ""
+
+    def test_401_returns_forbidden(self):
+        """401 → FORBIDDEN (fallback else branch)"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError("test", status=401)
+        result = _status_feedback(401, "", exc=exc)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+        assert result.reason == ""
+
+    def test_404_returns_forbidden(self):
+        """404 → FORBIDDEN (fallback else branch)"""
+        from app.platform.errors import UpstreamError
+
+        exc = UpstreamError("test", status=404)
+        result = _status_feedback(404, "", exc=exc)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+        assert result.reason == ""
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

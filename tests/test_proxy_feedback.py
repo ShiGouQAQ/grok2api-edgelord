@@ -135,5 +135,131 @@ class TestUpstreamErrorToDict:
         assert result["error"]["body"] == ""
 
 
+class TestUpstreamFeedbackWithStructuredError:
+    """测试 upstream_feedback() 使用 from_http_response() 创建的结构化 UpstreamError"""
+
+    def test_401_returns_unauthorized(self):
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 401",
+            status=401,
+            body='{"error":{"code":"AUTH_ERR"}}',
+        )
+        assert exc.credential_rejected is True
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.UNAUTHORIZED
+
+    def test_402_returns_rate_limited(self):
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 402",
+            status=402,
+            body="anything",
+        )
+        assert exc.quota_exhausted is True
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.RATE_LIMITED
+
+    def test_429_returns_rate_limited(self):
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 429",
+            status=429,
+            body="rate limited",
+        )
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.RATE_LIMITED
+
+    def test_403_blocked_user_returns_unauthorized(self):
+        """REGRESSION: Old code returned FORBIDDEN for any 403 without CF/node-banned body.
+        New code classifies blocked-user as credential_rejected=True, which maps to
+        UNAUTHORIZED via to_proxy_feedback_kind(). This changes proxy behavior:
+        UNAUTHORIZED triggers clearance refresh, FORBIDDEN does not.
+
+        This is INTENTIONAL — a blocked account should invalidate clearance to force
+        re-authentication rather than pretending the account is valid but forbidden."""
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 403",
+            status=403,
+            body='{"error":{"code":"BLOCKED_USER","message":"blocked-user"}}',
+        )
+        assert exc.credential_rejected is True
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.UNAUTHORIZED
+
+    def test_403_invalid_credentials_returns_unauthorized(self):
+        """REGRESSION: Same as blocked-user — invalid-credentials sets credential_rejected."""
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 403",
+            status=403,
+            body='{"error":"invalid-credentials"}',
+        )
+        assert exc.credential_rejected is True
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.UNAUTHORIZED
+
+    def test_403_cf_challenge_returns_challenge(self):
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 403",
+            status=403,
+            body="<html><title>Just a moment...</title></html>",
+        )
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.CHALLENGE
+
+    def test_403_node_banned_returns_node_banned(self):
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 403",
+            status=403,
+            body="<html>Attention Required! | Cloudflare</html>",
+        )
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.NODE_BANNED
+
+    def test_403_permanent_denial_returns_forbidden(self):
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 403",
+            status=403,
+            body='{"error":"access to the chat endpoint is denied"}',
+        )
+        assert exc.permanent_account_denial is True
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+
+    def test_403_quota_exhausted_returns_rate_limited(self):
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 403",
+            status=403,
+            body='{"error":"subscription:free-usage-exhausted"}',
+        )
+        assert exc.quota_exhausted is True
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.RATE_LIMITED
+
+    def test_403_random_returns_forbidden(self):
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 403",
+            status=403,
+            body='{"error":"something else"}',
+        )
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
+
+    def test_500_transport_returns_transport_error(self):
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 500",
+            status=500,
+            body="connection refused",
+        )
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.TRANSPORT_ERROR
+
+    def test_500_upstream_returns_upstream_5xx(self):
+        exc = UpstreamError.from_http_response(
+            "Upstream returned 500",
+            status=500,
+            body='{"error":"internal"}',
+        )
+        result = upstream_feedback(exc)
+        assert result.kind == ProxyFeedbackKind.UPSTREAM_5XX
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
