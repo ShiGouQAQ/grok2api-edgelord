@@ -135,10 +135,7 @@ async def _fail_sync(
         svc = get_refresh_service()
         if svc:
             await svc.record_failure_async(token, mode_id, exc)
-            if (
-                current_strategy() == "quota"
-                and getattr(exc, "status", None) == 429
-            ):
+            if current_strategy() == "quota" and getattr(exc, "status", None) == 429:
                 result = await svc.refresh_on_demand()
                 logger.info(
                     "account on-demand refresh triggered: token={}... mode_id={} refreshed={} failed={} rate_limited={}",
@@ -235,9 +232,8 @@ async def _resolve_image(token: str, url: str, image_id: str) -> str:
     cfg = get_config()
     fmt = _normalize_image_format(cfg.get_str("features.image_format", "grok_url"))
 
-    proxy_imagine_public = (
-        _is_imagine_public_url(url)
-        and cfg.get_bool("features.imagine_public_image_proxy", False)
+    proxy_imagine_public = _is_imagine_public_url(url) and cfg.get_bool(
+        "features.imagine_public_image_proxy", False
     )
 
     # Formats that don't need downloading
@@ -446,6 +442,35 @@ async def _stream_chat(
             ) from exc
 
 
+def normalize_response_format(response_format: dict | None) -> dict | None:
+    """Normalize ``response_format`` for upstream compatibility.
+
+    When the format is ``{"type": "json_schema", "json_schema": {...}}``,
+    the inner json_schema fields are promoted to the top level alongside
+    ``"type": "json_schema"``.  The schema's own ``"type"`` key (e.g.
+    ``"object"``) is **skipped** to prevent overwriting the format type
+    marker — this is the fix from upstream Go commit e376c22.
+
+    Returns the normalized dict, or the original if no transformation
+    applies.
+    """
+    if not response_format or not isinstance(response_format, dict):
+        return response_format
+    fmt_type = response_format.get("type")
+    json_schema = response_format.get("json_schema")
+    if (
+        fmt_type != "json_schema"
+        or not json_schema
+        or not isinstance(json_schema, dict)
+    ):
+        return response_format
+    result = {"type": "json_schema"}
+    for key, value in json_schema.items():
+        if key != "type":
+            result[key] = value
+    return result
+
+
 async def completions(
     *,
     model: str,
@@ -457,6 +482,7 @@ async def completions(
     temperature: float = 0.8,
     top_p: float = 0.95,
     request_overrides: dict | None = None,
+    response_format: dict | None = None,
 ) -> dict | AsyncGenerator[str, None]:
     """Entry point for /v1/chat/completions.
 
@@ -480,6 +506,7 @@ async def completions(
     # ── Console API 路由 (console.x.ai/v1/responses) ─────────────────────────
     if spec.is_console_chat():
         from .console_chat import completions as console_completions
+
         return await console_completions(
             model=model,
             messages=messages,
@@ -493,6 +520,21 @@ async def completions(
     message, files = _extract_message(messages)
     if not message.strip():
         raise UpstreamError("Empty message after extraction", status=400)
+
+    # ── response_format: inject json_schema as instructions ─────────────────
+    fmt = normalize_response_format(response_format)
+    if fmt and fmt.get("type") == "json_schema":
+        name = fmt.get("name", "response")
+        schema_text = fmt.get("schema")
+        import orjson
+
+        schema_json = orjson.dumps(schema_text).decode() if schema_text else "{}"
+        message = (
+            f"{message}\n\n"
+            f"You MUST respond with valid JSON conforming to this JSON schema "
+            f"(name={name}):\n{schema_json}\n\n"
+            f"Do NOT include any text outside the JSON object."
+        )
 
     from app.dataplane.account import _directory as _acct_dir
 
@@ -898,6 +940,7 @@ async def completions(
 
 __all__ = [
     "completions",
+    "normalize_response_format",
     "_configured_retry_codes",
     "_should_retry_upstream",
 ]
