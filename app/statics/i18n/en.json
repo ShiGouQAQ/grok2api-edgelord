@@ -193,6 +193,7 @@
     "colToken": "Token",
     "colType": "Account Type",
     "colStatus": "Runtime Status",
+    "colReason": "Failure Reason",
     "colQuota": "Quota",
     "colSuccess": "Success",
     "colFail": "Failed",

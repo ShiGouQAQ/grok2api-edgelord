@@ -192,6 +192,7 @@
     "colToken": "トークン",
     "colType": "アカウント種別",
     "colStatus": "実行状態",
+    "colReason": "失敗理由",
     "colQuota": "クォータ",
     "colSuccess": "成功",
     "colFail": "失敗",

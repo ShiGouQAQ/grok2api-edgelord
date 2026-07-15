@@ -193,6 +193,7 @@
     "colToken": "Token",
     "colType": "账户类型",
     "colStatus": "运行状态",
+    "colReason": "失败原因",
     "colQuota": "额度信息",
     "colSuccess": "成功",
     "colFail": "失败",

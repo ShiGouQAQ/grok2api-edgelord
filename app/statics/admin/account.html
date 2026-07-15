@@ -988,6 +988,7 @@
           <th style="width:200px" data-i18n="account.colToken">Token</th>
           <th class="table-center" style="width:70px" data-i18n="account.colType">类型</th>
           <th class="table-center" style="width:70px" data-i18n="account.colStatus">状态</th>
+          <th style="width:140px" data-i18n="account.colReason">失败原因</th>
           <th data-quota-only>
             <span data-i18n="account.colQuota">额度</span>
             <span style="margin-left:6px;display:inline-flex;align-items:center;gap:3px;vertical-align:middle">
@@ -1493,7 +1494,7 @@ function renderTable(view = getTokenView()) {
 
   document.getElementById('tbody').innerHTML = slice.length
     ? slice.map(rowHtml).join('')
-    : `<tr><td colspan="10" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
+    : `<tr><td colspan="11" class="empty-state">${tr('account.empty', null, '暂无 Token，请点击右上角导入或添加。')}</td></tr>`;
 
   $('pagi-page', tr('account.pageIndicator', { current: total ? curPage : 0, total: pages }, `第 ${total ? curPage : 0} / ${pages} 页`));
   $('section-table-count', total);
@@ -1534,6 +1535,7 @@ function rowHtml(t) {
       </div></td>
     <td class="table-center"><span class="badge badge-${t.pool||'basic'}">${xe(poolLabel(t.pool || 'basic'))}</span></td>
     <td class="table-center">${statusBadge(t.status)}</td>
+    <td style="font-size:12px;color:#9a9a9a;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${reasonText(t)}">${reasonText(t)}</td>
     <td data-quota-only><div class="quota-cell">${qpills(q)}</div></td>
     <td class="table-center" style="font-variant-numeric:tabular-nums;color:#8f8f8f">${success}</td>
     <td class="table-center" style="font-variant-numeric:tabular-nums;color:#9a9a9a">${fail}</td>
@@ -1673,6 +1675,10 @@ function statusBadge(s) {
   };
   const [cls, label] = m[s] || ['badge-invalid', s || tr('account.unknown', null, '未知')];
   return `<span class="badge ${cls}">${label}</span>`;
+}
+function reasonText(t) {
+  const r = t.state_reason || t.last_fail_reason;
+  return r ? r.replace(/_/g, ' ') : '-';
 }
 async function copy(t) {
   try { await navigator.clipboard.writeText(t); showToast(tr('account.copied', null, '已复制'), 'success'); }

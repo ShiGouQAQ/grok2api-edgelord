@@ -192,6 +192,7 @@
     "colToken": "Token",
     "colType": "Tipo de cuenta",
     "colStatus": "Estado operativo",
+    "colReason": "Motivo del fallo",
     "colQuota": "Cuota",
     "colSuccess": "Éxito",
     "colFail": "Error",

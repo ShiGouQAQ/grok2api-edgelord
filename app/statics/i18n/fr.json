@@ -192,6 +192,7 @@
     "colToken": "Token",
     "colType": "Type de compte",
     "colStatus": "Statut d’exécution",
+    "colReason": "Raison d'échec",
     "colQuota": "Quota",
     "colSuccess": "Succès",
     "colFail": "Échec",

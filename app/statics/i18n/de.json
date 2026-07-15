@@ -192,6 +192,7 @@
     "colToken": "Token",
     "colType": "Kontotyp",
     "colStatus": "Laufzeitstatus",
+    "colReason": "Fehlerursache",
     "colQuota": "Quote",
     "colSuccess": "Erfolgreich",
     "colFail": "Fehlgeschlagen",
