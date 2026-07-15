@@ -63,7 +63,7 @@ def _infer_pool_from_live_windows(windows: dict[int, QuotaWindow]) -> str | None
         if inferred != "basic" or auto_win.total == 20:
             return inferred
 
-    for mode_id in (2, 4):
+    for mode_id in (2, 3, 4):
         win = windows.get(mode_id)
         if win is None:
             continue
@@ -71,6 +71,8 @@ def _infer_pool_from_live_windows(windows: dict[int, QuotaWindow]) -> str | None
             return "heavy"
         if win.total == 50:
             return "super"
+        if mode_id == 3 and win.total == 20:
+            return "heavy"
     return None
 
 
@@ -299,6 +301,27 @@ class AccountRefreshService:
         patches: dict[str, dict] = {}
         refreshed = False
         inferred = _infer_pool_from_live_windows(windows)
+
+        # Web SSO tier re-probe: if inference suggests downgrade (None/basic)
+        # but the account previously held a higher tier (super/heavy), try
+        # fetching a higher-tier mode quota to confirm the real tier before
+        # downgrading.  Ported from Go 4f34707 — SyncQuota re-probes before
+        # defaulting to Basic.
+        if (inferred is None or inferred == "basic") and record.pool in (
+            "super",
+            "heavy",
+        ):
+            probe_mode = 3 if record.pool == "heavy" else 2  # heavy=3, expert=2
+            try:
+                probe_window = await self._fetch_mode_quota(
+                    record.token, record.pool, probe_mode
+                )
+                if probe_window is not None and probe_window.total > 0:
+                    windows[probe_mode] = probe_window
+                    inferred = _infer_pool_from_live_windows(windows)
+            except UpstreamError:
+                pass  # probe failed, keep original inference
+
         effective_pool = inferred if (bootstrap and inferred) else record.pool
 
         for mode in ALL_MODES_FULL:
