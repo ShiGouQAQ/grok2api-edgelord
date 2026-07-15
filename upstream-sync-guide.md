@@ -1,41 +1,33 @@
 # 上游代码同步与格式规范
 
-## ⚠️ 重要警告
+## ⚠️ 上游现状
 
-**禁止对上游代码运行 `ruff format` 或任何自动格式化工具！**
+[chenyme/grok2api](https://github.com/chenyme/grok2api) 已恢复开发并**以 Go 完全重写**（提交 `a16837c`），不再有 Python 代码。
 
-上游代码有自己的格式风格，自动格式化会导致：
-1. 大量无意义的 diff，污染 git 历史
-2. 每次合并上游时产生格式冲突
-3. 无法区分是格式变更还是功能变更
-
-**原则：保持上游代码原样，只在本地新增的代码中应用自己的风格。**
+本仓库作为 Python 分支持续跟进，采用 **Go→Python 移植** 方式同步上游修复与功能。
 
 ---
 
 ## 概述
 
-本文档记录上游代码同步流程和格式规范，确保后续修改不会因格式问题导致同步阻塞。
+本文档记录两类上游的同步流程：
 
-## 上游仓库信息
+| 层级 | 上游 | 远程名 | 本地分支 | 技术栈 | 同步方式 |
+|:---|------|--------|----------|--------|----------|
+| **L1** | [jiujiu532/grok2api](https://github.com/jiujiu532/grok2api) | `jiujiu532` | `upstream/active` | Python (同栈) | `git merge` **直接合并** |
+| **L2** | [chenyme/grok2api](https://github.com/chenyme/grok2api) | `source` | `upstream/source` | Go (需翻译) | **分析 → 记录 → 移植** |
 
-- **上游仓库**: https://github.com/jiujiu532/grok2api
-- **上游分支**: main
-- **本地分支架构**:
-  - `upstream/active` - 活跃上游镜像（定期同步）
-  - `main` - 合并层（基于停更上游 + 本地功能）
-  
+---
 
-## 同步流程
+## 方式一：合并 Python 上游 (jiujiu532)
 
 ### 1. 更新上游代码
 
 ```bash
-# 更新活跃上游
 git fetch jiujiu532 && git branch -f upstream/active jiujiu532/main
 ```
 
-### 2. 合并上游到 main
+### 2. 合并到 main
 
 ```bash
 git checkout main && git merge upstream/active
@@ -44,18 +36,100 @@ git checkout main && git merge upstream/active
 ### 3. 解决冲突（如有）
 
 ```bash
-# 查看冲突文件
-git status
-
+git status          # 查看冲突文件
 # 解决冲突后
 git add . && git commit -m "merge: 同步上游代码"
 ```
+
+### 4. 验证
+
+```bash
+uv run pytest tests/ -v
+```
+
+---
+
+## 方式二：Go→Python 移植 (chenyme)
+
+由于 chenyme 上游已转为 Go，无法直接 merge。移植流程如下：
+
+### 1. 更新上游镜像
+
+```bash
+git fetch source && git branch -f upstream/source source/main
+```
+
+### 2. 分析新提交
+
+```bash
+# 查看自上次同步后的新提交
+git log --oneline --no-merges upstream/source
+
+# 按类别分组
+git log --oneline --no-merges upstream/source | grep -E "^(fix|feat|refactor)"
+```
+
+### 3. 评估移植优先级
+
+| 优先级 | 类别 | 处理方式 |
+|--------|------|----------|
+| 🔴 高 | Bug 修复（影响运行） | 优先移植 |
+| 🟡 中 | 新功能（非破坏性） | 评估必要性后移植 |
+| 🟢 低 | 重构、文档、CI 变更 | 按需移植 |
+
+### 4. 移植操作
+
+```bash
+# 在 main 上工作
+git checkout main
+
+# 查看 Go 源文件参考
+git show upstream/source:backend/internal/path/to/file.go
+
+# 编辑对应 Python 文件后提交
+git add -A && git commit -m "port(chenyme): 说明移植了什么"
+```
+
+### 5. 更新移植台账
+
+每次 Go→Python 移植后，**必须**更新 `go-port-ledger.md`：
+
+```bash
+# 编辑台账，添加新移植的提交记录
+vim go-port-ledger.md
+```
+
+台账示例条目：
+
+```markdown
+| 2026-07-15 | abc1234 | feat: ... | ✅ 已移植 | v2.1.0 |
+| 2026-07-14 | def5678 | fix: ... | ⏭️ 跳过 - Go 特有 | — |
+```
+
+移植前永远先查台账：`grep "<提交hash>" go-port-ledger.md` 确认未被处理过。
+
+### 6. Go→Python 移植对照
+
+| Go 概念 | Python 等价 |
+|---------|-------------|
+| `struct` + 方法 | 类 (`class`) + 方法 |
+| `interface` | 抽象基类 (`ABC`) / Protocol |
+| `error` 返回值 | `Exception` 层级 |
+| `context.Context` | `asyncio` 任务/取消 |
+| `goroutine + channel` | `asyncio.Task` / `asyncio.Queue` |
+| `sync.Mutex` | `asyncio.Lock` |
+| `http.Handler` | `FastAPI` route handler |
+| `go.mod` 模块 | `pyproject.toml` 依赖 |
+| `json.RawMessage` | `dict` / `orjson` |
+| `io.ReadCloser` | 异步迭代器 / `aiohttp` stream |
+
+---
 
 ## 格式规范
 
 ### 代码风格
 
-上游代码使用 **ruff** 作为格式化工具，但未配置强制规则。主要风格：
+上游 (jiujiu532) 使用 **ruff** 作为格式化工具，未配置强制规则。主要风格：
 
 1. **缩进**: 4 空格
 2. **行宽**: 无严格限制（建议 120 字符）
@@ -115,9 +189,9 @@ uv run ruff check . && uv run ruff format --check .
 **原则：忽略上游代码的 ruff 警告，不要修复它们。**
 
 上游代码可能有以下类型的警告：
-- `F401` - 未使用的导入
-- `F841` - 未使用的变量
-- `E712` - 比较风格问题
+- `F401` — 未使用的导入
+- `F841` — 未使用的变量
+- `E712` — 比较风格问题
 
 **正确做法：**
 1. 运行 `ruff check .` 查看警告
@@ -189,11 +263,17 @@ name = "grok-4.3"
 
 ## 同步检查清单
 
+### jiujiu532 (Python merge)
 - [ ] `git fetch jiujiu532` 成功
 - [ ] `git merge upstream/active` 无冲突或冲突已解决
 - [ ] `uv run pytest tests/ -v` 全部通过
-- [ ] 本地功能测试通过
 - [ ] ❌ **不要运行** `ruff format` 或 `ruff check --fix .`
+
+### chenyme (Go→Python port)
+- [ ] `git fetch source && git branch -f upstream/source source/main` 成功
+- [ ] `git log --oneline --no-merges upstream/source` 查看新提交
+- [ ] 关键修复已评估移植必要性
+- [ ] 移植代码编译/测试通过
 
 ## 注意事项
 
@@ -201,11 +281,12 @@ name = "grok-4.3"
 2. **不要运行 ruff format**: 这会格式化整个项目，包括上游代码
 3. **不要运行 ruff check --fix .**: 这会修复所有文件的警告，包括上游代码
 4. **只检查本地代码**: 运行 `ruff check` 只看不修，或只修复指定的本地文件
-5. **提交前检查**: 本地修改提交前运行格式检查，避免格式问题阻塞同步
+5. **Go 移植不是简单翻译**: 需要理解 Go 逻辑后在 Python 异步架构中等效实现
+6. **提交前检查**: 本地修改提交前运行格式检查，避免格式问题阻塞同步
 
 ## 相关文件
 
-- `pyproject.toml` - 项目配置和依赖
-- `.ruff_cache/` - ruff 缓存目录（自动生成）
-- `app/` - 主要应用代码
-- `tests/` - 测试代码
+- `pyproject.toml` — 项目配置和依赖
+- `.ruff_cache/` — ruff 缓存目录（自动生成）
+- `app/` — 主要应用代码
+- `tests/` — 测试代码

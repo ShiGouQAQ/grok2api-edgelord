@@ -40,6 +40,8 @@
 
 本仓库是 [jiujiu532/grok2api](https://github.com/jiujiu532/grok2api)（基于 [chenyme/grok2api](https://github.com/chenyme/grok2api)）的**个人巨魔版（Fork）**，采用多层分支架构同步上游功能并在其上叠加本地增强。欢迎 PR 和 Fork，二开请保留原作者与前端标识。
 
+> **上游状态：** [chenyme/grok2api](https://github.com/chenyme/grok2api) 已恢复开发并**以 Go 完全重写**，不再有 Python 代码。本仓库作为 Python 分支持续跟进，采用 **Go→Python 移植**方式同步上游修复与功能。详见[同步策略](#上游同步)。
+
 ---
 
 ## 分支架构
@@ -47,28 +49,35 @@
 本仓库采用多层上游同步架构，实现与多个上游仓库的持续集成：
 
 ```
-上游源 (chenyme 停更) ──→  提取有价值功能
-                              ↓
-活跃上游 (jiujiu532) ──────→  main (合并层 + 本地增强)
+jiujiu532/grok2api (Python — 同栈) ──→  main (直接 merge)
+                                               ↑
+chenyme/grok2api (Go 重写) ─────────────────┘  Go→Python 移植
 ```
 
-| 层级 | 分支 | 来源 | 作用 | 状态 |
-|:---|:---|:---|:---|:---|
-| L1 | `upstream/source` | [chenyme/grok2api](https://github.com/chenyme/grok2api) | 原上游镜像，基础架构来源 | 只读，无新提交 |
-| L2 | `upstream/active` | [jiujiu532/grok2api](https://github.com/jiujiu532/grok2api) | 活跃上游镜像，持续同步功能更新 | 只读，定期同步 |
-| L3 | **`main`** | 合并层 + 本地增强 | **主要开发分支**，接收上游合并并在其上叠加修复/优化 | 活跃 |
+| 层级 | 分支 | 来源 | 作用 | 同步方式 | 状态 |
+|:---|:---|:---|:---|:---|:---|
+| **L1** | `upstream/active` | [jiujiu532/grok2api](https://github.com/jiujiu532/grok2api) | **主上游** (Python，同栈) | `git merge` 直接合并 | 只读，定期同步 |
+| **L2** | `upstream/source` | [chenyme/grok2api](https://github.com/chenyme/grok2api) | 辅助参考 (Go，需翻译) | `git log` → 评估 → 移植 → 记录 | 只读，移植参考 |
+| **L3** | **`main`** | 合并层 + 本地增强 | **主要开发分支** | 接收上游合并 + 叠加本地功能 + Go→Python 移植 | 活跃 |
 
 **同步方式：**
 
-```bash
-# 1. 获取上游最新代码
-git fetch jiujiu532 && git branch -f upstream/active jiujiu532/main
+| 上游 | 技术栈 | 同步方式 | 频率 |
+|------|--------|----------|------|
+| `jiujiu532` **(L1 主上游)** | Python (同栈) | `git merge` 直接合并 | 按需 |
+| `chenyme` **(L2 参考)** | Go (需翻译) | `git log` → 评估 → **记录到 `go-port-ledger.md`** → 移植 | 按需 |
 
-# 2. 合并到 main
+```bash
+# L1: 更新同栈上游 (jiujiu532 — Python)
+git fetch jiujiu532 && git branch -f upstream/active jiujiu532/main
 git checkout main && git merge upstream/active
 
-# 3. 合并完成
+# L2: 更新 Go 参考上游 (chenyme)
+git fetch source && git branch -f upstream/source source/main
+# Go 代码不可 merge，见 go-port-ledger.md 追踪移植进度
 ```
+
+> 每次 Go→Python 移植**必须**先更新 `go-port-ledger.md` 台账，标记提交已审阅、已移植或已跳过，避免重复劳动。
 
 > 上游同步工作流（`.github/workflows/branch-stacking-sync.yml`）每日 04:00 UTC 自动检查上游更新，检测到新提交时创建 GitHub Issue 通知。
 
