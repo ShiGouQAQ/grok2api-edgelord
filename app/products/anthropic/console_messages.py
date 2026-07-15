@@ -58,7 +58,9 @@ async def _quota_sync(token: str, mode_id: int) -> None:
         )
 
 
-async def _fail_sync(token: str, mode_id: int, exc: BaseException | None = None) -> None:
+async def _fail_sync(
+    token: str, mode_id: int, exc: BaseException | None = None
+) -> None:
     """Fire-and-forget: 失败后持久化失败计数。"""
     try:
         svc = get_refresh_service()
@@ -93,17 +95,21 @@ async def create(
     effort = "low" if emit_think else "none"
 
     from app.dataplane.account import _directory as _acct_dir
+
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
     # ── Streaming ─────────────────────────────────────────────────────────────
     if stream:
+
         async def _run_stream() -> AsyncGenerator[str, None]:
             excluded: list[str] = []
             for attempt in range(max_retries + 1):
                 acct, selected_mode_id = await reserve_account(
-                    directory, spec, now_s_override=now_s(),
+                    directory,
+                    spec,
+                    now_s_override=now_s(),
                     exclude_tokens=excluded or None,
                 )
                 if acct is None:
@@ -128,26 +134,37 @@ async def create(
 
                     try:
                         # message_start
-                        yield _sse("message_start", {
-                            "type": "message_start",
-                            "message": {
-                                "id": msg_id,
-                                "type": "message",
-                                "role": "assistant",
-                                "model": model,
-                                "content": [],
-                                "stop_reason": None,
-                                "usage": {"input_tokens": estimate_prompt_tokens(messages), "output_tokens": 0},
+                        yield _sse(
+                            "message_start",
+                            {
+                                "type": "message_start",
+                                "message": {
+                                    "id": msg_id,
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "model": model,
+                                    "content": [],
+                                    "stop_reason": None,
+                                    "usage": {
+                                        "input_tokens": estimate_prompt_tokens(
+                                            messages
+                                        ),
+                                        "output_tokens": 0,
+                                    },
+                                },
                             },
-                        })
+                        )
                         yield _sse("ping", {"type": "ping"})
 
                         # content_block_start
-                        yield _sse("content_block_start", {
-                            "type": "content_block_start",
-                            "index": 0,
-                            "content_block": {"type": "text", "text": ""},
-                        })
+                        yield _sse(
+                            "content_block_start",
+                            {
+                                "type": "content_block_start",
+                                "index": 0,
+                                "content_block": {"type": "text", "text": ""},
+                            },
+                        )
 
                         yield ": heartbeat\n\n"
                         async for event_type, data in stream_console_chat(
@@ -156,29 +173,45 @@ async def create(
                             tokens = adapter.feed(event_type, data)
                             for tok in tokens:
                                 text_buf.append(tok)
-                                yield _sse("content_block_delta", {
-                                    "type": "content_block_delta",
-                                    "index": 0,
-                                    "delta": {"type": "text_delta", "text": tok},
-                                })
+                                yield _sse(
+                                    "content_block_delta",
+                                    {
+                                        "type": "content_block_delta",
+                                        "index": 0,
+                                        "delta": {"type": "text_delta", "text": tok},
+                                    },
+                                )
 
                         # content_block_stop
-                        yield _sse("content_block_stop", {
-                            "type": "content_block_stop",
-                            "index": 0,
-                        })
+                        yield _sse(
+                            "content_block_stop",
+                            {
+                                "type": "content_block_stop",
+                                "index": 0,
+                            },
+                        )
 
                         # message_delta
                         full_text = "".join(text_buf)
                         output_tokens = (
-                            adapter.usage.get("output_tokens", 0) if adapter.usage
+                            adapter.usage.get("output_tokens", 0)
+                            if adapter.usage
                             else estimate_tokens(full_text)
                         )
-                        yield _sse("message_delta", {
-                            "type": "message_delta",
-                            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                            "usage": {"output_tokens": output_tokens},
-                        })
+                        yield _sse(
+                            "message_delta",
+                            {
+                                "type": "message_delta",
+                                "delta": {
+                                    "stop_reason": "end_turn",
+                                    "stop_sequence": None,
+                                },
+                                "usage": {
+                                    "input_tokens": estimate_prompt_tokens(messages),
+                                    "output_tokens": output_tokens,
+                                },
+                            },
+                        )
 
                         # message_stop
                         yield _sse("message_stop", {"type": "message_stop"})
@@ -186,16 +219,24 @@ async def create(
                         success = True
                         logger.info(
                             "console messages stream completed: model={} text_len={} attempt={}/{}",
-                            model, len(full_text), attempt + 1, max_retries + 1,
+                            model,
+                            len(full_text),
+                            attempt + 1,
+                            max_retries + 1,
                         )
 
                     except UpstreamError as exc:
                         fail_exc = exc
-                        if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                        if (
+                            _should_retry_upstream(exc, retry_codes)
+                            and attempt < max_retries
+                        ):
                             _retry = True
                             logger.warning(
                                 "console messages retry: attempt={}/{} status={}",
-                                attempt + 1, max_retries, exc.status,
+                                attempt + 1,
+                                max_retries,
+                                exc.status,
                             )
                         else:
                             raise
@@ -203,11 +244,15 @@ async def create(
                 finally:
                     await directory.release(acct)
                     kind = (
-                        FeedbackKind.SUCCESS if success
-                        else feedback_kind_for_error(fail_exc) if fail_exc
+                        FeedbackKind.SUCCESS
+                        if success
+                        else feedback_kind_for_error(fail_exc)
+                        if fail_exc
                         else FeedbackKind.SERVER_ERROR
                     )
-                    await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
+                    await directory.feedback(
+                        token, kind, selected_mode_id, now_s_val=now_s()
+                    )
                     if success:
                         asyncio.create_task(
                             _quota_sync(token, selected_mode_id)
@@ -227,7 +272,9 @@ async def create(
     excluded: list[str] = []
     for attempt in range(max_retries + 1):
         acct, selected_mode_id = await reserve_account(
-            directory, spec, now_s_override=now_s(),
+            directory,
+            spec,
+            now_s_override=now_s(),
             exclude_tokens=excluded or None,
         )
         if acct is None:
@@ -257,11 +304,13 @@ async def create(
                 full_text = adapter.full_text
                 usage_data = adapter.usage
                 input_tokens = (
-                    usage_data.get("input_tokens", 0) if usage_data
+                    usage_data.get("input_tokens", 0)
+                    if usage_data
                     else estimate_prompt_tokens(messages)
                 )
                 output_tokens = (
-                    usage_data.get("output_tokens", 0) if usage_data
+                    usage_data.get("output_tokens", 0)
+                    if usage_data
                     else estimate_tokens(full_text)
                 )
 
@@ -281,7 +330,8 @@ async def create(
                 success = True
                 logger.info(
                     "console messages non-stream completed: model={} text_len={}",
-                    model, len(full_text),
+                    model,
+                    len(full_text),
                 )
                 return result
 
@@ -290,7 +340,9 @@ async def create(
                 if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
                     logger.warning(
                         "console messages non-stream retry: attempt={}/{} status={}",
-                        attempt + 1, max_retries, exc.status,
+                        attempt + 1,
+                        max_retries,
+                        exc.status,
                     )
                     excluded.append(token)
                     continue
@@ -299,8 +351,10 @@ async def create(
         finally:
             await directory.release(acct)
             kind = (
-                FeedbackKind.SUCCESS if success
-                else feedback_kind_for_error(fail_exc) if fail_exc
+                FeedbackKind.SUCCESS
+                if success
+                else feedback_kind_for_error(fail_exc)
+                if fail_exc
                 else FeedbackKind.SERVER_ERROR
             )
             await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
