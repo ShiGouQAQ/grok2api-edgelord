@@ -102,7 +102,8 @@ app/
    - `from_http_response()` — auto-classifies HTTP status + body into flags
    - 3 mappers: `to_feedback_kind()` (account state machine), `to_proxy_feedback_kind()` (proxy health), `to_result_category()` (reverse pipeline)
    - Classification engine: `_classify_upstream_status()` ports Go `failure.go` patterns
-   - 425 tests covering all classification branches
+   - `to_dict()` always includes `param` (null when unset) per OpenAI spec
+   - 510 tests covering classification + new ported Go fixes
 
 ## Admin API Routes
 
