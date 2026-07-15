@@ -35,10 +35,11 @@ class AppError(Exception):
             "message": self.message,
             "type": self.kind,
             "code": self.code,
+            "param": self.details.get("param", None),
         }
-        for k in ("param", "body"):
-            if k in self.details:
-                err[k] = self.details[k]
+        # body is intentionally exposed for upstream debugging
+        if "body" in self.details:
+            err["body"] = self.details["body"]
         return {"error": err}
 
 

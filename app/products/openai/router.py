@@ -309,6 +309,7 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
                 tool_choice=req.tool_choice,
                 temperature=req.temperature or 0.8,
                 top_p=req.top_p or 0.95,
+                response_format=req.response_format,
             )
 
     except AppError:
@@ -420,8 +421,8 @@ async def responses_endpoint(req: ResponsesCreateRequest):
         return JSONResponse(result)
     return StreamingResponse(
         _safe_sse_responses(result),
-        media_type = "text/event-stream",
-        headers    = _SSE_HEADERS,
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
     )
 
 
