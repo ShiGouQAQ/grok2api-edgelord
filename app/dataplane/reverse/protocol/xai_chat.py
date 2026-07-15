@@ -15,54 +15,55 @@ from app.dataplane.reverse.protocol.xai_chat_reasoning import ReasoningAggregato
 
 def build_chat_payload(
     *,
-    message:               str,
-    mode_id:               ModeId,
-    file_attachments:      list[str]        = (),
-    tool_overrides:        dict[str, Any]   | None = None,
-    model_config_override: dict[str, Any]   | None = None,
-    request_overrides:     dict[str, Any]   | None = None,
+    message: str,
+    mode_id: ModeId,
+    file_attachments: list[str] = (),
+    tool_overrides: dict[str, Any] | None = None,
+    model_config_override: dict[str, Any] | None = None,
+    request_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the JSON payload for POST /rest/app-chat/conversations/new."""
     cfg = get_config()
 
     payload: dict[str, Any] = {
-        "collectionIds":               [],
-        "connectors":                  [],
+        "collectionIds": [],
+        "connectors": [],
         "deviceEnvInfo": {
-            "darkModeEnabled":  False,
+            "darkModeEnabled": False,
             "devicePixelRatio": 2,
-            "screenHeight":     1329,
-            "screenWidth":      2056,
-            "viewportHeight":   1083,
-            "viewportWidth":    2056,
+            "screenHeight": 1329,
+            "screenWidth": 2056,
+            "viewportHeight": 1083,
+            "viewportWidth": 2056,
         },
-        "disableMemory":               not cfg.get_bool("features.memory", False),
-        "disableSearch":               False,
+        "disableMemory": not cfg.get_bool("features.memory", False),
+        "disableSearch": False,
         "disableSelfHarmShortCircuit": False,
-        "disableTextFollowUps":        False,
-        "enableImageGeneration":       True,
-        "enableImageStreaming":        True,
-        "enableSideBySide":            True,
-        "fileAttachments":             list(file_attachments),
-        "forceConcise":                False,
-        "forceSideBySide":             False,
-        "imageAttachments":            [],
-        "imageGenerationCount":        2,
-        "isAsyncChat":                 False,
-        "message":                     message,
-        "modeId":                      mode_id.to_api_str(),
-        "responseMetadata":            {},
-        "returnImageBytes":            False,
-        "returnRawGrokInXaiRequest":   False,
-        "searchAllConnectors":         False,
-        "sendFinalMetadata":           True,
-        "temporary":                   cfg.get_bool("features.temporary", True),
-        "toolOverrides": tool_overrides or {
-            "gmailSearch":           False,
-            "googleCalendarSearch":  False,
-            "outlookSearch":         False,
+        "disableTextFollowUps": False,
+        "enableImageGeneration": True,
+        "enableImageStreaming": True,
+        "enableSideBySide": True,
+        "fileAttachments": list(file_attachments),
+        "forceConcise": False,
+        "forceSideBySide": False,
+        "imageAttachments": [],
+        "imageGenerationCount": 2,
+        "isAsyncChat": False,
+        "message": message,
+        "modeId": mode_id.to_api_str(),
+        "responseMetadata": {},
+        "returnImageBytes": False,
+        "returnRawGrokInXaiRequest": False,
+        "searchAllConnectors": False,
+        "sendFinalMetadata": True,
+        "temporary": cfg.get_bool("features.temporary", True),
+        "toolOverrides": tool_overrides
+        or {
+            "gmailSearch": False,
+            "googleCalendarSearch": False,
+            "outlookSearch": False,
             "outlookCalendarSearch": False,
-            "googleDriveSearch":     False,
+            "googleDriveSearch": False,
         },
     }
 
@@ -78,7 +79,9 @@ def build_chat_payload(
 
     logger.debug(
         "chat payload built: mode={} message_len={} file_count={}",
-        mode_id.to_api_str(), len(message), len(file_attachments),
+        mode_id.to_api_str(),
+        len(message),
+        len(file_attachments),
     )
     return payload
 
@@ -124,7 +127,9 @@ def stream_error_from_payload(obj: dict[str, Any]) -> UpstreamError | None:
     message = str(raw_message)
     code = error.get("code")
     text = message.lower()
-    status = 429 if code == 8 or "too many requests" in text or "rate limit" in text else 502
+    status = (
+        429 if code == 8 or "too many requests" in text or "rate limit" in text else 502
+    )
 
     try:
         body = orjson.dumps(obj).decode()
@@ -158,6 +163,7 @@ def raise_for_stream_error(data: str | bytes | dict[str, Any]) -> None:
 # FrameEvent — single output event from StreamAdapter.feed()
 # ---------------------------------------------------------------------------
 
+
 @dataclass(slots=True)
 class FrameEvent:
     """One parsed event produced by StreamAdapter."""
@@ -186,7 +192,7 @@ class FrameEvent:
 
 _GROK_RENDER_RE = re.compile(
     r'<grok:render\s+card_id="([^"]+)"\s+card_type="([^"]+)"\s+type="([^"]+)"'
-    r'[^>]*>.*?</grok:render>',
+    r"[^>]*>.*?</grok:render>",
     re.DOTALL,
 )
 
@@ -195,15 +201,15 @@ _IMAGE_BASE = "https://assets.grok.com/"
 # 工具使用卡片 → emoji 单行格式化映射（详细模式专用）
 # 格式: tool_name → (emoji, (可展示的参数 key 列表))
 _TOOL_FMT: dict[str, tuple[str, tuple[str, ...]]] = {
-    "web_search":          ("🔍", ("query", "q")),
-    "x_search":            ("🔍", ("query",)),
-    "x_keyword_search":    ("🔍", ("query",)),
-    "x_semantic_search":   ("🔍", ("query",)),
-    "browse_page":         ("🌐", ("url",)),
-    "search_images":       ("🖼️", ("image_description", "imageDescription")),
-    "image_search":        ("🖼️", ("image_description", "imageDescription")),
-    "chatroom_send":       ("📋", ("message",)),
-    "code_execution":      ("💻", ()),
+    "web_search": ("🔍", ("query", "q")),
+    "x_search": ("🔍", ("query",)),
+    "x_keyword_search": ("🔍", ("query",)),
+    "x_semantic_search": ("🔍", ("query",)),
+    "browse_page": ("🌐", ("url",)),
+    "search_images": ("🖼️", ("image_description", "imageDescription")),
+    "image_search": ("🖼️", ("image_description", "imageDescription")),
+    "chatroom_send": ("📋", ("message",)),
+    "code_execution": ("💻", ()),
 }
 
 
@@ -229,6 +235,7 @@ class StreamAdapter:
         "_content_started",
         "_web_search_results",
         "_web_search_urls_seen",
+        "_finished",
         "thinking_buf",
         "text_buf",
         "image_urls",
@@ -239,20 +246,23 @@ class StreamAdapter:
         self._citation_order: list[str] = []
         self._citation_map: dict[str, int] = {}
         self._last_citation_index: int = -1
-        self._pending_citations: list[dict] = []       # _render_replace 产出的待定位引用
-        self._annotations: list[dict] = []             # 已定位的完整 annotations（绝对位置）
-        self._text_offset: int = 0                     # 累计文本长度（仅 text 事件）
+        self._pending_citations: list[dict] = []  # _render_replace 产出的待定位引用
+        self._annotations: list[dict] = []  # 已定位的完整 annotations（绝对位置）
+        self._text_offset: int = 0  # 累计文本长度（仅 text 事件）
         self._emitted_reasoning_keys: set[str] = set()
         # 思维链模式：精简摘要 / 详细原始流
-        self._summary_mode: bool = get_config().get_bool("features.thinking_summary", False)
+        self._summary_mode: bool = get_config().get_bool(
+            "features.thinking_summary", False
+        )
         self._last_rollout: str = ""
         self._content_started: bool = False
         self._reasoning = ReasoningAggregator() if self._summary_mode else None
         self._web_search_results: list[dict] = []
         self._web_search_urls_seen: set[str] = set()
+        self._finished: bool = False
         self.thinking_buf: list[str] = []
         self.text_buf: list[str] = []
-        self.image_urls: list[tuple[str, str]] = []   # [(url, imageUuid), ...]
+        self.image_urls: list[tuple[str, str]] = []  # [(url, imageUuid), ...]
 
     # 搜索信源追加：当配置启用且有 webSearchResults 时，格式化为 ## Sources 段落
     # 标记行 [grok2api-sources]: # 是 markdown link reference definition，渲染器不显示，
@@ -296,10 +306,16 @@ class StreamAdapter:
 
     def feed(self, data: str) -> list[FrameEvent]:
         """Parse one JSON ``data:`` payload; return 0-N events."""
+        if self._finished:
+            return []
         try:
             obj = orjson.loads(data)
         except (orjson.JSONDecodeError, ValueError, TypeError):
             return []
+        # port(chenyme): upstream error 后流标记终止 — 确保 error 后 finished 在所有分支前设置
+        error_obj = obj.get("error")
+        if isinstance(error_obj, dict):
+            self._finished = True
         raise_for_stream_error(obj)
 
         result = obj.get("result")
@@ -330,7 +346,11 @@ class StreamAdapter:
         xsr = resp.get("xSearchResults")
         if xsr and isinstance(xsr, dict):
             for item in xsr.get("results", []):
-                if isinstance(item, dict) and item.get("postId") and item.get("username"):
+                if (
+                    isinstance(item, dict)
+                    and item.get("postId")
+                    and item.get("username")
+                ):
                     url = f"https://x.com/{item['username']}/status/{item['postId']}"
                     if url not in self._web_search_urls_seen:
                         self._web_search_urls_seen.add(url)
@@ -341,11 +361,13 @@ class StreamAdapter:
                             title = f"𝕏/@{item['username']}: {raw[:50]}{'...' if len(raw) > 50 else ''}"
                         else:
                             title = f"𝕏/@{item['username']}"
-                        self._web_search_results.append({"url": url, "title": title, "type": "x_post"})
+                        self._web_search_results.append(
+                            {"url": url, "title": title, "type": "x_post"}
+                        )
 
-        token   = resp.get("token")
-        think   = resp.get("isThinking")
-        tag     = resp.get("messageTag")
+        token = resp.get("token")
+        think = resp.get("isThinking")
+        tag = resp.get("messageTag")
         rollout = resp.get("rolloutId")
         step_id = resp.get("messageStepId")
 
@@ -356,11 +378,16 @@ class StreamAdapter:
             if self._summary_mode:
                 # 精简模式：走 ReasoningAggregator 提炼摘要
                 for line in self._summarize_tool_usage_summary(
-                    resp, rollout=rollout, step_id=step_id,
+                    resp,
+                    rollout=rollout,
+                    step_id=step_id,
                 ):
                     self._append_reasoning(
-                        events, line,
-                        rollout=rollout, tag=tag, step_id=step_id,
+                        events,
+                        line,
+                        rollout=rollout,
+                        tag=tag,
+                        step_id=step_id,
                     )
             else:
                 # 详细模式：格式化为 emoji 单行（含 Agent 身份）
@@ -370,17 +397,24 @@ class StreamAdapter:
                     if rollout:
                         self._last_rollout = rollout
                     self._append_reasoning(
-                        events, line,
-                        rollout=rollout, tag=tag, step_id=step_id,
+                        events,
+                        line,
+                        rollout=rollout,
+                        tag=tag,
+                        step_id=step_id,
                     )
-            return events   # card events (if any) already added
+            return events  # card events (if any) already added
 
         # ── raw_function_result ───────────────────────────────────
         if tag == "raw_function_result":
             return events
 
         # ── toolUsageCardId-only follow-up frame ──────────────────
-        if resp.get("toolUsageCardId") and not resp.get("webSearchResults") and not resp.get("codeExecutionResult"):
+        if (
+            resp.get("toolUsageCardId")
+            and not resp.get("webSearchResults")
+            and not resp.get("codeExecutionResult")
+        ):
             return events
 
         # ── 思维链 token 处理 ──────────────────────────────────────
@@ -395,12 +429,17 @@ class StreamAdapter:
             if self._summary_mode:
                 # 精简模式：走 ReasoningAggregator 提炼摘要
                 for line in self._reasoning.on_thinking(
-                    str(token), tag=tag, rollout=rollout,
+                    str(token),
+                    tag=tag,
+                    rollout=rollout,
                     step_id=step_id if isinstance(step_id, int) else None,
                 ):
                     self._append_reasoning(
-                        events, line,
-                        rollout=rollout, tag=tag, step_id=step_id,
+                        events,
+                        line,
+                        rollout=rollout,
+                        tag=tag,
+                        step_id=step_id,
                     )
             else:
                 # 详细模式：Agent 切换时插入身份前缀，原始 token 直接透传
@@ -416,12 +455,19 @@ class StreamAdapter:
                     # Agent 切换标识：绕过去重，直接写 buf + 发 event（同一 Agent 可多次出现）
                     header = f"\n[{agent}]\n"
                     self.thinking_buf.append(header)
-                    events.append(FrameEvent(
-                        "thinking", header, rollout_id=agent,
-                    ))
+                    events.append(
+                        FrameEvent(
+                            "thinking",
+                            header,
+                            rollout_id=agent,
+                        )
+                    )
                 self._append_reasoning(
-                    events, raw,
-                    rollout=rollout, tag=tag, step_id=step_id,
+                    events,
+                    raw,
+                    rollout=rollout,
+                    tag=tag,
+                    step_id=step_id,
                 )
             return events
 
@@ -476,7 +522,9 @@ class StreamAdapter:
             events: list[FrameEvent] = []
             try:
                 if progress is not None:
-                    events.append(FrameEvent("image_progress", str(int(progress)), uuid))
+                    events.append(
+                        FrameEvent("image_progress", str(int(progress)), uuid)
+                    )
             except (TypeError, ValueError):
                 pass
             if chunk.get("progress") == 100 and not chunk.get("moderated"):
@@ -497,7 +545,11 @@ class StreamAdapter:
             return token, []
         cleaned = _GROK_RENDER_RE.sub(self._render_replace, token)
         # 去除引用标签替换后残留的独占空白行（如 "\n [[1]](...)" → " [[1]](...)"）
-        cleaned = cleaned.lstrip("\n") if cleaned.startswith("\n") and "[[" in cleaned else cleaned
+        cleaned = (
+            cleaned.lstrip("\n")
+            if cleaned.startswith("\n") and "[[" in cleaned
+            else cleaned
+        )
 
         # 从 cleaned 中定位 pending citations 的局部位置（游标递进防碰撞）
         local_annotations: list[dict] = []
@@ -506,36 +558,38 @@ class StreamAdapter:
             for cite in self._pending_citations:
                 pos = cleaned.find(cite["needle"], search_start)
                 if pos != -1:
-                    local_annotations.append({
-                        "type": "url_citation",
-                        "url": cite["url"],
-                        "title": cite["title"],
-                        "local_start": pos,
-                        "local_end": pos + len(cite["needle"]),
-                    })
+                    local_annotations.append(
+                        {
+                            "type": "url_citation",
+                            "url": cite["url"],
+                            "title": cite["title"],
+                            "local_start": pos,
+                            "local_end": pos + len(cite["needle"]),
+                        }
+                    )
                     search_start = pos + len(cite["needle"])
                 # 找不到 → fail closed，跳过此 annotation
             self._pending_citations.clear()
         return cleaned, local_annotations
 
     def _render_replace(self, m: re.Match) -> str:
-        card_id     = m.group(1)
+        card_id = m.group(1)
         render_type = m.group(3)
         card = self._card_cache.get(card_id)
         if not card:
             return ""
 
         if render_type == "render_searched_image":
-            img   = card.get("image", {})
+            img = card.get("image", {})
             title = img.get("title", "image")
             thumb = img.get("thumbnail") or img.get("original", "")
-            link  = img.get("link", "")
+            link = img.get("link", "")
             if link:
                 return f"[![{title}]({thumb})]({link})"
             return f"![{title}]({thumb})"
 
         if render_type == "render_generated_image":
-            return ""   # actual URL emitted by progress=100 card frame
+            return ""  # actual URL emitted by progress=100 card frame
 
         if render_type == "render_inline_citation":
             url = card.get("url", "")
@@ -560,11 +614,13 @@ class StreamAdapter:
                         title = item.get("title", "")
                         break
             # 记录引用元数据，位置在 _clean_token 返回后定位
-            self._pending_citations.append({
-                "url": url,
-                "title": title or url,
-                "needle": citation_text,
-            })
+            self._pending_citations.append(
+                {
+                    "url": url,
+                    "title": title or url,
+                    "needle": citation_text,
+                }
+            )
             return citation_text
 
         return ""
@@ -599,19 +655,23 @@ class StreamAdapter:
         # 统一用 \n 换行（去掉 "- " 前缀后不再有列表上下文，普通 \n 即可）
         formatted = text if text.endswith("\n") else text + "\n"
         self.thinking_buf.append(formatted)
-        events.append(FrameEvent(
-            "thinking",
-            formatted,
-            rollout_id=rollout or "",
-            message_tag=tag or "",
-            message_step_id=step_id if isinstance(step_id, int) else None,
-        ))
+        events.append(
+            FrameEvent(
+                "thinking",
+                formatted,
+                rollout_id=rollout or "",
+                message_tag=tag or "",
+                message_step_id=step_id if isinstance(step_id, int) else None,
+            )
+        )
 
     def _flush_pending_reasoning(self, events: list[FrameEvent]) -> None:
         """flush ReasoningAggregator 缓冲事件（仅精简模式有效）"""
         if self._summary_mode and self._reasoning is not None:
             for line in self._reasoning.finalize():
-                self._append_reasoning(events, line, rollout="", tag="summary", step_id=None)
+                self._append_reasoning(
+                    events, line, rollout="", tag="summary", step_id=None
+                )
 
     @staticmethod
     def _extract_tool_info(resp: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -629,11 +689,15 @@ class StreamAdapter:
         return "", {}
 
     # 精简模式：走 ReasoningAggregator 提炼摘要
-    def _summarize_tool_usage_summary(self, resp: dict[str, Any], *, rollout: str | None, step_id: int | None) -> list[str]:
+    def _summarize_tool_usage_summary(
+        self, resp: dict[str, Any], *, rollout: str | None, step_id: int | None
+    ) -> list[str]:
         tool_name, args = self._extract_tool_info(resp)
         if not tool_name:
             return []
-        return self._reasoning.on_tool_usage(tool_name, args, rollout=rollout, step_id=step_id)
+        return self._reasoning.on_tool_usage(
+            tool_name, args, rollout=rollout, step_id=step_id
+        )
 
     # 详细模式：格式化为 emoji 单行（含 Agent 身份）
     def _format_tool_card(self, resp: dict[str, Any], *, rollout: str | None) -> str:
