@@ -11,7 +11,7 @@
 """
 
 import asyncio
-from typing import Any, AsyncGenerator
+from typing import AsyncGenerator
 
 import orjson
 
@@ -30,12 +30,12 @@ from app.dataplane.reverse.protocol.xai_console_chat import (
     ConsoleStreamAdapter,
     stream_console_chat,
 )
+from app.dataplane.reverse.protocol.prompt_cache import resolve_prompt_cache_identity
 from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai.chat import _configured_retry_codes, _should_retry_upstream
 from ._format import (
     make_response_id,
     make_stream_chunk,
-    make_thinking_chunk,
     make_chat_response,
     build_usage,
 )
@@ -158,6 +158,13 @@ async def completions(
                 adapter = ConsoleStreamAdapter()
 
                 try:
+                    # ponytail: prompt_cache_key always None without client_key_id infra
+                    _pc_key = resolve_prompt_cache_identity(
+                        client_key_id=0,
+                        provider="console",
+                        upstream_model=model,
+                        operation="chat",
+                    )
                     payload = build_console_payload(
                         messages=messages,
                         model=model,
@@ -165,6 +172,7 @@ async def completions(
                         top_p=top_p,
                         reasoning_effort=effort,
                         stream=True,
+                        prompt_cache_key=_pc_key,
                     )
 
                     try:
@@ -274,6 +282,13 @@ async def completions(
         adapter = ConsoleStreamAdapter()
 
         try:
+            # ponytail: prompt_cache_key always None without client_key_id infra
+            _pc_key = resolve_prompt_cache_identity(
+                client_key_id=0,
+                provider="console",
+                upstream_model=model,
+                operation="chat",
+            )
             payload = build_console_payload(
                 messages=messages,
                 model=model,
@@ -281,6 +296,7 @@ async def completions(
                 top_p=top_p,
                 reasoning_effort=effort,
                 stream=True,  # 始终用流式，非流式在本地聚合
+                prompt_cache_key=_pc_key,
             )
 
             try:

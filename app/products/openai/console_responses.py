@@ -8,9 +8,8 @@
 """
 
 import asyncio
-from typing import Any, AsyncGenerator
+from typing import AsyncGenerator
 
-import orjson
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
@@ -27,10 +26,10 @@ from app.dataplane.reverse.protocol.xai_console_chat import (
     ConsoleStreamAdapter,
     stream_console_chat,
 )
+from app.dataplane.reverse.protocol.prompt_cache import resolve_prompt_cache_identity
 from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai.chat import _configured_retry_codes, _should_retry_upstream
 from ._format import (
-    make_resp_id,
     make_resp_object,
     build_resp_usage,
     format_sse,
@@ -64,7 +63,9 @@ async def _quota_sync(token: str, mode_id: int) -> None:
         )
 
 
-async def _fail_sync(token: str, mode_id: int, exc: BaseException | None = None) -> None:
+async def _fail_sync(
+    token: str, mode_id: int, exc: BaseException | None = None
+) -> None:
     """Fire-and-forget: 失败后持久化失败计数。"""
     try:
         svc = get_refresh_service()
@@ -103,17 +104,21 @@ async def create(
     effort = "low" if emit_think else "none"
 
     from app.dataplane.account import _directory as _acct_dir
+
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
     # ── Streaming ─────────────────────────────────────────────────────────────
     if stream:
+
         async def _run_stream() -> AsyncGenerator[str, None]:
             excluded: list[str] = []
             for attempt in range(max_retries + 1):
                 acct, selected_mode_id = await reserve_account(
-                    directory, spec, now_s_override=now_s(),
+                    directory,
+                    spec,
+                    now_s_override=now_s(),
                     exclude_tokens=excluded or None,
                 )
                 if acct is None:
@@ -127,6 +132,13 @@ async def create(
                 text_buf: list[str] = []
 
                 try:
+                    # ponytail: prompt_cache_key always None without client_key_id infra
+                    _pc_key = resolve_prompt_cache_identity(
+                        client_key_id=0,
+                        provider="console",
+                        upstream_model=model,
+                        operation="responses",
+                    )
                     payload = build_console_payload(
                         messages=messages,
                         model=model,
@@ -134,42 +146,63 @@ async def create(
                         top_p=top_p,
                         reasoning_effort=effort,
                         stream=True,
+                        prompt_cache_key=_pc_key,
                     )
 
                     try:
                         # response.created
-                        yield format_sse("response.created", {
-                            "type": "response.created",
-                            "response": make_resp_object(response_id, model, "in_progress", []),
-                        })
+                        yield format_sse(
+                            "response.created",
+                            {
+                                "type": "response.created",
+                                "response": make_resp_object(
+                                    response_id, model, "in_progress", []
+                                ),
+                            },
+                        )
 
                         # response.in_progress
-                        yield format_sse("response.in_progress", {
-                            "type": "response.in_progress",
-                            "response": make_resp_object(response_id, model, "in_progress", []),
-                        })
+                        yield format_sse(
+                            "response.in_progress",
+                            {
+                                "type": "response.in_progress",
+                                "response": make_resp_object(
+                                    response_id, model, "in_progress", []
+                                ),
+                            },
+                        )
 
                         # output_item.added (message)
-                        yield format_sse("response.output_item.added", {
-                            "type": "response.output_item.added",
-                            "output_index": 0,
-                            "item": {
-                                "id": message_id,
-                                "type": "message",
-                                "role": "assistant",
-                                "status": "in_progress",
-                                "content": [],
+                        yield format_sse(
+                            "response.output_item.added",
+                            {
+                                "type": "response.output_item.added",
+                                "output_index": 0,
+                                "item": {
+                                    "id": message_id,
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "status": "in_progress",
+                                    "content": [],
+                                },
                             },
-                        })
+                        )
 
                         # content_part.added
-                        yield format_sse("response.content_part.added", {
-                            "type": "response.content_part.added",
-                            "item_id": message_id,
-                            "output_index": 0,
-                            "content_index": 0,
-                            "part": {"type": "output_text", "text": "", "annotations": []},
-                        })
+                        yield format_sse(
+                            "response.content_part.added",
+                            {
+                                "type": "response.content_part.added",
+                                "item_id": message_id,
+                                "output_index": 0,
+                                "content_index": 0,
+                                "part": {
+                                    "type": "output_text",
+                                    "text": "",
+                                    "annotations": [],
+                                },
+                            },
+                        )
 
                         event_count = 0
                         yield ": heartbeat\n\n"
@@ -180,93 +213,131 @@ async def create(
                             tokens = adapter.feed(event_type, data)
                             for tok in tokens:
                                 text_buf.append(tok)
-                                yield format_sse("response.output_text.delta", {
-                                    "type": "response.output_text.delta",
-                                    "item_id": message_id,
-                                    "output_index": 0,
-                                    "content_index": 0,
-                                    "delta": tok,
-                                })
+                                yield format_sse(
+                                    "response.output_text.delta",
+                                    {
+                                        "type": "response.output_text.delta",
+                                        "item_id": message_id,
+                                        "output_index": 0,
+                                        "content_index": 0,
+                                        "delta": tok,
+                                    },
+                                )
 
                         logger.info(
                             "console responses stream raw: events={} text_tokens={} adapter_text_len={}",
-                            event_count, len(text_buf), len(adapter.full_text),
+                            event_count,
+                            len(text_buf),
+                            len(adapter.full_text),
                         )
 
                         # 流结束
                         full_text = "".join(text_buf)
 
                         # output_text.done
-                        yield format_sse("response.output_text.done", {
-                            "type": "response.output_text.done",
-                            "item_id": message_id,
-                            "output_index": 0,
-                            "content_index": 0,
-                            "text": full_text,
-                        })
+                        yield format_sse(
+                            "response.output_text.done",
+                            {
+                                "type": "response.output_text.done",
+                                "item_id": message_id,
+                                "output_index": 0,
+                                "content_index": 0,
+                                "text": full_text,
+                            },
+                        )
 
                         # content_part.done
-                        yield format_sse("response.content_part.done", {
-                            "type": "response.content_part.done",
-                            "item_id": message_id,
-                            "output_index": 0,
-                            "content_index": 0,
-                            "part": {"type": "output_text", "text": full_text, "annotations": []},
-                        })
+                        yield format_sse(
+                            "response.content_part.done",
+                            {
+                                "type": "response.content_part.done",
+                                "item_id": message_id,
+                                "output_index": 0,
+                                "content_index": 0,
+                                "part": {
+                                    "type": "output_text",
+                                    "text": full_text,
+                                    "annotations": [],
+                                },
+                            },
+                        )
 
                         # output_item.done
-                        yield format_sse("response.output_item.done", {
-                            "type": "response.output_item.done",
-                            "output_index": 0,
-                            "item": {
+                        yield format_sse(
+                            "response.output_item.done",
+                            {
+                                "type": "response.output_item.done",
+                                "output_index": 0,
+                                "item": {
+                                    "id": message_id,
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "status": "completed",
+                                    "content": [
+                                        {"type": "output_text", "text": full_text}
+                                    ],
+                                },
+                            },
+                        )
+
+                        # usage
+                        usage_data = adapter.usage
+                        input_tokens = (
+                            usage_data.get("input_tokens", 0)
+                            if usage_data
+                            else estimate_prompt_tokens(messages)
+                        )
+                        output_tokens = (
+                            usage_data.get("output_tokens", 0)
+                            if usage_data
+                            else estimate_tokens(full_text)
+                        )
+
+                        # response.completed
+                        output_items = [
+                            {
                                 "id": message_id,
                                 "type": "message",
                                 "role": "assistant",
                                 "status": "completed",
                                 "content": [{"type": "output_text", "text": full_text}],
+                            }
+                        ]
+                        yield format_sse(
+                            "response.completed",
+                            {
+                                "type": "response.completed",
+                                "response": make_resp_object(
+                                    response_id,
+                                    model,
+                                    "completed",
+                                    output_items,
+                                    usage=build_resp_usage(input_tokens, output_tokens),
+                                ),
                             },
-                        })
-
-                        # usage
-                        usage_data = adapter.usage
-                        input_tokens = (
-                            usage_data.get("input_tokens", 0) if usage_data
-                            else estimate_prompt_tokens(messages)
                         )
-                        output_tokens = (
-                            usage_data.get("output_tokens", 0) if usage_data
-                            else estimate_tokens(full_text)
-                        )
-
-                        # response.completed
-                        output_items = [{
-                            "id": message_id,
-                            "type": "message",
-                            "role": "assistant",
-                            "status": "completed",
-                            "content": [{"type": "output_text", "text": full_text}],
-                        }]
-                        yield format_sse("response.completed", {
-                            "type": "response.completed",
-                            "response": make_resp_object(
-                                response_id, model, "completed", output_items,
-                                usage=build_resp_usage(input_tokens, output_tokens),
-                            ),
-                        })
                         yield "data: [DONE]\n\n"
                         success = True
                         logger.info(
                             "console responses stream completed: model={} text_len={} attempt={}/{}",
-                            model, len(full_text), attempt + 1, max_retries + 1,
+                            model,
+                            len(full_text),
+                            attempt + 1,
+                            max_retries + 1,
                         )
 
                     except UpstreamError as exc:
                         fail_exc = exc
-                        if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                        if (
+                            _should_retry_upstream(exc, retry_codes)
+                            and attempt < max_retries
+                        ):
                             _retry = True
                             logger.warning(
                                 "console responses retry: attempt={}/{} status={}",
-                                attempt + 1, max_retries, exc.status,
+                                attempt + 1,
+                                max_retries,
+                                exc.status,
                             )
                         else:
                             raise
@@ -274,11 +345,15 @@ async def create(
                 finally:
                     await directory.release(acct)
                     kind = (
-                        FeedbackKind.SUCCESS if success
-                        else feedback_kind_for_error(fail_exc) if fail_exc
+                        FeedbackKind.SUCCESS
+                        if success
+                        else feedback_kind_for_error(fail_exc)
+                        if fail_exc
                         else FeedbackKind.SERVER_ERROR
                     )
-                    await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())
+                    await directory.feedback(
+                        token, kind, selected_mode_id, now_s_val=now_s()
+                    )
                     if success:
                         asyncio.create_task(
                             _quota_sync(token, selected_mode_id)
@@ -298,7 +373,9 @@ async def create(
     excluded: list[str] = []
     for attempt in range(max_retries + 1):
         acct, selected_mode_id = await reserve_account(
-            directory, spec, now_s_override=now_s(),
+            directory,
+            spec,
+            now_s_override=now_s(),
             exclude_tokens=excluded or None,
         )
         if acct is None:
@@ -310,6 +387,13 @@ async def create(
         adapter = ConsoleStreamAdapter()
 
         try:
+            # ponytail: prompt_cache_key always None without client_key_id infra
+            _pc_key = resolve_prompt_cache_identity(
+                client_key_id=0,
+                provider="console",
+                upstream_model=model,
+                operation="responses",
+            )
             payload = build_console_payload(
                 messages=messages,
                 model=model,
@@ -317,6 +401,7 @@ async def create(
                 top_p=top_p,
                 reasoning_effort=effort,
                 stream=True,
+                prompt_cache_key=_pc_key,
             )
 
             try:
@@ -328,29 +413,37 @@ async def create(
                 full_text = adapter.full_text
                 usage_data = adapter.usage
                 input_tokens = (
-                    usage_data.get("input_tokens", 0) if usage_data
+                    usage_data.get("input_tokens", 0)
+                    if usage_data
                     else estimate_prompt_tokens(messages)
                 )
                 output_tokens = (
-                    usage_data.get("output_tokens", 0) if usage_data
+                    usage_data.get("output_tokens", 0)
+                    if usage_data
                     else estimate_tokens(full_text)
                 )
 
-                output_items = [{
-                    "id": message_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": full_text}],
-                }]
+                output_items = [
+                    {
+                        "id": message_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": full_text}],
+                    }
+                ]
                 result = make_resp_object(
-                    response_id, model, "completed", output_items,
+                    response_id,
+                    model,
+                    "completed",
+                    output_items,
                     usage=build_resp_usage(input_tokens, output_tokens),
                 )
                 success = True
                 logger.info(
                     "console responses non-stream completed: model={} text_len={}",
-                    model, len(full_text),
+                    model,
+                    len(full_text),
                 )
                 return result
 
@@ -359,7 +452,9 @@ async def create(
                 if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
                     logger.warning(
                         "console responses non-stream retry: attempt={}/{} status={}",
-                        attempt + 1, max_retries, exc.status,
+                        attempt + 1,
+                        max_retries,
+                        exc.status,
                     )
                     excluded.append(token)
                     continue
@@ -368,8 +463,10 @@ async def create(
         finally:
             await directory.release(acct)
             kind = (
-                FeedbackKind.SUCCESS if success
-                else feedback_kind_for_error(fail_exc) if fail_exc
+                FeedbackKind.SUCCESS
+                if success
+                else feedback_kind_for_error(fail_exc)
+                if fail_exc
                 else FeedbackKind.SERVER_ERROR
             )
             await directory.feedback(token, kind, selected_mode_id, now_s_val=now_s())

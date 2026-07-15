@@ -34,7 +34,6 @@ import orjson
 
 from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
-from app.platform.config.snapshot import get_config
 from app.dataplane.reverse.protocol.xai_usage import (
     is_invalid_credentials_body,
     is_content_violation_body,
@@ -124,11 +123,20 @@ def build_console_payload(
     top_p: float = 0.95,
     reasoning_effort: str | None = None,
     stream: bool = True,
+    prompt_cache_key: str | None = None,
 ) -> dict[str, Any]:
     """Build the JSON payload for POST console.x.ai/v1/responses.
 
     将 OpenAI messages 格式转换为 Responses API input 格式。
+
+    Parameters
+    ----------
+    prompt_cache_key : str | None
+        If set, injected as ``prompt_cache_key`` in the request payload.
+        Used by grok-build-0.1 for deterministic prompt caching.
     """
+    from app.dataplane.reverse.protocol.prompt_cache import inject_prompt_cache_key
+
     # 转换 messages → input 数组
     input_items: list[dict[str, Any]] = []
     for msg in messages:
@@ -202,12 +210,16 @@ def build_console_payload(
         ]
         payload["tool_choice"] = "auto"
 
+    if prompt_cache_key:
+        payload = inject_prompt_cache_key(payload, prompt_cache_key)
+
     logger.debug(
-        "console payload built: model={} console_model={} input_items={} has_reasoning={}",
+        "console payload built: model={} console_model={} input_items={} has_reasoning={} prompt_cache={}",
         model,
         console_model,
         len(input_items),
         console_model in _MODELS_WITH_REASONING_FIELD,
+        prompt_cache_key is not None,
     )
     return payload
 
