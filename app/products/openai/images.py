@@ -28,7 +28,11 @@ from app.dataplane.reverse.protocol.xai_chat import (
     classify_line,
     raise_for_stream_error,
 )
-from app.dataplane.reverse.protocol.xai_assets import infer_content_type, resolve_asset_reference, resolve_download_url
+from app.dataplane.reverse.protocol.xai_assets import (
+    infer_content_type,
+    resolve_asset_reference,
+    resolve_download_url,
+)
 from app.dataplane.reverse.protocol.xai_image_edit import (
     IMAGE_POST_MEDIA_TYPE,
     build_image_edit_payload,
@@ -70,11 +74,16 @@ _X_USER_ID_RE = re.compile(r"(?:^|;\s*)x-userid=([^;]+)")
 # ---------------------------------------------------------------------------
 
 _RATIO_MAP: dict[str, str] = {
-    "1280x720":  "16:9", "16:9": "16:9",
-    "720x1280":  "9:16", "9:16": "9:16",
-    "1792x1024": "3:2",  "3:2":  "3:2",
-    "1024x1792": "2:3",  "2:3":  "2:3",
-    "1024x1024": "1:1",  "1:1":  "1:1",
+    "1280x720": "16:9",
+    "16:9": "16:9",
+    "720x1280": "9:16",
+    "9:16": "9:16",
+    "1792x1024": "3:2",
+    "3:2": "3:2",
+    "1024x1792": "2:3",
+    "2:3": "2:3",
+    "1024x1024": "1:1",
+    "1:1": "1:1",
 }
 
 
@@ -84,7 +93,7 @@ def resolve_aspect_ratio(size: str) -> str:
 
 @dataclass(slots=True)
 class _ImageOutput:
-    api_value:      str
+    api_value: str
     markdown_value: str
 
 
@@ -97,11 +106,15 @@ def _compute_progress_percent(progress_map: dict[object, int], total: int) -> in
         return 100
     if not progress_map:
         return 0
-    values = sorted((_clamp_progress(value) for value in progress_map.values()), reverse=True)[:total]
+    values = sorted(
+        (_clamp_progress(value) for value in progress_map.values()), reverse=True
+    )[:total]
     return _clamp_progress(sum(values) // total)
 
 
-def _progress_reason(label: str, progress: int, *, completed: int | None = None, total: int | None = None) -> str:
+def _progress_reason(
+    label: str, progress: int, *, completed: int | None = None, total: int | None = None
+) -> str:
     reason = f"{label}正在生成 {progress}%"
     if completed is not None and total is not None and total > 0:
         reason += f" ({completed}/{total})"
@@ -115,12 +128,15 @@ def _progress_reason_delta(
     completed: int | None = None,
     total: int | None = None,
 ) -> str:
-    return _progress_reason(
-        label,
-        progress,
-        completed=completed,
-        total=total,
-    ) + "\n"
+    return (
+        _progress_reason(
+            label,
+            progress,
+            completed=completed,
+            total=total,
+        )
+        + "\n"
+    )
 
 
 def _append_reason_update(
@@ -174,9 +190,18 @@ def _app_url() -> str:
     return get_config().get_str("app.app_url", "").rstrip("/")
 
 
-def _local_image_url(file_id: str) -> str:
-    app_url = _app_url()
-    return f"{app_url}/v1/files/image?id={file_id}"
+# ponytail: last-resort fallback when neither config nor request-derived URL is set
+_DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+
+
+def _resolve_public_url(base_url: str | None, path: str) -> str:
+    """Resolve a public URL with 3-tier fallback: explicit > config > default."""
+    resolved = base_url or _app_url() or _DEFAULT_BASE_URL
+    return f"{resolved.rstrip('/')}{path}"
+
+
+def _local_image_url(file_id: str, *, base_url: str | None = None) -> str:
+    return _resolve_public_url(base_url, f"/v1/files/image?id={file_id}")
 
 
 def _extract_image_file_id(url: str) -> str:
@@ -202,10 +227,13 @@ def _save_image(raw: bytes, mime: str, file_id: str) -> str:
 
 async def _download_image_bytes(token: str, url: str) -> tuple[bytes, str]:
     try:
-        stream, content_type = await download_asset(token, url)
-        chunks: list[bytes] = []
-        async for chunk in stream:
-            chunks.append(chunk)
+        async with asyncio.timeout(30):
+            stream, content_type = await download_asset(token, url)
+            chunks: list[bytes] = []
+            async for chunk in stream:
+                chunks.append(chunk)
+    except TimeoutError:
+        raise UpstreamError("Image download timed out after 30s")
     except UpstreamError:
         raise
     except Exception as exc:
@@ -219,6 +247,7 @@ async def _resolve_image_output(
     url: str,
     response_format: str,
     blob_b64: str | None = None,
+    base_url: str | None = None,
 ) -> _ImageOutput:
     fmt = _normalize_response_format(response_format)
     cfg = get_config()
@@ -228,7 +257,7 @@ async def _resolve_image_output(
         and not cfg.get_bool("features.imagine_public_image_proxy", False)
     ):
         return _ImageOutput(api_value=url, markdown_value=f"![image]({url})")
-    if fmt == "url" and not _app_url():
+    if fmt == "url" and not _resolve_public_url(base_url, "/"):
         return _ImageOutput(api_value=url, markdown_value=f"![image]({url})")
 
     mime = infer_content_type(url) or "image/jpeg"
@@ -251,7 +280,7 @@ async def _resolve_image_output(
         mime,
         _extract_image_file_id(url),
     )
-    local_url = _local_image_url(file_id)
+    local_url = _local_image_url(file_id, base_url=base_url)
     return _ImageOutput(api_value=local_url, markdown_value=f"![image]({local_url})")
 
 
@@ -266,18 +295,18 @@ def _output_content(image: _ImageOutput, *, chat_format: bool) -> str:
 # Models that use the chat endpoint for image generation (no WS, no params).
 _LITE_IMAGE_MODELS = frozenset({"grok-imagine-image-lite"})
 # WS models that use quality mode (enable_pro=True).
-_PRO_IMAGE_MODELS  = frozenset({"grok-imagine-image-pro"})
+_PRO_IMAGE_MODELS = frozenset({"grok-imagine-image-pro"})
 
 
 async def generate(
     *,
-    model:           str,
-    prompt:          str,
-    n:               int  = 1,
-    size:            str  = "1024x1024",
-    response_format: str  = "url",
-    stream:          bool = False,
-    chat_format:     bool = False,
+    model: str,
+    prompt: str,
+    n: int = 1,
+    size: str = "1024x1024",
+    response_format: str = "url",
+    stream: bool = False,
+    chat_format: bool = False,
 ) -> dict | AsyncGenerator[str, None]:
     """Generate images.
 
@@ -290,39 +319,41 @@ async def generate(
       Non-streaming: OpenAI images.generations dict, or chat dict if chat_format=True.
       Streaming:     async generator of SSE strings.
     """
-    cfg          = get_config()
-    spec         = resolve_model(model)
+    cfg = get_config()
+    spec = resolve_model(model)
     aspect_ratio = resolve_aspect_ratio(size)
-    enable_nsfw  = cfg.get_bool("features.enable_nsfw", True)
+    enable_nsfw = cfg.get_bool("features.enable_nsfw", True)
 
     from app.dataplane.account import _directory as _acct_dir
+
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
 
     # Lite model: chat-based generation (no WS, ignores aspect_ratio).
     if model in _LITE_IMAGE_MODELS:
         return await _generate_lite(
-            spec            = spec,
-            prompt          = prompt,
-            n               = n,
-            response_format = response_format,
-            stream          = stream,
-            chat_format     = chat_format,
+            spec=spec,
+            prompt=prompt,
+            n=n,
+            response_format=response_format,
+            stream=stream,
+            chat_format=chat_format,
         )
 
-    acct = await _acct_dir.reserve_any(
-        spec.pool_candidates(),
-        now_s_override=now_s(),
-    )
-    if acct is None:
-        raise RateLimitError("No available accounts for image generation")
-
-    token       = acct.token
     response_id = make_response_id()
-    enable_pro  = model in _PRO_IMAGE_MODELS
+    enable_pro = model in _PRO_IMAGE_MODELS
     _ws_mode_id = int(spec.mode_id)
 
     if stream:
+        acct = await _acct_dir.reserve_any(
+            spec.pool_candidates(),
+            now_s_override=now_s(),
+        )
+        if acct is None:
+            raise RateLimitError("No available accounts for image generation")
+
+        token = acct.token
+
         async def _sse_stream() -> AsyncGenerator[str, None]:
             success = False
             fail_exc: BaseException | None = None
@@ -331,17 +362,21 @@ async def generate(
             last_progress = -1
             try:
                 async for ev in stream_images(
-                    token, prompt,
-                    aspect_ratio = aspect_ratio,
-                    n            = n,
-                    enable_nsfw  = enable_nsfw,
-                    enable_pro   = enable_pro,
+                    token,
+                    prompt,
+                    aspect_ratio=aspect_ratio,
+                    n=n,
+                    enable_nsfw=enable_nsfw,
+                    enable_pro=enable_pro,
                 ):
                     ev_type = ev.get("type")
                     if ev_type == "error":
                         raise UpstreamError(f"Image error: {ev.get('error', '')}")
                     if ev_type == "moderated":
-                        logger.warning("image generation slot moderated: image_id={}", ev.get("image_id", "")[:8])
+                        logger.warning(
+                            "image generation slot moderated: image_id={}",
+                            ev.get("image_id", "")[:8],
+                        )
                         continue
                     if ev_type == "progress":
                         key = ev.get("image_id") or f"progress-{len(progress_map)}"
@@ -355,7 +390,9 @@ async def generate(
                                 completed=len(completed_ids),
                                 total=n,
                             )
-                            chunk = make_thinking_chunk(response_id, model, reason + "\n")
+                            chunk = make_thinking_chunk(
+                                response_id, model, reason + "\n"
+                            )
                             yield f"data: {orjson.dumps(chunk).decode()}\n\n"
                         continue
                     if not ev.get("is_final"):
@@ -366,7 +403,9 @@ async def generate(
                     aggregate = _compute_progress_percent(progress_map, n)
                     if chat_format and aggregate > last_progress:
                         last_progress = aggregate
-                        reason = _progress_reason("图片", aggregate, completed=len(completed_ids), total=n)
+                        reason = _progress_reason(
+                            "图片", aggregate, completed=len(completed_ids), total=n
+                        )
                         chunk = make_thinking_chunk(response_id, model, reason + "\n")
                         yield f"data: {orjson.dumps(chunk).decode()}\n\n"
                     image = await _resolve_image_output(
@@ -397,69 +436,106 @@ async def generate(
 
         return _sse_stream()
 
-    # Non-streaming: collect all final images.
-    finals: list[_ImageOutput] = []
-    reasoning_updates: list[str] = []
-    progress_map: dict[object, int] = {}
-    completed_ids: set[object] = set()
-    success = False
-    fail_exc: BaseException | None = None
-    try:
-        async for ev in stream_images(
-            token, prompt,
-            aspect_ratio = aspect_ratio,
-            n            = n,
-            enable_nsfw  = enable_nsfw,
-            enable_pro   = enable_pro,
-        ):
-            ev_type = ev.get("type")
-            if ev_type == "error":
-                raise UpstreamError(f"Image generation failed: {ev.get('error', 'unknown')}")
-            if ev_type == "moderated":
-                logger.warning("image generation slot moderated: image_id={}", ev.get("image_id", "")[:8])
-                continue
-            if ev_type == "progress":
-                key = ev.get("image_id") or f"progress-{len(progress_map)}"
-                progress_map[key] = _clamp_progress(ev.get("progress") or 0)
-                if chat_format:
-                    _append_reason_update(
-                        reasoning_updates,
-                        "图片",
-                        _compute_progress_percent(progress_map, n),
-                        completed=len(completed_ids),
-                        total=n,
+    # Non-streaming: collect all final images with retry on credential/upstream failure.
+    max_retries = selection_max_retries()
+    retry_codes = _configured_retry_codes(get_config())
+    excluded: list[str] = []
+
+    for attempt in range(max_retries + 1):
+        acct = await _acct_dir.reserve_any(
+            spec.pool_candidates(),
+            now_s_override=now_s(),
+            exclude_tokens=excluded or None,
+        )
+        if acct is None:
+            raise RateLimitError("No available accounts for image generation")
+
+        token = acct.token
+        finals: list[_ImageOutput] = []
+        reasoning_updates: list[str] = []
+        progress_map: dict[object, int] = {}
+        completed_ids: set[object] = set()
+        success = False
+        retry = False
+        fail_exc: BaseException | None = None
+        try:
+            async for ev in stream_images(
+                token,
+                prompt,
+                aspect_ratio=aspect_ratio,
+                n=n,
+                enable_nsfw=enable_nsfw,
+                enable_pro=enable_pro,
+            ):
+                ev_type = ev.get("type")
+                if ev_type == "error":
+                    raise UpstreamError(
+                        f"Image generation failed: {ev.get('error', 'unknown')}"
                     )
-                continue
-            if ev.get("is_final"):
-                key = ev.get("image_id") or f"final-{len(completed_ids)}"
-                progress_map[key] = 100
-                completed_ids.add(key)
-                if chat_format:
-                    _append_reason_update(
-                        reasoning_updates,
-                        "图片",
-                        _compute_progress_percent(progress_map, n),
-                        completed=len(completed_ids),
-                        total=n,
+                if ev_type == "moderated":
+                    logger.warning(
+                        "image generation slot moderated: image_id={}",
+                        ev.get("image_id", "")[:8],
                     )
-                image = await _resolve_image_output(
-                    token=token,
-                    url=ev.get("url", ""),
-                    response_format=response_format,
-                    blob_b64=ev.get("blob") or None,
+                    continue
+                if ev_type == "progress":
+                    key = ev.get("image_id") or f"progress-{len(progress_map)}"
+                    progress_map[key] = _clamp_progress(ev.get("progress") or 0)
+                    if chat_format:
+                        _append_reason_update(
+                            reasoning_updates,
+                            "图片",
+                            _compute_progress_percent(progress_map, n),
+                            completed=len(completed_ids),
+                            total=n,
+                        )
+                    continue
+                if ev.get("is_final"):
+                    key = ev.get("image_id") or f"final-{len(completed_ids)}"
+                    progress_map[key] = 100
+                    completed_ids.add(key)
+                    if chat_format:
+                        _append_reason_update(
+                            reasoning_updates,
+                            "图片",
+                            _compute_progress_percent(progress_map, n),
+                            completed=len(completed_ids),
+                            total=n,
+                        )
+                    image = await _resolve_image_output(
+                        token=token,
+                        url=ev.get("url", ""),
+                        response_format=response_format,
+                        blob_b64=ev.get("blob") or None,
+                    )
+                    finals.append(image)
+            success = True
+            break
+        except UpstreamError as exc:
+            fail_exc = exc
+            if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                retry = True
+                logger.warning(
+                    "image generation retry scheduled: attempt={}/{} token={}...",
+                    attempt + 1,
+                    max_retries,
+                    token[:8],
                 )
-                finals.append(image)
-        success = True
-    except BaseException as exc:
-        fail_exc = exc
-        raise
-    finally:
-        await _acct_dir.release(acct)
-        # WS image gen has its own upstream rate limiting — skip quota tracking.
-        if not success and fail_exc is not None:
-            kind = _feedback_kind(fail_exc)
-            if kind in (FeedbackKind.UNAUTHORIZED, FeedbackKind.FORBIDDEN):
-                await _acct_dir.feedback(token, kind, _ws_mode_id)
+            else:
+                raise
+        except BaseException as exc:
+            fail_exc = exc
+            raise
+        finally:
+            await _acct_dir.release(acct)
+            # WS image gen has its own upstream rate limiting — skip quota tracking.
+            if not success and fail_exc is not None:
+                kind = _feedback_kind(fail_exc)
+                if kind in (FeedbackKind.UNAUTHORIZED, FeedbackKind.FORBIDDEN):
+                    await _acct_dir.feedback(token, kind, _ws_mode_id)
+
+        if retry:
+            excluded.append(token)
 
     if chat_format:
         content = "\n\n".join(image.markdown_value for image in finals)
@@ -485,25 +561,31 @@ async def generate(
 # Lite image generation (chat-based, no WS, no aspect-ratio control)
 # ---------------------------------------------------------------------------
 
+
 async def _generate_lite(
     *,
-    spec:            ModelSpec,
-    prompt:          str,
-    n:               int,
+    spec: ModelSpec,
+    prompt: str,
+    n: int,
     response_format: str,
-    stream:          bool,
-    chat_format:     bool,
+    stream: bool,
+    chat_format: bool,
 ) -> dict | AsyncGenerator[str, None]:
     """Generate images via the chat endpoint (Aurora model path).
 
     Does not support aspect ratio or quality control.  It uses fast quota.
     """
     response_id = make_response_id()
-    cfg         = get_config()
-    timeout_s   = cfg.get_float("chat.timeout", 120.0)
-    logger.debug("lite image fan-out started: request_count={} mode={}", n, spec.mode_id.name.lower())
+    cfg = get_config()
+    timeout_s = cfg.get_float("chat.timeout", 120.0)
+    logger.debug(
+        "lite image fan-out started: request_count={} mode={}",
+        n,
+        spec.mode_id.name.lower(),
+    )
 
     if stream:
+
         async def _sse_stream() -> AsyncGenerator[str, None]:
             progress_map: dict[int, int] = {}
             last_progress = -1
@@ -511,10 +593,12 @@ async def _generate_lite(
 
             async def _progress(idx: int, progress: int) -> None:
                 progress_map[idx] = _clamp_progress(progress)
-                await queue.put((
-                    _compute_progress_percent(progress_map, n),
-                    _completed_items(progress_map),
-                ))
+                await queue.put(
+                    (
+                        _compute_progress_percent(progress_map, n),
+                        _completed_items(progress_map),
+                    )
+                )
 
             task = asyncio.create_task(
                 _run_lite_batch(
@@ -529,7 +613,9 @@ async def _generate_lite(
 
             while not task.done() or not queue.empty():
                 try:
-                    aggregate, completed = await asyncio.wait_for(queue.get(), timeout=0.1)
+                    aggregate, completed = await asyncio.wait_for(
+                        queue.get(), timeout=0.1
+                    )
                 except asyncio.TimeoutError:
                     continue
                 if chat_format and aggregate > last_progress:
@@ -619,9 +705,13 @@ class _EditReference:
 
 def _normalize_edit_inputs(image_inputs: list[str]) -> list[str]:
     """Validate and normalize image-edit reference inputs."""
-    cleaned = [item.strip() for item in image_inputs if isinstance(item, str) and item.strip()]
+    cleaned = [
+        item.strip() for item in image_inputs if isinstance(item, str) and item.strip()
+    ]
     if not cleaned:
-        raise ValidationError("Image edit requires at least one image_url content block", param="messages")
+        raise ValidationError(
+            "Image edit requires at least one image_url content block", param="messages"
+        )
     return cleaned[-_EDIT_MAX_REFERENCES:]
 
 
@@ -655,7 +745,9 @@ async def _prepare_edit_reference(
             body=exc.details.get("body", ""),
         ) from exc
     except Exception as exc:
-        raise UpstreamError(f"Image edit reference {index + 1} upload failed: {exc}") from exc
+        raise UpstreamError(
+            f"Image edit reference {index + 1} upload failed: {exc}"
+        ) from exc
 
 
 async def _prepare_edit_references(
@@ -714,7 +806,9 @@ def _extract_edit_prompt_and_inputs(messages: list[dict]) -> tuple[str, list[str
                     image_inputs.append(url)
 
     if not prompt:
-        raise ValidationError("Image edit requires a non-empty text prompt", param="messages")
+        raise ValidationError(
+            "Image edit requires a non-empty text prompt", param="messages"
+        )
     return prompt, _normalize_edit_inputs(image_inputs)
 
 
@@ -775,7 +869,9 @@ def _collect_edit_results(
                     final_urls[index] = resolved_url
 
     for index, asset_id in enumerate(extract_model_response_file_attachments(obj)):
-        resolved_url = _resolve_edit_final_url(raw_url=None, asset_id=asset_id, user_id=user_id)
+        resolved_url = _resolve_edit_final_url(
+            raw_url=None, asset_id=asset_id, user_id=user_id
+        )
         if resolved_url:
             final_urls.setdefault(index, resolved_url)
 
@@ -886,7 +982,8 @@ async def _collect_edit_images(
     if len(images) < requested_n:
         logger.warning(
             "image edit returned fewer images than requested: requested={} received={}",
-            requested_n, len(images),
+            requested_n,
+            len(images),
         )
     return images[:requested_n]
 
@@ -934,37 +1031,37 @@ async def _stream_image_edit(
 
 
 async def _stream_lite_generate(
-    token:       str,
-    message:     str,
-    mode_id:     ModeId,
+    token: str,
+    message: str,
+    mode_id: ModeId,
     *,
     timeout_s: float = 120.0,
 ) -> AsyncGenerator[str, None]:
-    proxy   = await get_proxy_runtime()
-    lease   = await proxy.acquire()
+    proxy = await get_proxy_runtime()
+    lease = await proxy.acquire()
     payload = build_chat_payload(
-        message           = f"Drawing: {message}",
-        mode_id           = mode_id,
-        file_attachments  = [],
-        request_overrides = {"imageGenerationCount": 2},
+        message=f"Drawing: {message}",
+        mode_id=mode_id,
+        file_attachments=[],
+        request_overrides={"imageGenerationCount": 2},
     )
     headers = build_http_headers(token, lease=lease)
-    kwargs  = build_session_kwargs(lease=lease)
+    kwargs = build_session_kwargs(lease=lease)
 
     async with ResettableSession(**kwargs) as session:
         response = await session.post(
             CHAT,
-            headers = headers,
-            data    = orjson.dumps(payload),
-            timeout = timeout_s,
-            stream  = True,
+            headers=headers,
+            data=orjson.dumps(payload),
+            timeout=timeout_s,
+            stream=True,
         )
         if response.status_code != 200:
             body = response.content.decode("utf-8", "replace")[:300]
             raise UpstreamError(
                 f"Image-generation upstream returned {response.status_code}",
-                status = response.status_code,
-                body   = body,
+                status=response.status_code,
+                body=body,
             )
         async for line in response.aiter_lines():
             yield line
@@ -972,8 +1069,8 @@ async def _stream_lite_generate(
 
 async def _run_lite_request(
     *,
-    spec:      ModelSpec,
-    prompt:    str,
+    spec: ModelSpec,
+    prompt: str,
     timeout_s: float,
     response_format: str,
     progress_cb: Callable[[int], Awaitable[None]] | None = None,
@@ -1019,7 +1116,9 @@ async def _run_lite_request(
                     if ev.kind == "image_progress":
                         if progress_cb is not None:
                             try:
-                                await progress_cb(_clamp_progress(int(ev.content or "0")))
+                                await progress_cb(
+                                    _clamp_progress(int(ev.content or "0"))
+                                )
                             except ValueError:
                                 pass
                     if ev.kind == "image" and ev.content:
@@ -1077,8 +1176,8 @@ async def _run_lite_request(
 
 async def _run_lite_batch(
     *,
-    spec:      ModelSpec,
-    prompt:    str,
+    spec: ModelSpec,
+    prompt: str,
     n: int,
     timeout_s: float,
     response_format: str,
@@ -1092,7 +1191,9 @@ async def _run_lite_batch(
             prompt=prompt,
             timeout_s=timeout_s,
             response_format=response_format,
-            progress_cb=None if progress_cb is None else lambda progress: progress_cb(idx, progress),
+            progress_cb=None
+            if progress_cb is None
+            else lambda progress: progress_cb(idx, progress),
         )
 
     async with asyncio.TaskGroup() as tg:
@@ -1104,13 +1205,13 @@ async def _run_lite_batch(
 
 async def edit(
     *,
-    model:           str,
-    messages:        list[dict],
-    n:               int  = 1,
-    size:            str  = "1024x1024",
-    response_format: str  = "url",
-    stream:          bool = False,
-    chat_format:     bool = False,
+    model: str,
+    messages: list[dict],
+    n: int = 1,
+    size: str = "1024x1024",
+    response_format: str = "url",
+    stream: bool = False,
+    chat_format: bool = False,
 ) -> dict | AsyncGenerator[str, None]:
     """Edit images via media/post/create + imagine-image-edit chat payload."""
     cfg = get_config()
@@ -1123,25 +1224,28 @@ async def edit(
     prompt, image_inputs = _extract_edit_prompt_and_inputs(messages)
 
     from app.dataplane.account import _directory as _acct_dir
+
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
 
     acct = await _acct_dir.reserve(
-        pool_candidates = spec.pool_candidates(),
-        mode_id         = int(spec.mode_id),
-        now_s_override  = now_s(),
+        pool_candidates=spec.pool_candidates(),
+        mode_id=int(spec.mode_id),
+        now_s_override=now_s(),
     )
     if acct is None:
         raise RateLimitError("No available accounts for image edit")
 
-    token       = acct.token
+    token = acct.token
     response_id = make_response_id()
     edit_prompt = prompt
 
     try:
         edit_references = await _prepare_edit_references(token, image_inputs)
         if not edit_references:
-            raise UpstreamError("All image uploads failed; cannot proceed with image edit")
+            raise UpstreamError(
+                "All image uploads failed; cannot proceed with image edit"
+            )
         edit_prompt = _replace_edit_image_placeholders(prompt, edit_references)
         image_references = [ref.content_url for ref in edit_references]
 
@@ -1164,6 +1268,7 @@ async def edit(
         raise
 
     if stream:
+
         async def _sse_stream() -> AsyncGenerator[str, None]:
             success = False
             fail_exc: BaseException | None = None
@@ -1171,12 +1276,15 @@ async def edit(
             last_progress = -1
             queue: asyncio.Queue[tuple[int, int]] = asyncio.Queue()
             try:
+
                 async def _progress(index: int, progress: int) -> None:
                     progress_map[index] = _clamp_progress(progress)
-                    await queue.put((
-                        _compute_progress_percent(progress_map, n),
-                        _completed_items(progress_map),
-                    ))
+                    await queue.put(
+                        (
+                            _compute_progress_percent(progress_map, n),
+                            _completed_items(progress_map),
+                        )
+                    )
 
                 task = asyncio.create_task(
                     _collect_edit_images(
@@ -1192,7 +1300,9 @@ async def edit(
                 )
                 while not task.done() or not queue.empty():
                     try:
-                        aggregate, completed = await asyncio.wait_for(queue.get(), timeout=0.1)
+                        aggregate, completed = await asyncio.wait_for(
+                            queue.get(), timeout=0.1
+                        )
                     except asyncio.TimeoutError:
                         continue
                     if chat_format and aggregate > last_progress:
@@ -1211,7 +1321,7 @@ async def edit(
                 images = await task
                 for image in images:
                     content = _output_content(image, chat_format=chat_format)
-                    chunk   = make_stream_chunk(response_id, model, content)
+                    chunk = make_stream_chunk(response_id, model, content)
                     yield f"data: {orjson.dumps(chunk).decode()}\n\n"
 
                 final = make_stream_chunk(response_id, model, "", is_final=True)
@@ -1223,7 +1333,13 @@ async def edit(
                 raise
             finally:
                 await _acct_dir.release(acct)
-                kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
+                kind = (
+                    FeedbackKind.SUCCESS
+                    if success
+                    else _feedback_kind(fail_exc)
+                    if fail_exc
+                    else FeedbackKind.SERVER_ERROR
+                )
                 await _acct_dir.feedback(token, kind, int(spec.mode_id))
                 if success:
                     asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
@@ -1237,6 +1353,7 @@ async def edit(
     reasoning_updates: list[str] = []
     progress_map: dict[int, int] = {}
     try:
+
         async def _progress(index: int, progress: int) -> None:
             progress_map[index] = _clamp_progress(progress)
             if chat_format:
@@ -1264,7 +1381,13 @@ async def edit(
         raise
     finally:
         await _acct_dir.release(acct)
-        kind = FeedbackKind.SUCCESS if success else _feedback_kind(fail_exc) if fail_exc else FeedbackKind.SERVER_ERROR
+        kind = (
+            FeedbackKind.SUCCESS
+            if success
+            else _feedback_kind(fail_exc)
+            if fail_exc
+            else FeedbackKind.SERVER_ERROR
+        )
         await _acct_dir.feedback(token, kind, int(spec.mode_id))
         if success:
             asyncio.create_task(_quota_sync(token, int(spec.mode_id)))
