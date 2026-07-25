@@ -154,6 +154,8 @@ def _client_hints(browser: Optional[str], ua: Optional[str]) -> dict[str, str]:
         "Sec-Ch-Ua-Mobile": BROWSER_SEC_CH_UA_MOBILE,
         "Sec-Ch-Ua-Platform": BROWSER_SEC_CH_UA_PLATFORM,
         "Sec-Ch-Ua-Model": "",
+        "Sec-Ch-Ua-Arch": _arch(ua or "") or "x86",
+        "Sec-Ch-Ua-Bitness": "64",
     }
 
 

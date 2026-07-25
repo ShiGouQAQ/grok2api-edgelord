@@ -1,14 +1,15 @@
 """Anthropic message parsing unit tests.
 
-Tests _extract_system_text() and _parse_anthropic_messages() for inline
-role=system extraction from the messages array, ported from Go commit
-982e27b (Claude Code injects system messages mid-conversation).
+Tests _extract_system_text(), _parse_anthropic_messages(), _build_search_content_blocks(),
+and _build_message_response() for cache tokens and web search usage fields.
 """
 
 import pytest
 from app.products.anthropic.messages import (
     _extract_system_text,
     _parse_anthropic_messages,
+    _build_search_content_blocks,
+    _build_message_response,
 )
 
 
@@ -300,6 +301,139 @@ class TestParseAnthropicMessages:
         result = _parse_anthropic_messages(messages, None)
         assert len(result) == 1
         assert result[0]["role"] == "user"
+
+
+# ------------------------------------------------------------------
+# _build_search_content_blocks tests
+# ------------------------------------------------------------------
+
+
+class TestBuildSearchContentBlocks:
+    def test_empty_sources_returns_empty(self):
+        assert _build_search_content_blocks([]) == []
+
+    def test_returns_server_tool_use_and_web_search_tool_result(self):
+        sources = [{"url": "https://a.com", "title": "A"}]
+        blocks = _build_search_content_blocks(sources)
+        assert len(blocks) == 2
+        assert blocks[0]["type"] == "server_tool_use"
+        assert blocks[0]["name"] == "web_search"
+        assert blocks[1]["type"] == "web_search_tool_result"
+        assert blocks[1]["tool_use_id"] == blocks[0]["id"]
+
+    def test_tool_use_includes_query(self):
+        sources = [{"url": "https://a.com", "title": "A"}]
+        blocks = _build_search_content_blocks(sources, query="python")
+        assert blocks[0]["input"] == {"query": "python"}
+
+    def test_tool_use_empty_input_when_no_query(self):
+        sources = [{"url": "https://a.com", "title": "A"}]
+        blocks = _build_search_content_blocks(sources)
+        assert blocks[0]["input"] == {}
+
+    def test_deduplicates_urls(self):
+        sources = [
+            {"url": "https://a.com", "title": "A1"},
+            {"url": "https://a.com", "title": "A2"},
+            {"url": "https://b.com", "title": "B"},
+        ]
+        blocks = _build_search_content_blocks(sources)
+        hits = blocks[1]["content"]
+        assert len(hits) == 2
+        urls = [h["url"] for h in hits]
+        assert urls == ["https://a.com", "https://b.com"]
+
+    def test_empty_url_skipped(self):
+        sources = [
+            {"url": "", "title": "No URL"},
+            {"url": "https://a.com", "title": "A"},
+        ]
+        blocks = _build_search_content_blocks(sources)
+        hits = blocks[1]["content"]
+        assert len(hits) == 1
+        assert hits[0]["url"] == "https://a.com"
+
+    def test_result_block_fields(self):
+        sources = [{"url": "https://x.com", "title": "X Page"}]
+        blocks = _build_search_content_blocks(sources)
+        hit = blocks[1]["content"][0]
+        assert hit["type"] == "web_search_result"
+        assert hit["title"] == "X Page"
+        assert hit["url"] == "https://x.com"
+
+    def test_title_falls_back_to_url(self):
+        sources = [{"url": "https://example.com"}]
+        blocks = _build_search_content_blocks(sources)
+        hit = blocks[1]["content"][0]
+        assert hit["title"] == "https://example.com"
+
+    def test_all_empty_urls_returns_error_block(self):
+        sources = [{"url": "", "title": "No URL"}, {"url": "", "title": "Also no"}]
+        blocks = _build_search_content_blocks(sources)
+        assert len(blocks) == 2
+        assert blocks[1]["content"]["type"] == "web_search_tool_result_error"
+        assert blocks[1]["content"]["error_code"] == "unavailable"
+
+    def test_multiple_sources_all_unique(self):
+        sources = [
+            {"url": f"https://example.com/{i}", "title": f"Page {i}"} for i in range(5)
+        ]
+        blocks = _build_search_content_blocks(sources)
+        hits = blocks[1]["content"]
+        assert len(hits) == 5
+
+
+# ------------------------------------------------------------------
+# _build_message_response tests
+# ------------------------------------------------------------------
+
+
+class TestBuildMessageResponse:
+    def test_basic_fields(self):
+        resp = _build_message_response("msg_1", "grok-4", [], "end_turn", 10, 20)
+        assert resp["id"] == "msg_1"
+        assert resp["type"] == "message"
+        assert resp["role"] == "assistant"
+        assert resp["model"] == "grok-4"
+        assert resp["stop_reason"] == "end_turn"
+        assert resp["stop_sequence"] is None
+
+    def test_usage_includes_cache_tokens(self):
+        resp = _build_message_response(
+            "m", "g", [], "end_turn", 10, 20, cache_read=5, cache_creation=3
+        )
+        usage = resp["usage"]
+        assert usage["input_tokens"] == 10
+        assert usage["output_tokens"] == 20
+        assert usage["cache_creation_input_tokens"] == 3
+        assert usage["cache_read_input_tokens"] == 5
+
+    def test_usage_cache_tokens_default_zero(self):
+        resp = _build_message_response("m", "g", [], "end_turn", 10, 20)
+        usage = resp["usage"]
+        assert usage["cache_creation_input_tokens"] == 0
+        assert usage["cache_read_input_tokens"] == 0
+
+    def test_web_search_requests_in_usage(self):
+        resp = _build_message_response(
+            "m", "g", [], "end_turn", 10, 20, web_search_requests=3
+        )
+        assert resp["usage"]["server_tool_use"]["web_search_requests"] == 3
+
+    def test_no_web_search_requests_key_when_zero(self):
+        resp = _build_message_response(
+            "m", "g", [], "end_turn", 10, 20, web_search_requests=0
+        )
+        assert "server_tool_use" not in resp["usage"]
+
+    def test_content_passthrough(self):
+        content = [{"type": "text", "text": "hello"}]
+        resp = _build_message_response("m", "g", content, "end_turn", 10, 20)
+        assert resp["content"] == content
+
+    def test_tool_use_stop_reason(self):
+        resp = _build_message_response("m", "g", [], "tool_use", 10, 20)
+        assert resp["stop_reason"] == "tool_use"
 
 
 if __name__ == "__main__":

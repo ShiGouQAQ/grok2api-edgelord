@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import hashlib
 import mimetypes
 from typing import Annotated, AsyncGenerator, AsyncIterable, Literal
 
@@ -60,12 +61,110 @@ def _model_available_for_pools(spec: ModelSpec, pools: frozenset[str]) -> bool:
 # /v1/models
 # ---------------------------------------------------------------------------
 
+_CODEX_CATALOG_VERSION = "v1"
+
+
+def _codex_display_name(name: str) -> str:
+    return name.replace("-", " ").replace("_", " ").title()
+
+
+# Context windows per model family (port of 07e03e5 + 7e6656b)
+_CODEX_CONTEXT_WINDOWS: dict[str, int] = {
+    "grok-4.3": 131_072,
+    "grok-4.20": 131_072,
+    "grok-imagine": 0,
+    "grok-build": 2_000_000,
+}
+
+_CODEX_REASONING_MODELS: frozenset[str] = frozenset(
+    {
+        "grok-4.20-auto",
+        "grok-4.20-expert",
+        "grok-4.20-heavy",
+        "grok-4.3-console",
+        "grok-4.3-high",
+        "grok-4.20-0309-reasoning",
+        "grok-4.20-0309-reasoning-super",
+        "grok-4.20-0309-reasoning-heavy",
+        "grok-4.20-0309-reasoning-console",
+        "grok-build-console",
+    }
+)
+
+_CODEX_REASONING_LEVELS: dict[str, list[str]] = {
+    "default": ["low", "medium", "high"],
+    "reasoning": ["low", "medium", "high", "xhigh"],
+    "build": ["low", "medium", "high"],
+}
+
+_CODEX_MEDIA_MODELS: frozenset[str] = frozenset(
+    {
+        "grok-imagine-image-lite",
+        "grok-imagine-image",
+        "grok-imagine-image-pro",
+        "grok-imagine-image-edit",
+        "grok-imagine-video",
+    }
+)
+
+
+def _codex_context_window(model_name: str) -> int:
+    for prefix, window in _CODEX_CONTEXT_WINDOWS.items():
+        if model_name.startswith(prefix):
+            return window
+    return 131_072
+
+
+def _codex_reasoning_levels(model_name: str) -> list[str]:
+    if model_name in _CODEX_REASONING_MODELS or "reasoning" in model_name:
+        return _CODEX_REASONING_LEVELS["reasoning"]
+    if model_name.startswith("grok-build"):
+        return _CODEX_REASONING_LEVELS["build"]
+    return _CODEX_REASONING_LEVELS["default"]
+
+
+def _build_codex_catalog(
+    pools: frozenset[str] | None = None,
+) -> list[dict]:
+    """Build Codex-compatible model catalog (port of 07e03e5, 7e6656b)."""
+    items: list[dict] = []
+    for m in model_registry.list_enabled():
+        if pools and not _model_available_for_pools(m, pools):
+            continue
+        visibility = "hide" if m.model_name in _CODEX_MEDIA_MODELS else "show"
+        items.append(
+            {
+                "slug": m.model_name,
+                "display_name": _codex_display_name(m.model_name),
+                "supported_reasoning_levels": _codex_reasoning_levels(m.model_name),
+                "context_window": _codex_context_window(m.model_name),
+                "visibility": visibility,
+                "capabilities": {
+                    "chat": bool(m.capability & 1),
+                    "image": bool(m.capability & 2),
+                    "video": bool(m.capability & 8),
+                },
+            }
+        )
+    return items
+
 
 @router.get("/models", tags=[_TAG_MODELS], dependencies=[Depends(verify_api_key)])
-async def list_models(request: Request):
+async def list_models(request: Request, client_version: str | None = Query(None)):
     import time
 
     pools = await _available_pools(request)
+
+    # Codex client: return Codex-compatible catalog with ETag caching (7e6656b)
+    if client_version is not None:
+        catalog = _build_codex_catalog(pools)
+        catalog_bytes = orjson.dumps(catalog)
+        etag = hashlib.sha256(catalog_bytes).hexdigest()
+        return JSONResponse(
+            content=catalog,
+            headers={"ETag": etag, "X-Models-Etag": etag},
+        )
+
     models = [
         {
             "id": m.model_name,

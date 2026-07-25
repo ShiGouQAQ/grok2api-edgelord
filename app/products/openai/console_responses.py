@@ -133,7 +133,7 @@ async def create(
 
                 try:
                     # ponytail: prompt_cache_key always None without client_key_id infra
-                    _pc_key = resolve_prompt_cache_identity(
+                    _pc_key, _replay_key = resolve_prompt_cache_identity(
                         client_key_id=0,
                         provider="console",
                         upstream_model=model,
@@ -388,7 +388,7 @@ async def create(
 
         try:
             # ponytail: prompt_cache_key always None without client_key_id infra
-            _pc_key = resolve_prompt_cache_identity(
+            _pc_key, _replay_key = resolve_prompt_cache_identity(
                 client_key_id=0,
                 provider="console",
                 upstream_model=model,

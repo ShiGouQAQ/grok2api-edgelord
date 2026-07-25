@@ -36,6 +36,8 @@ auto_chat_mode_fallback = true
 thinking_summary = false
 # 是否动态生成 Statsig 指纹
 dynamic_statsig = true
+# 403 账号封禁匹配码（逗号分隔，小写匹配，空列表=使用内置默认）
+build_403_invalidation_codes = ""
 # 是否允许生成 NSFW 图片
 enable_nsfw = true
 # 搜索信源始终以 search_sources 结构化字段输出（无需此开关）。

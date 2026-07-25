@@ -300,6 +300,58 @@ def _finish_reason_to_stop_reason(finish_reason: str | None) -> str:
     return mapping.get(finish_reason or "stop", "end_turn")
 
 
+def _make_search_tool_id(suffix: str = "") -> str:
+    """Generate a stable server_tool_use ID for web search blocks."""
+    import hashlib
+
+    raw = f"srvtoolu_{suffix}_{int(time.time() * 1000)}"
+    return "srvtoolu_" + hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
+def _build_search_content_blocks(
+    search_sources: list[dict],
+    query: str = "",
+) -> list[dict]:
+    """Port(chenyme 215ccb9, edd94df, 00b5f90): Build Anthropic-native
+    server_tool_use + web_search_tool_result content blocks from search sources.
+    """
+    if not search_sources:
+        return []
+    tool_id = _make_search_tool_id()
+    blocks: list[dict] = [
+        {
+            "type": "server_tool_use",
+            "id": tool_id,
+            "name": "web_search",
+            "input": {"query": query} if query else {},
+        }
+    ]
+    hits: list[dict] = []
+    seen_urls: set[str] = set()
+    for source in search_sources:
+        url = source.get("url", "")
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        hits.append(
+            {
+                "type": "web_search_result",
+                "title": source.get("title", url),
+                "url": url,
+            }
+        )
+    blocks.append(
+        {
+            "type": "web_search_tool_result",
+            "tool_use_id": tool_id,
+            "content": hits
+            if hits
+            else {"type": "web_search_tool_result_error", "error_code": "unavailable"},
+        }
+    )
+    return blocks
+
+
 def _build_message_response(
     msg_id: str,
     model: str,
@@ -307,7 +359,18 @@ def _build_message_response(
     stop_reason: str,
     input_tokens: int,
     output_tokens: int,
+    cache_read: int = 0,
+    cache_creation: int = 0,
+    web_search_requests: int = 0,
 ) -> dict:
+    usage: dict = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_creation_input_tokens": cache_creation,
+        "cache_read_input_tokens": cache_read,
+    }
+    if web_search_requests > 0:
+        usage["server_tool_use"] = {"web_search_requests": web_search_requests}
     return {
         "id": msg_id,
         "type": "message",
@@ -316,10 +379,7 @@ def _build_message_response(
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        },
+        "usage": usage,
     }
 
 
@@ -444,6 +504,8 @@ async def create(
                                         internal_message
                                     ),
                                     "output_tokens": 0,
+                                    "cache_creation_input_tokens": 0,
+                                    "cache_read_input_tokens": 0,
                                 },
                             },
                         },
@@ -666,6 +728,8 @@ async def create(
                                 "usage": {
                                     "input_tokens": prompt_tokens,
                                     "output_tokens": tool_output_tokens,
+                                    "cache_creation_input_tokens": 0,
+                                    "cache_read_input_tokens": 0,
                                 },
                             },
                         )
@@ -734,6 +798,29 @@ async def create(
                                 },
                             )
 
+                        # port(chenyme 215ccb9, edd94df): emit search content blocks
+                        ws_sources = adapter.search_sources_list()
+                        ws_requests = adapter.web_search_requests_count()
+                        if ws_sources:
+                            search_blocks = _build_search_content_blocks(ws_sources)
+                            for sb in search_blocks:
+                                yield _sse(
+                                    "content_block_start",
+                                    {
+                                        "type": "content_block_start",
+                                        "index": block_index,
+                                        "content_block": sb,
+                                    },
+                                )
+                                yield _sse(
+                                    "content_block_stop",
+                                    {
+                                        "type": "content_block_stop",
+                                        "index": block_index,
+                                    },
+                                )
+                                block_index += 1
+
                         full_text = "".join(text_buf)
                         full_think = "".join(think_buf)
                         out_tokens = estimate_tokens(full_text)
@@ -758,6 +845,17 @@ async def create(
                                 "usage": {
                                     "input_tokens": prompt_tokens,
                                     "output_tokens": out_tokens,
+                                    "cache_creation_input_tokens": 0,
+                                    "cache_read_input_tokens": 0,
+                                    **(
+                                        {
+                                            "server_tool_use": {
+                                                "web_search_requests": ws_requests,
+                                            }
+                                        }
+                                        if ws_requests > 0
+                                        else {}
+                                    ),
                                 },
                             },
                         )
@@ -946,11 +1044,18 @@ async def create(
                     }
                 )
             ct = estimate_tool_call_tokens(tc_result.calls)
+            ws_requests = adapter.web_search_requests_count()
             logger.info(
                 "messages tool_calls: model={} calls={}", model, len(tc_result.calls)
             )
             resp = _build_message_response(
-                msg_id, model, content, "tool_use", in_tokens, ct
+                msg_id,
+                model,
+                content,
+                "tool_use",
+                in_tokens,
+                ct,
+                web_search_requests=ws_requests,
             )
             # 注入结构化搜索信源（tool_use 场景）
             sources = adapter.search_sources_list()
@@ -970,10 +1075,21 @@ async def create(
     anns = adapter.annotations_list()
     if anns:
         content[0]["annotations"] = anns
-    resp = _build_message_response(
-        msg_id, model, content, "end_turn", in_tokens, out_tokens
-    )
     sources = adapter.search_sources_list()
+    ws_requests = adapter.web_search_requests_count()
+    if sources:
+        search_blocks = _build_search_content_blocks(sources)
+        if search_blocks:
+            content = search_blocks + content
+    resp = _build_message_response(
+        msg_id,
+        model,
+        content,
+        "end_turn",
+        in_tokens,
+        out_tokens,
+        web_search_requests=ws_requests,
+    )
     if sources:
         resp["search_sources"] = sources
     return resp

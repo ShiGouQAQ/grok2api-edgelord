@@ -150,6 +150,8 @@ async def create(
                                             messages
                                         ),
                                         "output_tokens": 0,
+                                        "cache_creation_input_tokens": 0,
+                                        "cache_read_input_tokens": 0,
                                     },
                                 },
                             },
@@ -209,6 +211,8 @@ async def create(
                                 "usage": {
                                     "input_tokens": estimate_prompt_tokens(messages),
                                     "output_tokens": output_tokens,
+                                    "cache_creation_input_tokens": 0,
+                                    "cache_read_input_tokens": 0,
                                 },
                             },
                         )
@@ -325,6 +329,8 @@ async def create(
                     "usage": {
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
                     },
                 }
                 success = True

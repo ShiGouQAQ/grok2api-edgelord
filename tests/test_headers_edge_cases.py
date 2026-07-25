@@ -599,13 +599,15 @@ class TestClientHints:
         assert result == {}
 
     def test_hints_contain_expected_keys(self):
-        """Returned dict should have exactly 4 keys."""
+        """Returned dict should have 6 keys (Chromium Client Hints)."""
         result = headers._client_hints("chrome", CHROME_WIN_UA)
         assert set(result.keys()) == {
             "Sec-Ch-Ua",
             "Sec-Ch-Ua-Mobile",
             "Sec-Ch-Ua-Platform",
             "Sec-Ch-Ua-Model",
+            "Sec-Ch-Ua-Arch",
+            "Sec-Ch-Ua-Bitness",
         }
 
     def test_sec_ch_ua_model_is_empty_string(self):

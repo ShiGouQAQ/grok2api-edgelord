@@ -319,6 +319,39 @@ def _contains_any(text: str, *signals: str) -> bool:
     return any(s in text for s in signals)
 
 
+_DEFAULT_403_INVALIDATION_CODES: frozenset[str] = frozenset(
+    {
+        "blocked-user",
+        "user is blocked",
+        "email-domain-rejected",
+        "account suspended",
+        "token revoked",
+    }
+)
+
+
+def should_invalidate_build_forbidden(
+    status: int, upstream_code: str, upstream_message: str
+) -> bool:
+    """Check if a 403 error should trigger account invalidation.
+
+    Port of 09388e5: configurable Grok Build 403 invalidation rules.
+    Matches upstream_code and upstream_message against configurable error codes
+    (chat.build_403_invalidation_codes) or the built-in default list.
+    """
+    if status != 403:
+        return False
+    from app.platform.config.snapshot import get_config
+
+    custom = get_config("chat.build_403_invalidation_codes", "")
+    if isinstance(custom, str) and custom.strip():
+        codes = {c.strip().lower() for c in custom.split(",") if c.strip()}
+    else:
+        codes = set(_DEFAULT_403_INVALIDATION_CODES)
+    text = f"{upstream_code} {upstream_message}".lower()
+    return any(code in text for code in codes)
+
+
 class StreamIdleTimeout(AppError):
     def __init__(self, timeout_s: float) -> None:
         super().__init__(

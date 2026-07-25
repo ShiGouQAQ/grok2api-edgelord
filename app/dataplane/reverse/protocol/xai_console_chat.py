@@ -59,7 +59,7 @@ CONSOLE_MODELS: dict[str, str] = {
     "grok-4.20-multi-agent-medium": "grok-4.20-multi-agent-0309",
     "grok-4.20-multi-agent-high": "grok-4.20-multi-agent-0309",
     "grok-4.20-multi-agent-xhigh": "grok-4.20-multi-agent-0309",
-    "grok-build-console": "grok-build-0.1",
+    "grok-build-console": "grok-build-0.2.106",
 }
 
 # 需要附带 reasoning 字段的模型（grok-4.3 系列需要，grok-4.20 系列不需要）
@@ -84,7 +84,7 @@ _MODEL_FIXED_EFFORT: dict[str, str] = {
 # 特殊 max_output_tokens（默认 1_000_000）
 _MODEL_MAX_OUTPUT_TOKENS: dict[str, int] = {
     "grok-4.20-multi-agent-0309": 2_000_000,
-    "grok-build-0.1": 256_000,
+    "grok-build-0.2.106": 256_000,
 }
 
 # 支持 web_search / x_search 工具的模型
@@ -95,7 +95,7 @@ _MODELS_WITH_SEARCH_TOOLS: frozenset[str] = frozenset(
         "grok-4.20-0309-reasoning",
         "grok-4.20-0309-non-reasoning",
         "grok-4.3",
-        "grok-build-0.1",
+        "grok-build-0.2.106",
     }
 )
 
@@ -106,8 +106,12 @@ _EFFORT_MAP: dict[str, str] = {
     "low": "low",
     "medium": "medium",
     "high": "high",
-    "xhigh": "xhigh",
+    "xhigh": "high",
+    "max": "high",
 }
+
+# Build 模型不支持 "max"/"xhigh" effort，需规范化为 "high"
+_BUILD_EFFORT_NORMALIZE: frozenset[str] = frozenset({"max", "xhigh"})
 
 
 # ---------------------------------------------------------------------------
@@ -179,12 +183,10 @@ def build_console_payload(
         if content_blocks:
             input_items.append({"role": api_role, "content": content_blocks})
 
-    # reasoning effort：模型名固定值优先，其次用户传入，最后默认 medium
     effort = _MODEL_FIXED_EFFORT.get(model) or _EFFORT_MAP.get(
         reasoning_effort or "medium", "medium"
     )
 
-    # 获取 console 实际模型名
     console_model = CONSOLE_MODELS.get(model, model)
 
     payload: dict[str, Any] = {
@@ -198,11 +200,9 @@ def build_console_payload(
         "stream": stream,
     }
 
-    # 只有 grok-4.3 需要附带 reasoning 字段，grok-4.20 系列不需要
     if console_model in _MODELS_WITH_REASONING_FIELD:
         payload["reasoning"] = {"effort": effort}
 
-    # 为 multi-agent 和支持搜索的模型添加 tools
     if console_model in _MODELS_WITH_SEARCH_TOOLS:
         payload["tools"] = [
             {"type": "web_search", "enable_image_understanding": True},

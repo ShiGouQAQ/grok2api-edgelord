@@ -198,6 +198,54 @@ _GROK_RENDER_RE = re.compile(
 
 _IMAGE_BASE = "https://assets.grok.com/"
 
+# port(chenyme db28846, 5ad1636, 4a18b61): bound search resource usage
+MAX_WEB_SEARCH_RESULTS: int = 50
+_MAX_URL_BYTES: int = 2048
+_MAX_TITLE_RUNES: int = 200
+
+
+def _sanitize_url(raw: str) -> tuple[str, bool]:
+    """Validate and normalize a search result URL.
+
+    Returns (normalized_url, valid). Rejects empty, control-char-containing,
+    or excessively long URLs. Trims whitespace and trailing slashes.
+    """
+    value = raw.strip()
+    if not value or len(value) > _MAX_URL_BYTES:
+        return "", False
+    # Reject URLs containing control characters or format chars
+    for ch in value:
+        cp = ord(ch)
+        if cp < 0x20 or cp in (0x7F, 0x200B, 0x200C, 0x200D, 0xFEFF):
+            return "", False
+    if not value.startswith(("http://", "https://")):
+        return "", False
+    # Trim trailing slashes for dedup stability
+    return value.rstrip("/"), True
+
+
+def _sanitize_title(raw: str, fallback_url: str) -> str:
+    """Normalize a search result title: strip control chars, cap length."""
+    value = raw.strip()
+    # Strip control characters
+    value = "".join(ch for ch in value if ord(ch) >= 0x20 and ord(ch) not in (0x7F,))
+    if not value:
+        # Fallback: extract hostname from URL
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(fallback_url)
+            value = parsed.hostname or fallback_url
+        except Exception:
+            value = fallback_url
+    # Cap length
+    runes = list(value)
+    if len(runes) > _MAX_TITLE_RUNES:
+        runes = runes[:_MAX_TITLE_RUNES]
+        value = "".join(runes)
+    return value
+
+
 # 工具使用卡片 → emoji 单行格式化映射（详细模式专用）
 # 格式: tool_name → (emoji, (可展示的参数 key 列表))
 _TOOL_FMT: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -235,6 +283,7 @@ class StreamAdapter:
         "_content_started",
         "_web_search_results",
         "_web_search_urls_seen",
+        "_web_search_requests",
         "_finished",
         "thinking_buf",
         "text_buf",
@@ -259,6 +308,7 @@ class StreamAdapter:
         self._reasoning = ReasoningAggregator() if self._summary_mode else None
         self._web_search_results: list[dict] = []
         self._web_search_urls_seen: set[str] = set()
+        self._web_search_requests: int = 0
         self._finished: bool = False
         self.thinking_buf: list[str] = []
         self.text_buf: list[str] = []
@@ -300,6 +350,11 @@ class StreamAdapter:
             for item in self._web_search_results
         ]
 
+    # port(chenyme 79f225a): track web_search invocations separately
+    def web_search_requests_count(self) -> int:
+        """Number of distinct web search tool invocations observed."""
+        return self._web_search_requests
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -337,10 +392,19 @@ class StreamAdapter:
         if wsr and isinstance(wsr, dict):
             for item in wsr.get("results", []):
                 if isinstance(item, dict) and item.get("url"):
-                    url = item["url"]
-                    if url not in self._web_search_urls_seen:
-                        self._web_search_urls_seen.add(url)
-                        self._web_search_results.append({**item, "type": "web"})
+                    raw_url = item["url"]
+                    url, valid = _sanitize_url(raw_url)
+                    if not valid:
+                        continue
+                    if url in self._web_search_urls_seen:
+                        continue
+                    if len(self._web_search_results) >= MAX_WEB_SEARCH_RESULTS:
+                        break
+                    self._web_search_urls_seen.add(url)
+                    title = _sanitize_title(item.get("title", ""), url)
+                    self._web_search_results.append(
+                        {"url": url, "title": title, "type": item.get("type", "web")}
+                    )
 
         # ── 采集 xSearchResults（X/Twitter 帖子信源，多帧累积去重）──
         xsr = resp.get("xSearchResults")
@@ -352,18 +416,20 @@ class StreamAdapter:
                     and item.get("username")
                 ):
                     url = f"https://x.com/{item['username']}/status/{item['postId']}"
-                    if url not in self._web_search_urls_seen:
-                        self._web_search_urls_seen.add(url)
-                        # 构造 title：归一化空白，text 为空退回 @username
-                        # Markdown 转义统一在 references_suffix() 中处理
-                        raw = re.sub(r"\s+", " ", (item.get("text") or "")).strip()
-                        if raw:
-                            title = f"𝕏/@{item['username']}: {raw[:50]}{'...' if len(raw) > 50 else ''}"
-                        else:
-                            title = f"𝕏/@{item['username']}"
-                        self._web_search_results.append(
-                            {"url": url, "title": title, "type": "x_post"}
-                        )
+                    if url in self._web_search_urls_seen:
+                        continue
+                    if len(self._web_search_results) >= MAX_WEB_SEARCH_RESULTS:
+                        break
+                    self._web_search_urls_seen.add(url)
+                    raw = re.sub(r"\s+", " ", (item.get("text") or "")).strip()
+                    title = (
+                        f"𝕏/@{item['username']}: {raw[:50]}{'...' if len(raw) > 50 else ''}"
+                        if raw
+                        else f"𝕏/@{item['username']}"
+                    )
+                    self._web_search_results.append(
+                        {"url": url, "title": title, "type": "x_post"}
+                    )
 
         token = resp.get("token")
         think = resp.get("isThinking")
@@ -372,6 +438,14 @@ class StreamAdapter:
         step_id = resp.get("messageStepId")
 
         if tag == "tool_usage_card":
+            # port(chenyme 79f225a): track web_search invocations separately
+            tool_card = resp.get("toolUsageCard")
+            if isinstance(tool_card, dict):
+                for key in tool_card:
+                    if key != "toolUsageCardId" and isinstance(tool_card[key], dict):
+                        if key.lower() == "websearch":
+                            self._web_search_requests += 1
+                        break
             # 正文已开始后的迟到 tool card：静默丢弃
             if self._content_started:
                 return events

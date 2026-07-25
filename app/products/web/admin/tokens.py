@@ -70,6 +70,14 @@ def _sanitize(value: str) -> str:
     return tok.encode("ascii", errors="ignore").decode("ascii")
 
 
+def strip_bom(text: str) -> str:
+    """Strip UTF-8 BOM from text if present.
+
+    Port of 83bf4f4: BOM in JSON/JSONL imports across providers.
+    """
+    return text.lstrip("\ufeff")
+
+
 def _mask(token: str) -> str:
     return f"{token[:8]}...{token[-8:]}" if len(token) > 20 else token
 

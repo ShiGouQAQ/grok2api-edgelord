@@ -22,7 +22,12 @@ import orjson
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
-from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind, ProxyScope, RequestKind
+from app.control.proxy.models import (
+    ProxyFeedback,
+    ProxyFeedbackKind,
+    ProxyScope,
+    RequestKind,
+)
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.reverse.transport._proxy_feedback import upstream_feedback
 from app.dataplane.proxy.adapters.headers import build_ws_headers
@@ -43,36 +48,44 @@ _INTER_ROUND_WAIT_S = 2.0
 # Slot state
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _Slot:
     """Tracks one in-flight image generation slot."""
-    image_id:  str
-    order:     int
-    width:     int
-    height:    int
-    last_blob: str  = field(default="", repr=False)
-    last_url:  str  = ""
-    done:      bool = False
-    progress:  int  = 0
+
+    image_id: str
+    order: int
+    width: int
+    height: int
+    last_blob: str = field(default="", repr=False)
+    last_url: str = ""
+    done: bool = False
+    progress: int = 0
+    preview_blob: str = field(default="", repr=False)
+    preview_url: str = ""
+    preview_ready: bool = False
+    final: bool = False
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _final_event(slot: _Slot, r_rated: bool = False) -> dict[str, Any]:
     return {
-        "type":      "image",
-        "image_id":  slot.image_id,
-        "order":     slot.order,
-        "stage":     "final",
-        "blob":      slot.last_blob,
-        "url":       slot.last_url,
-        "width":     slot.width,
-        "height":    slot.height,
-        "is_final":  True,
+        "type": "image",
+        "image_id": slot.image_id,
+        "order": slot.order,
+        "stage": "final",
+        "blob": slot.last_blob,
+        "url": slot.last_url,
+        "width": slot.width,
+        "height": slot.height,
+        "is_final": True,
+        "final": slot.final,
         "moderated": False,
-        "r_rated":   r_rated,
+        "r_rated": r_rated,
     }
 
 
@@ -95,17 +108,18 @@ async def _probe_ws_closed(ws: aiohttp.ClientWebSocketResponse, wait_s: float) -
 # Single-round generator
 # ---------------------------------------------------------------------------
 
+
 async def _stream_round(
-    ws:                  aiohttp.ClientWebSocketResponse,
-    prompt:              str,
+    ws: aiohttp.ClientWebSocketResponse,
+    prompt: str,
     *,
-    aspect_ratio:        str,
-    enable_nsfw:         bool,
-    enable_pro:          bool,
-    needed:              int,
-    stream_timeout_s:    float,
-    round_timeout_s:     float,
-    inter_round_wait_s:  float,
+    aspect_ratio: str,
+    enable_nsfw: bool,
+    enable_pro: bool,
+    needed: int,
+    stream_timeout_s: float,
+    round_timeout_s: float,
+    inter_round_wait_s: float,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Drive one round of image generation on an already-open WS.
 
@@ -116,17 +130,23 @@ async def _stream_round(
     request_id = str(uuid.uuid4())
     try:
         await ws.send_json(build_reset_message())
-        await ws.send_json(build_request_message(
-            request_id, prompt, aspect_ratio, enable_nsfw, enable_pro,
-        ))
+        await ws.send_json(
+            build_request_message(
+                request_id,
+                prompt,
+                aspect_ratio,
+                enable_nsfw,
+                enable_pro,
+            )
+        )
     except Exception as exc:
         yield {"type": "error", "error_code": "send_failed", "error": str(exc)}
         yield {"type": "_meta", "ws_closed": True}
         return
 
-    slots:           dict[str, _Slot] = {}
-    round_completed: int               = 0
-    round_start                        = time.monotonic()
+    slots: dict[str, _Slot] = {}
+    round_completed: int = 0
+    round_start = time.monotonic()
 
     while True:
         elapsed = time.monotonic() - round_start
@@ -138,9 +158,9 @@ async def _stream_round(
                         yield _final_event(slot)
                     else:
                         yield {
-                            "type":       "error",
+                            "type": "error",
                             "error_code": "slot_incomplete",
-                            "error":      f"slot {slot.image_id[:8]} timed out",
+                            "error": f"slot {slot.image_id[:8]} timed out",
                         }
             yield {"type": "_meta", "ws_closed": False}
             return
@@ -174,14 +194,17 @@ async def _stream_round(
                 if parsed["status"] == "start_stage":
                     iid = parsed["image_id"]
                     slots[iid] = _Slot(
-                        image_id = iid,
-                        order    = parsed["order"],
-                        width    = parsed["width"],
-                        height   = parsed["height"],
+                        image_id=iid,
+                        order=parsed["order"],
+                        width=parsed["width"],
+                        height=parsed["height"],
                     )
                     logger.debug(
                         "imagine slot started: image_id={} order={} width={} height={}",
-                        iid[:8], parsed["order"], parsed["width"], parsed["height"],
+                        iid[:8],
+                        parsed["order"],
+                        parsed["width"],
+                        parsed["height"],
                     )
                     yield {
                         "type": "progress",
@@ -191,18 +214,28 @@ async def _stream_round(
                     }
 
                 elif parsed["status"] == "completed":
-                    iid  = parsed["image_id"]
+                    iid = parsed["image_id"]
                     slot = slots.get(iid)
                     if slot is None or slot.done:
                         continue
 
                     slot.done = True
+                    if not slot.final:
+                        slot.final = True
 
                     if parsed["moderated"]:
                         logger.warning("imagine slot moderated: image_id={}", iid[:8])
-                        yield {"type": "moderated", "image_id": iid, "order": slot.order}
+                        yield {
+                            "type": "moderated",
+                            "image_id": iid,
+                            "order": slot.order,
+                        }
                     else:
-                        logger.debug("imagine slot completed: image_id={} order={}", iid[:8], slot.order)
+                        logger.debug(
+                            "imagine slot completed: image_id={} order={}",
+                            iid[:8],
+                            slot.order,
+                        )
                         yield _final_event(slot, r_rated=parsed["r_rated"])
                         round_completed += 1
 
@@ -219,19 +252,27 @@ async def _stream_round(
 
             # Image blob frames (intermediate previews)
             elif msg_type == "image":
-                url   = msg.get("url", "")
-                blob  = msg.get("blob", "")
+                url = msg.get("url", "")
+                blob = msg.get("blob", "")
                 iid, _ext = parse_image_url(url)
-                slot  = slots.get(iid)
+                slot = slots.get(iid)
                 if slot and not slot.done:
-                    slot.last_blob = blob
-                    slot.last_url  = url
                     progress = msg.get("percentage_complete")
                     try:
-                        parsed_progress = int(float(progress)) if progress is not None else 50
+                        parsed_progress = (
+                            int(float(progress)) if progress is not None else 50
+                        )
                     except (TypeError, ValueError):
                         parsed_progress = 50
                     parsed_progress = max(10, min(99, parsed_progress))
+                    if parsed_progress < 100:
+                        slot.preview_blob = blob
+                        slot.preview_url = url
+                        slot.preview_ready = True
+                    else:
+                        slot.last_blob = blob
+                        slot.last_url = url
+                        slot.final = True
                     if parsed_progress > slot.progress:
                         slot.progress = parsed_progress
                         yield {
@@ -244,8 +285,12 @@ async def _stream_round(
             # Server-side error
             elif msg_type == "error":
                 err_code = msg.get("err_code") or "upstream_error"
-                err_msg  = msg.get("err_msg")  or str(msg)
-                logger.warning("imagine websocket server error: code={} message={}", err_code, err_msg)
+                err_msg = msg.get("err_msg") or str(msg)
+                logger.warning(
+                    "imagine websocket server error: code={} message={}",
+                    err_code,
+                    err_msg,
+                )
                 yield {"type": "error", "error_code": err_code, "error": err_msg}
                 yield {"type": "_meta", "ws_closed": True}
                 return
@@ -275,14 +320,15 @@ async def _stream_round(
 # Public API
 # ---------------------------------------------------------------------------
 
+
 async def stream_images(
-    token:        str,
-    prompt:       str,
+    token: str,
+    prompt: str,
     *,
-    aspect_ratio: str  = "2:3",
-    n:            int  = 1,
-    enable_nsfw:  bool = True,
-    enable_pro:   bool = False,
+    aspect_ratio: str = "2:3",
+    n: int = 1,
+    enable_nsfw: bool = True,
+    enable_pro: bool = False,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Stream image events, collecting *n* final images.
 
@@ -294,9 +340,9 @@ async def stream_images(
         ``{type: "moderated",  ...}``                   — censored slot
         ``{type: "error",      ...}``                   — fatal error (stops iteration)
     """
-    cfg                = get_config()
-    timeout_s          = cfg.get_float("image.timeout",            120.0)
-    stream_timeout_s   = cfg.get_float("image.stream_timeout",      10.0)
+    cfg = get_config()
+    timeout_s = cfg.get_float("image.timeout", 120.0)
+    stream_timeout_s = cfg.get_float("image.stream_timeout", 10.0)
     inter_round_wait_s = _INTER_ROUND_WAIT_S
 
     collected = 0
@@ -305,29 +351,35 @@ async def stream_images(
         needed = n - collected
 
         # ── Establish connection ──────────────────────────────────────────────
-        proxy   = await get_proxy_runtime()
-        lease   = await proxy.acquire(scope=ProxyScope.APP, kind=RequestKind.WEBSOCKET)
+        proxy = await get_proxy_runtime()
+        lease = await proxy.acquire(scope=ProxyScope.APP, kind=RequestKind.WEBSOCKET)
         headers = build_ws_headers(token=token, lease=lease)
 
         try:
             conn = await _client.connect(
                 WS_IMAGINE_URL,
-                headers   = headers,
-                timeout   = timeout_s,
-                ws_kwargs = {"heartbeat": 20, "receive_timeout": stream_timeout_s},
-                lease     = lease,
+                headers=headers,
+                timeout=timeout_s,
+                ws_kwargs={"heartbeat": 20, "receive_timeout": stream_timeout_s},
+                lease=lease,
             )
         except Exception as exc:
             status = getattr(exc, "status", None)
             logger.error("imagine websocket connect failed: error={}", exc)
             from app.platform.errors import UpstreamError as _UE
-            fb = upstream_feedback(_UE("connect failed", status=status)) \
-                if status else ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
+
+            fb = (
+                upstream_feedback(_UE("connect failed", status=status))
+                if status
+                else ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
+            )
             await proxy.feedback(lease, fb)
             yield {
-                "type":       "error",
-                "error_code": "rate_limit_exceeded" if status == 429 else "connection_failed",
-                "error":      str(exc),
+                "type": "error",
+                "error_code": "rate_limit_exceeded"
+                if status == 429
+                else "connection_failed",
+                "error": str(exc),
             }
             return
 
@@ -337,45 +389,63 @@ async def stream_images(
                 while collected < n:
                     needed = n - collected
                     async for ev in _stream_round(
-                        ws, prompt,
-                        aspect_ratio       = aspect_ratio,
-                        enable_nsfw        = enable_nsfw,
-                        enable_pro         = enable_pro,
-                        needed             = needed,
-                        stream_timeout_s   = stream_timeout_s,
-                        round_timeout_s    = timeout_s,
-                        inter_round_wait_s = inter_round_wait_s,
+                        ws,
+                        prompt,
+                        aspect_ratio=aspect_ratio,
+                        enable_nsfw=enable_nsfw,
+                        enable_pro=enable_pro,
+                        needed=needed,
+                        stream_timeout_s=stream_timeout_s,
+                        round_timeout_s=timeout_s,
+                        inter_round_wait_s=inter_round_wait_s,
                     ):
                         if ev["type"] == "_meta":
                             ws_closed = ev["ws_closed"]
-                            break   # exit inner for-loop; handle ws_closed below
+                            break  # exit inner for-loop; handle ws_closed below
                         if ev.get("is_final"):
                             collected += 1
                         yield ev
                         if ev["type"] == "error":
-                            await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR))
+                            await proxy.feedback(
+                                lease,
+                                ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR),
+                            )
                             return
                     else:
                         # _stream_round exhausted without a _meta — shouldn't happen
                         ws_closed = True
 
                     if ws_closed or collected >= n:
-                        break   # exit inner while; reconnect or finish
+                        break  # exit inner while; reconnect or finish
 
         except aiohttp.ClientError as exc:
             logger.error("imagine websocket connection failed: error={}", exc)
-            await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR))
-            yield {"type": "error", "error_code": "connection_failed", "error": str(exc)}
+            await proxy.feedback(
+                lease, ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
+            )
+            yield {
+                "type": "error",
+                "error_code": "connection_failed",
+                "error": str(exc),
+            }
             return
 
         if collected >= n:
-            await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200))
+            await proxy.feedback(
+                lease, ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200)
+            )
             return
 
         # Server closed the connection but we still need more images → reconnect.
         # Give back the current lease before acquiring a new one on the next iteration.
-        await proxy.feedback(lease, ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200))
-        logger.info("imagine websocket reconnecting: remaining_images={} requested_images={}", n - collected, n)
+        await proxy.feedback(
+            lease, ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200)
+        )
+        logger.info(
+            "imagine websocket reconnecting: remaining_images={} requested_images={}",
+            n - collected,
+            n,
+        )
 
 
 __all__ = ["stream_images"]

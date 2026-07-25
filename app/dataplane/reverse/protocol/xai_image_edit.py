@@ -15,9 +15,21 @@ def build_image_edit_payload(
     prompt: str,
     image_references: list[str],
     parent_post_id: str,
+    size: str | None = None,
+    aspect_ratio: str | None = None,
+    streaming: bool = True,
+    partial_images: int | None = None,
 ) -> dict[str, Any]:
     """Build the JSON payload for imagine image-edit chat requests."""
     cfg = get_config()
+    image_edit_config: dict[str, Any] = {
+        "imageReferences": image_references,
+        "parentPostId": parent_post_id,
+    }
+    if size:
+        image_edit_config["size"] = size
+    if aspect_ratio:
+        image_edit_config["aspectRatio"] = aspect_ratio
     return {
         "temporary": cfg.get_bool("features.temporary", True),
         "modelName": IMAGE_EDIT_MODEL_NAME,
@@ -25,8 +37,8 @@ def build_image_edit_payload(
         "enableImageGeneration": True,
         "returnImageBytes": False,
         "returnRawGrokInXaiRequest": False,
-        "enableImageStreaming": True,
-        "imageGenerationCount": IMAGE_EDIT_GENERATION_COUNT,
+        "enableImageStreaming": streaming,
+        "imageGenerationCount": partial_images or IMAGE_EDIT_GENERATION_COUNT,
         "forceConcise": False,
         "enableSideBySide": True,
         "sendFinalMetadata": True,
@@ -36,10 +48,7 @@ def build_image_edit_payload(
             "modelConfigOverride": {
                 "modelMap": {
                     "imageEditModel": IMAGE_EDIT_MODEL_KIND,
-                    "imageEditModelConfig": {
-                        "imageReferences": image_references,
-                        "parentPostId": parent_post_id,
-                    },
+                    "imageEditModelConfig": image_edit_config,
                 }
             }
         },
@@ -91,7 +100,11 @@ def extract_model_response_file_attachments(data: dict[str, Any]) -> list[str]:
     attachments = model_response.get("fileAttachments")
     if not isinstance(attachments, list):
         return []
-    return [attachment for attachment in attachments if isinstance(attachment, str) and attachment]
+    return [
+        attachment
+        for attachment in attachments
+        if isinstance(attachment, str) and attachment
+    ]
 
 
 __all__ = [

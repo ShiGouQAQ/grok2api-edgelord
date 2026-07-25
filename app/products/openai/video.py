@@ -38,7 +38,10 @@ from app.dataplane.reverse.protocol.xai_assets import (
     resolve_asset_reference,
     resolve_download_url,
 )
-from app.dataplane.reverse.protocol.xai_chat import classify_line, raise_for_stream_error
+from app.dataplane.reverse.protocol.xai_chat import (
+    classify_line,
+    raise_for_stream_error,
+)
 from app.dataplane.reverse.runtime.endpoint_table import CHAT
 from app.dataplane.reverse.transport.asset_upload import (
     resolve_uploaded_asset_reference,
@@ -75,6 +78,7 @@ _PRESET_FLAGS = {
     "spicy": "--mode=extremely-spicy-or-crazy",
     "custom": "--mode=custom",
 }
+_MAX_INPUT_JSON_BYTES = 32 * 1024 * 1024  # 32 MiB — matches upstream constraint
 
 
 @dataclass(slots=True)
@@ -431,15 +435,28 @@ async def _prepare_video_reference(
     return _VideoReference(content_url=content_url, post_id=post_id)
 
 
+def _validate_video_input_size(input_references: list[dict[str, Any]]) -> None:
+    """Validate that video input references don't exceed the size limit."""
+    if not input_references:
+        return
+    # Encode the input as JSON and check size
+    input_json = orjson.dumps(
+        {"image_urls": [ref.get("image_url", "") for ref in input_references]}
+    )
+    if len(input_json) > _MAX_INPUT_JSON_BYTES:
+        raise ValidationError(
+            f"Video input references total size exceeds {_MAX_INPUT_JSON_BYTES} bytes limit",
+            param="input_references",
+        )
+
+
 async def _prepare_video_references(
     token: str,
     input_references: list[dict[str, Any]],
 ) -> list[_VideoReference]:
     """Upload multiple video references concurrently and preserve order."""
-    tasks = [
-        _prepare_video_reference(token, ref)
-        for ref in input_references
-    ]
+    _validate_video_input_size(input_references)
+    tasks = [_prepare_video_reference(token, ref) for ref in input_references]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     failures: list[tuple[int, BaseException]] = [
         (index, result)
@@ -822,6 +839,51 @@ def _job_error_payload(message: str) -> dict[str, Any]:
     return {"code": "video_generation_failed", "message": message}
 
 
+def _sanitize_diagnostic_text(text: str, max_length: int = 512) -> str:
+    """Sanitize diagnostic text for logging, removing sensitive information."""
+    import re
+
+    sanitized = text
+    sanitized = re.sub(
+        r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 [REDACTED]", sanitized
+    )
+    sanitized = re.sub(
+        r"\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}(?:\.[A-Za-z0-9_-]{12,})?\b",
+        "[JWT_REDACTED]",
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[EMAIL_REDACTED]", sanitized
+    )
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length] + "..."
+    return sanitized
+
+
+def _log_video_generation_failure(
+    job: _VideoJob,
+    exc: BaseException,
+    *,
+    token: str | None = None,
+    upstream_status: int | None = None,
+) -> None:
+    """Log detailed video generation failure diagnostics."""
+    error_text = str(exc)
+    sanitized_error = _sanitize_diagnostic_text(error_text, max_length=512)
+    attributes: dict[str, Any] = {
+        "job_id": job.id,
+        "model": job.model,
+        "seconds": job.seconds,
+        "size": job.size,
+        "error": sanitized_error,
+    }
+    if upstream_status is not None:
+        attributes["upstream_status"] = upstream_status
+    if token:
+        attributes["token_prefix"] = token[:8]
+    logger.warning("video_generation_failed {}", attributes)
+
+
 async def _run_video_job(
     job: _VideoJob,
     *,
@@ -907,7 +969,10 @@ async def _run_video_job(
             job.content_path = str(path)
             job.remixed_from_video_id = artifact.remixed_from_video_id
     except Exception as exc:
-        logger.exception("video job failed: job_id={} error={}", job.id, exc)
+        upstream_status = exc.status if isinstance(exc, UpstreamError) else None
+        _log_video_generation_failure(
+            job, exc, token=token, upstream_status=upstream_status
+        )
         async with _VIDEO_JOBS_LOCK:
             job.status = "failed"
             job.error = _job_error_payload(_exception_message(exc))

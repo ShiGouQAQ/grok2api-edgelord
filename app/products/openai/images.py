@@ -994,6 +994,10 @@ async def _stream_image_edit(
     image_references: list[str],
     parent_post_id: str,
     *,
+    size: str | None = None,
+    aspect_ratio: str | None = None,
+    streaming: bool = True,
+    partial_images: int | None = None,
     timeout_s: float = 120.0,
 ) -> AsyncGenerator[str, None]:
     proxy = await get_proxy_runtime()
@@ -1002,6 +1006,10 @@ async def _stream_image_edit(
         prompt=prompt,
         image_references=image_references,
         parent_post_id=parent_post_id,
+        size=size,
+        aspect_ratio=aspect_ratio,
+        streaming=streaming,
+        partial_images=partial_images,
     )
     headers = build_http_headers(
         token,
