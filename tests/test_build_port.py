@@ -70,7 +70,7 @@ class TestBuildReasoningEffortNormalization:
 
     def test_build_console_model_not_in_reasoning_field_set(self):
         """Build console model should NOT be in _MODELS_WITH_REASONING_FIELD."""
-        assert "grok-build-0.2.106" not in _MODELS_WITH_REASONING_FIELD
+        assert "grok-build-0.2.111" not in _MODELS_WITH_REASONING_FIELD
 
     def test_grok43_in_reasoning_field_set(self):
         """grok-4.3 should be in _MODELS_WITH_REASONING_FIELD (sanity check)."""
@@ -83,23 +83,23 @@ class TestBuildReasoningEffortNormalization:
 
 
 class TestBuildModelVersion:
-    """Build models should use grok-build-0.2.106."""
+    """Build models should use grok-build-0.2.111."""
 
     def test_build_console_maps_to_0_2_106(self):
-        """grok-build-console should map to grok-build-0.2.106."""
-        assert CONSOLE_MODELS["grok-build-console"] == "grok-build-0.2.106"
+        """grok-build-console should map to grok-build-0.2.111."""
+        assert CONSOLE_MODELS["grok-build-console"] == "grok-build-0.2.111"
 
     def test_build_model_not_grok_build_0_1(self):
         """grok-build-0.1 should not appear in CONSOLE_MODELS."""
         assert "grok-build-0.1" not in CONSOLE_MODELS.values()
 
     def test_build_payload_uses_correct_model(self):
-        """Payload should contain grok-build-0.2.106 as the model field."""
+        """Payload should contain grok-build-0.2.111 as the model field."""
         payload = build_console_payload(
             messages=[{"role": "user", "content": "hello"}],
             model="grok-build-console",
         )
-        assert payload["model"] == "grok-build-0.2.106"
+        assert payload["model"] == "grok-build-0.2.111"
 
     def test_build_model_max_output_tokens(self):
         """Build model should have 256_000 max_output_tokens."""
@@ -119,8 +119,8 @@ class TestBuildSearchTools:
     """Build models should support web_search and x_search tools."""
 
     def test_build_model_in_search_tools_set(self):
-        """grok-build-0.2.106 should be in _MODELS_WITH_SEARCH_TOOLS."""
-        assert "grok-build-0.2.106" in _MODELS_WITH_SEARCH_TOOLS
+        """grok-build-0.2.111 should be in _MODELS_WITH_SEARCH_TOOLS."""
+        assert "grok-build-0.2.111" in _MODELS_WITH_SEARCH_TOOLS
 
     def test_build_payload_has_tools(self):
         """Payload for Build model should include tools."""
@@ -161,7 +161,7 @@ class TestBuildSearchTools:
 
     def test_non_search_model_no_tools(self):
         """Model not in _MODELS_WITH_SEARCH_TOOLS should not have tools."""
-        # grok-build-0.2.106 is in search tools, but let's test a model that isn't
+        # grok-build-0.2.111 is in search tools, but let's test a model that isn't
         # Use a model that maps to a non-search console model
         payload = build_console_payload(
             messages=[{"role": "user", "content": "hello"}],
@@ -366,7 +366,7 @@ class TestBackwardCompatibility:
         """inject_prompt_cache_key should still work."""
         from app.dataplane.reverse.protocol.prompt_cache import inject_prompt_cache_key
 
-        body: dict[str, object] = {"model": "grok-build-0.2.106"}
+        body: dict[str, object] = {"model": "grok-build-0.2.111"}
         result = inject_prompt_cache_key(body, "test-key")
         assert result["prompt_cache_key"] == "test-key"
 
@@ -374,7 +374,7 @@ class TestBackwardCompatibility:
         """inject_prompt_cache_key with None should not inject."""
         from app.dataplane.reverse.protocol.prompt_cache import inject_prompt_cache_key
 
-        body: dict[str, object] = {"model": "grok-build-0.2.106"}
+        body: dict[str, object] = {"model": "grok-build-0.2.111"}
         result = inject_prompt_cache_key(body, None)
         assert "prompt_cache_key" not in result
 
