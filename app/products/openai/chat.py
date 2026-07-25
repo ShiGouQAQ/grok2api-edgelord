@@ -514,6 +514,8 @@ async def completions(
             emit_think=emit_think,
             temperature=temperature,
             top_p=top_p,
+            tools=tools,
+            tool_choice=tool_choice,
         )
     # ─────────────────────────────────────────────────────────────────────────
 

@@ -11,7 +11,7 @@
 """
 
 import asyncio
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 import orjson
 
@@ -19,7 +19,11 @@ from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError
 from app.platform.runtime.clock import now_s
-from app.platform.tokens import estimate_prompt_tokens, estimate_tokens
+from app.platform.tokens import (
+    estimate_prompt_tokens,
+    estimate_tokens,
+    estimate_tool_call_tokens,
+)
 from app.control.account.enums import FeedbackKind
 from app.control.account.invalid_credentials import feedback_kind_for_error
 from app.control.account.runtime import get_refresh_service
@@ -31,6 +35,12 @@ from app.dataplane.reverse.protocol.xai_console_chat import (
     stream_console_chat,
 )
 from app.dataplane.reverse.protocol.prompt_cache import resolve_prompt_cache_identity
+from app.dataplane.reverse.protocol.tool_prompt import (
+    build_tool_system_prompt,
+    extract_tool_names,
+    inject_into_message,
+)
+from app.dataplane.reverse.protocol.tool_parser import parse_tool_calls
 from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai.chat import _configured_retry_codes, _should_retry_upstream
 from ._format import (
@@ -38,7 +48,11 @@ from ._format import (
     make_stream_chunk,
     make_chat_response,
     build_usage,
+    make_tool_call_chunk,
+    make_tool_call_done_chunk,
+    make_tool_call_response,
 )
+from ._tool_sieve import ToolSieve
 
 
 def _body_excerpt(exc: BaseException) -> str:
@@ -110,6 +124,8 @@ async def completions(
     emit_think: bool | None = None,
     temperature: float = 0.7,
     top_p: float = 0.95,
+    tools: list[dict] | None = None,
+    tool_choice: Any = None,
 ) -> dict | AsyncGenerator[str, None]:
     """Entry point for console.x.ai chat completions.
 
@@ -122,6 +138,18 @@ async def completions(
     max_retries = selection_max_retries()
     retry_codes = _configured_retry_codes(cfg)
     response_id = make_response_id()
+
+    # ── Tool call setup ───────────────────────────────────────────────────────
+    tool_names: list[str] = []
+    if tools:
+        tool_names = extract_tool_names(tools)
+        tool_prompt = build_tool_system_prompt(tools, tool_choice)
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                msg["content"] = inject_into_message(
+                    msg.get("content", ""), tool_prompt
+                )
+                break
 
     logger.info(
         "console chat request: model={} stream={} messages={}",
@@ -176,14 +204,81 @@ async def completions(
                     )
 
                     try:
+                        ended = False
+                        sieve = ToolSieve(tool_names) if tool_names else None
+                        tool_calls_emitted = False
                         yield ": heartbeat\n\n"
                         async for event_type, data in stream_console_chat(
                             token, payload, timeout_s=timeout_s
                         ):
                             tokens = adapter.feed(event_type, data)
                             for tok in tokens:
-                                chunk = make_stream_chunk(response_id, model, tok)
-                                yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                if tool_calls_emitted:
+                                    break
+                                if sieve:
+                                    safe_text, parsed_calls = sieve.feed(tok)
+                                    if safe_text:
+                                        chunk = make_stream_chunk(
+                                            response_id, model, safe_text
+                                        )
+                                        yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                    if parsed_calls is not None:
+                                        for i, tc in enumerate(parsed_calls):
+                                            chunk = make_tool_call_chunk(
+                                                response_id,
+                                                model,
+                                                i,
+                                                tc.call_id,
+                                                tc.name,
+                                                tc.arguments,
+                                                is_first=True,
+                                            )
+                                            yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                        done = make_tool_call_done_chunk(
+                                            response_id, model
+                                        )
+                                        yield f"data: {orjson.dumps(done).decode()}\n\n"
+                                        yield "data: [DONE]\n\n"
+                                        tool_calls_emitted = True
+                                        ended = True
+                                        break
+                                else:
+                                    chunk = make_stream_chunk(response_id, model, tok)
+                                    yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                            if ended:
+                                break
+
+                        # Stream ended — flush sieve for any buffered XML
+                        flushed_calls: list | None = None
+                        if sieve and not tool_calls_emitted:
+                            flushed_calls = sieve.flush()
+                            if flushed_calls:
+                                for i, tc in enumerate(flushed_calls):
+                                    chunk = make_tool_call_chunk(
+                                        response_id,
+                                        model,
+                                        i,
+                                        tc.call_id,
+                                        tc.name,
+                                        tc.arguments,
+                                        is_first=True,
+                                    )
+                                    yield f"data: {orjson.dumps(chunk).decode()}\n\n"
+                                done = make_tool_call_done_chunk(response_id, model)
+                                yield f"data: {orjson.dumps(done).decode()}\n\n"
+                                yield "data: [DONE]\n\n"
+                                tool_calls_emitted = True
+
+                        if tool_calls_emitted:
+                            success = True
+                            logger.info(
+                                "console chat stream tool_calls: attempt={}/{} model={} call_count={}",
+                                attempt + 1,
+                                max_retries + 1,
+                                model,
+                                len(flushed_calls) if flushed_calls else 0,
+                            )
+                            return
 
                         # 流结束，发送 final chunk
                         usage_data = adapter.usage
@@ -317,6 +412,27 @@ async def completions(
                     else estimate_tokens(adapter.full_text)
                 )
                 usage = build_usage(prompt_tokens, completion_tokens)
+
+                # ── Tool call detection (non-streaming) ──────────────────────────
+                if tool_names:
+                    parse_result = parse_tool_calls(adapter.full_text, tool_names)
+                    if parse_result.calls:
+                        logger.info(
+                            "console chat non-stream tool calls: model={} calls={}",
+                            model,
+                            len(parse_result.calls),
+                        )
+                        pt = estimate_prompt_tokens(messages)
+                        ct = estimate_tool_call_tokens(parse_result.calls)
+                        result = make_tool_call_response(
+                            model,
+                            parse_result.calls,
+                            response_id=response_id,
+                            usage=build_usage(pt, ct),
+                        )
+                        success = True
+                        return result
+
                 result = make_chat_response(
                     model, adapter.full_text, response_id=response_id, usage=usage
                 )
