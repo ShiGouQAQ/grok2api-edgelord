@@ -8,6 +8,8 @@ structured feedback and classification.
 """
 
 import asyncio
+
+import orjson
 from typing import Any
 
 from app.platform.logging.logger import logger
@@ -95,8 +97,6 @@ async def _execute_transport(
 ) -> ReverseResult:
     """Execute the transport call and classify the result."""
     try:
-        import orjson
-
         if payload_builder:
             payload = payload_builder(plan, leases.account_token, request)
         else:

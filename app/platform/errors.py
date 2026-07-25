@@ -2,6 +2,8 @@
 
 from enum import StrEnum
 
+import orjson
+
 
 class ErrorKind(StrEnum):
     VALIDATION = "invalid_request_error"
@@ -211,8 +213,6 @@ def _extract_error_metadata(body: str) -> tuple[str, str, str]:
     if not body:
         return ("", "", "")
     try:
-        import orjson
-
         payload = orjson.loads(body)
     except (orjson.JSONDecodeError, ValueError, TypeError):
         return ("", "", body[:200])

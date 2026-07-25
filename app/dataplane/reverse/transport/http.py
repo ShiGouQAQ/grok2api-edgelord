@@ -6,6 +6,8 @@ retry-on-reset, and timeout.
 
 from typing import AsyncGenerator
 
+import orjson
+
 from app.platform.logging.logger import logger
 from app.platform.errors import UpstreamError
 from app.control.proxy.models import ProxyLease
@@ -105,8 +107,6 @@ async def post_json(
         token, content_type=content_type, origin=origin, referer=referer, lease=lease
     )
 
-    import orjson
-
     async def _do(s: "ResettableSession") -> dict:
         response = await s.post(url, headers=headers, data=payload, timeout=timeout_s)
         body_bytes = response.content
@@ -172,8 +172,6 @@ async def get_json(
                 body=body_text,
             )
 
-        import orjson
-
         return orjson.loads(body_bytes)
 
 
@@ -220,8 +218,6 @@ async def delete_json(
 
         if not body_bytes.strip():
             return {}
-        import orjson
-
         return orjson.loads(body_bytes)
 
 

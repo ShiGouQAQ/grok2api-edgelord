@@ -8,6 +8,8 @@ import datetime
 import random
 from typing import TYPE_CHECKING
 
+import orjson
+
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import UpstreamError
@@ -186,7 +188,6 @@ async def set_birth_date(
 
     Accepts optional *session* / *lease* for connection reuse (see ``_grpc_call``).
     """
-    import orjson
 
     cfg       = get_config()
     timeout_s = cfg.get_float("nsfw.timeout", 30.0)

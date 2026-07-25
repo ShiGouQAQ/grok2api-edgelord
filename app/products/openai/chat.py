@@ -526,8 +526,6 @@ async def completions(
     if fmt and fmt.get("type") == "json_schema":
         name = fmt.get("name", "response")
         schema_text = fmt.get("schema")
-        import orjson
-
         schema_json = orjson.dumps(schema_text).decode() if schema_text else "{}"
         message = (
             f"{message}\n\n"
