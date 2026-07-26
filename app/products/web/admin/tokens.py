@@ -8,6 +8,7 @@ Performance notes:
 """
 
 import asyncio
+import hashlib
 import re
 from typing import TYPE_CHECKING
 
@@ -143,13 +144,30 @@ def _quota_brief(q: dict) -> dict:
 
 
 def _serialize_record(r) -> dict:
+    ext = getattr(r, "ext", None) or {}
+    billing = ext.get("build_billing") if isinstance(ext, dict) else None
+    build_link = None
+    if isinstance(ext, dict):
+        if ext.get("build_linked_at"):
+            build_link = {
+                "linked_at": ext["build_linked_at"],
+                "linked_token": ext.get("build_linked_token", ""),
+            }
+        elif ext.get("converted_from_token"):
+            build_link = {
+                "converted_from": ext["converted_from_token"],
+                "converted_at": ext.get("converted_at", 0),
+            }
     return {
         "token": r.token,
         "pool": r.pool or "basic",
+        "provider": r.provider or "grok_web",
         "status": r.status,
         "state_reason": getattr(r, "state_reason", None),
         "last_fail_reason": getattr(r, "last_fail_reason", None),
         "quota": _quota_brief(r.quota) if isinstance(r.quota, dict) else {},
+        "build_billing": billing,
+        "build_link": build_link,
         "use_count": r.usage_use_count or 0,
         "fail_count": r.usage_fail_count or 0,
         "last_used_at": r.last_use_at,
@@ -712,13 +730,15 @@ async def build_convert(
 
     async def _convert_one(sso_token: str) -> None:
         try:
-            creds = await convert_sso_to_build(sso_token.strip())
+            sso_token_clean = sso_token.strip()
+            creds = await convert_sso_to_build(sso_token_clean)
             access_token = creds["access_token"]
             now = now_ms()
             expires_at = now + int(creds.get("expires_in", "3600")) * 1000
             refresh_due_at = int(
                 compute_refresh_due_at(expires_at / 1000, access_token) * 1000
             )
+            sso_hash = hashlib.sha256(sso_token_clean.encode()).hexdigest()[:16]
 
             ext_data = {
                 "build_access_token": creds["access_token"],
@@ -726,6 +746,8 @@ async def build_convert(
                 "build_id_token": creds.get("id_token", ""),
                 "build_expires_at": int(expires_at),
                 "build_refresh_due_at": refresh_due_at,
+                "converted_from_token": sso_hash,
+                "converted_at": now,
             }
 
             await repo.upsert_accounts(
@@ -739,6 +761,26 @@ async def build_convert(
                     )
                 ]
             )
+
+            # Link back to the Web account that owns this SSO token
+            sso_records = await repo.get_accounts([sso_token_clean])
+            for rec in sso_records:
+                if rec.pool != "build" and not rec.is_deleted():
+                    existing_ext = rec.ext or {}
+                    await repo.patch_accounts(
+                        [
+                            AccountPatch(
+                                token=rec.token,
+                                ext_merge={
+                                    **existing_ext,
+                                    "build_linked_at": now,
+                                    "build_linked_token": access_token[:16],
+                                },
+                            )
+                        ]
+                    )
+                    break
+
             results["success"] += 1
         except Exception as exc:
             results["failed"] += 1
