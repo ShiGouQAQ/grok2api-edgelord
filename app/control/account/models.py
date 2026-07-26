@@ -190,13 +190,15 @@ class AccountUsageStats:
 class AccountRecord(BaseModel):
     """Persistent account record — single source of truth for all backends.
 
-    ``pool``  values: ``"basic"`` | ``"super"`` | ``"heavy"``
+    ``pool``  values: ``"basic"`` | ``"super"`` | ``"heavy"`` | ``"build"``
+    ``provider`` values: ``"grok_web"`` | ``"grok_build"`` | ``"grok_console"``
     All timestamps are milliseconds since epoch.
     ``ext`` carries non-core extension data only.
     """
 
     token: str
     pool: str = "basic"
+    provider: str = "grok_web"
     status: AccountStatus = AccountStatus.ACTIVE
     created_at: int = Field(default_factory=now_ms)
     updated_at: int = Field(default_factory=now_ms)
@@ -231,6 +233,10 @@ class AccountRecord(BaseModel):
     @property
     def is_heavy(self) -> bool:
         return self.pool == "heavy"
+
+    @property
+    def is_build(self) -> bool:
+        return self.pool == "build"
 
     def is_deleted(self) -> bool:
         return self.deleted_at is not None
@@ -287,11 +293,21 @@ class AccountRecord(BaseModel):
             return "super"
         if val in ("heavy",):
             return "heavy"
+        if val in ("build",):
+            return "build"
         if val in ("ssobasic", "basic", "", "auto"):
             # "auto" is a UI alias meaning "let quota sync decide";
             # save as basic for now — refresh will correct to the real type.
             return "basic"
         raise ValueError(f"Unknown pool: {v!r}")
+
+    @field_validator("provider", mode="before")
+    @classmethod
+    def _normalize_provider(cls, v: Any) -> str:
+        val = str(v or "").strip().lower()
+        if val in ("grok_build", "grok_web", "grok_console"):
+            return val
+        return "grok_web"
 
     @field_validator("tags", mode="before")
     @classmethod

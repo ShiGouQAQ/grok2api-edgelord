@@ -72,17 +72,28 @@ HEAVY_QUOTA_DEFAULTS = AccountQuotaSet(
     quota_build=_w(100, 100, 7_200),  # 100 queries / 2 h
 )
 
+# Default quota totals for Build mode
+BUILD_QUOTA_DEFAULTS = AccountQuotaSet(
+    auto=_w(0, 0, 0),  # unsupported on build accounts
+    fast=_w(30, 30, 86_400),  # 30 queries / 24 h
+    expert=_w(0, 0, 0),  # unsupported on build accounts
+    console=_w(0, 0, 0),  # unsupported on build accounts
+    quota_build=_w(100, 100, 7_200),  # 100 queries / 2 h
+)
+
 # Map pool name → defaults object (used by backends on upsert).
 _POOL_DEFAULTS: dict[str, AccountQuotaSet] = {
     "basic": BASIC_QUOTA_DEFAULTS,
     "super": SUPER_QUOTA_DEFAULTS,
     "heavy": HEAVY_QUOTA_DEFAULTS,
+    "build": BUILD_QUOTA_DEFAULTS,
 }
 
 _SUPPORTED_MODE_IDS_BY_POOL: dict[str, frozenset[int]] = {
     "basic": frozenset((1, 5, 6)),
     "super": frozenset((0, 1, 2, 4, 5, 6)),
     "heavy": frozenset((0, 1, 2, 3, 4, 5, 6)),
+    "build": frozenset((1, 6)),
 }
 
 # Mode ID → quota key in AccountQuotaSet storage
@@ -94,12 +105,6 @@ _MODE_KEYS: dict[int, str] = {
     4: "quota_grok_4_3",
     5: "quota_console",
     6: "quota_build",
-}
-
-# Default quota totals for Build mode
-BUILD_QUOTA_DEFAULTS: dict[str, int] = {
-    "quota_build": 100,
-    "console": BASIC_CONSOLE_LIMIT,
 }
 
 # ---------------------------------------------------------------------------

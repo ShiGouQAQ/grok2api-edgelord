@@ -32,5 +32,7 @@ def test_default_quota_set_has_build():
 
 
 def test_build_quota_defaults():
-    assert BUILD_QUOTA_DEFAULTS["quota_build"] == 100
-    assert BUILD_QUOTA_DEFAULTS["console"] == 20
+    qs = BUILD_QUOTA_DEFAULTS
+    assert qs.quota_build is not None
+    assert qs.quota_build.total == 100
+    assert qs.fast.total == 30
