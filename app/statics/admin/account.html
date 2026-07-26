@@ -958,6 +958,21 @@
     </div>
   </div>
 
+  <!-- Account type toggle -->
+  <div class="filter-bar" style="margin-bottom:12px">
+    <div class="filter-group">
+      <span class="filter-label" style="width:auto;padding-right:8px">账户类型</span>
+      <div class="filter-chip-list">
+        <button type="button" class="filter-chip" data-account-type="web" onclick="switchAccountType('web')">
+          <span>Web</span>
+        </button>
+        <button type="button" class="filter-chip active" data-account-type="build" onclick="switchAccountType('build')">
+          <span>Build</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Toolbar -->
   <div class="table-toolbar">
     <div class="table-toolbar-left" style="display:flex;align-items:center;gap:6px">
@@ -1024,20 +1039,7 @@
                 </button>
               </div>
             </div>
-            <div class="filter-group">
-              <span class="filter-label" data-i18n="account.filterProviderLabel">提供者</span>
-              <div class="filter-chip-list" id="provider-filter-chips">
-                <button type="button" class="filter-chip active" data-provider="all" onclick="switchProvider('all')">
-                  <span data-i18n="account.filterProviderAll">所有提供者</span>
-                </button>
-                <button type="button" class="filter-chip" data-provider="grok_web" onclick="switchProvider('grok_web')">
-                  <span data-i18n="account.filterProviderWeb">Web (grok.com)</span>
-                </button>
-                <button type="button" class="filter-chip" data-provider="grok_build" onclick="switchProvider('grok_build')">
-                  <span data-i18n="account.filterProviderBuild">Build (CLI)</span>
-                </button>
-              </div>
-            </div>
+
           </div>
         </div>
       </div>
@@ -1249,7 +1251,7 @@
 const PAGE_SIZE_KEY = 'admin.account.page_size';
 const PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000, 2000];
 
-let allTokens = [], curStatus = 'all', curNsfw = 'all', curPool = 'all', curProvider = 'all', curPage = 1, pageSize = loadSavedPageSize();
+let allTokens = [], curStatus = 'all', curNsfw = 'all', curPool = 'all', curAccountType = 'build', curPage = 1, pageSize = loadSavedPageSize();
 const sel = new Set();
 const refreshingTokens = new Set();
 let _cb = null;
@@ -1380,7 +1382,7 @@ function render() {
 }
 
 function getTokenView() {
-  const cacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}|${curProvider}`;
+  const cacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}|${curAccountType}`;
   if (_tokenViewCache && _tokenViewCacheKey === cacheKey) return _tokenViewCache;
 
   const stats = {
@@ -1414,7 +1416,9 @@ function getTokenView() {
     const matchesStatus = curStatus === 'all'
       || (curStatus === 'invalid' ? invalid : curStatus === 'disabled' ? disabled : token.status === curStatus);
     const matchesNsfw = curNsfw === 'all' || (curNsfw === 'enabled' ? nsfwEnabled : !nsfwEnabled);
-    const matchesProvider = curProvider === 'all' || (token.provider || 'grok_web') === curProvider;
+    const matchesType = curAccountType === 'build'
+  ? (token.provider || 'grok_web') === 'grok_build'
+  : (token.provider || 'grok_web') !== 'grok_build';
 
     poolsSet.add(pool);
     const successCount = token.use_count || 0;
@@ -1453,7 +1457,7 @@ function getTokenView() {
       poolCounts.set(pool, (poolCounts.get(pool) || 0) + 1);
     }
 
-    if (matchesPool && matchesStatus && matchesNsfw && matchesProvider) filteredItems.push(token);
+    if (matchesPool && matchesStatus && matchesNsfw && matchesType) filteredItems.push(token);
   }
 
   if (curPool !== 'all' && !poolsSet.has(curPool)) {
@@ -1461,7 +1465,7 @@ function getTokenView() {
     return getTokenView();
   }
 
-  _tokenViewCacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}|${curProvider}`;
+  _tokenViewCacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}|${curAccountType}`;
   _tokenViewCache = {
     stats,
     statusCounts,
@@ -1547,7 +1551,7 @@ function syncFilterTrigger() {
   const menu = document.getElementById('filter-menu');
   const trigger = document.getElementById('btn-filter');
   if (!menu || !trigger) return;
-  const active = curStatus !== 'all' || curPool !== 'all' || curNsfw !== 'all' || curProvider !== 'all' || menu.classList.contains('open');
+  const active = curStatus !== 'all' || curPool !== 'all' || curNsfw !== 'all' || menu.classList.contains('open');
   trigger.classList.toggle('is-active', active);
 }
 
@@ -1565,10 +1569,6 @@ function renderNsfwFilters(view = getTokenView()) {
   setFilterCount('fc-nsfw-enabled', view.nsfwCounts.enabled);
   setFilterCount('fc-nsfw-disabled', view.nsfwCounts.disabled);
   document.querySelectorAll('[data-nsfw]').forEach(el => el.classList.toggle('active', el.dataset.nsfw === curNsfw));
-}
-
-function renderProviderFilters() {
-  document.querySelectorAll('[data-provider]').forEach(el => el.classList.toggle('active', el.dataset.provider === curProvider));
 }
 
 function renderPoolFilters(view = getTokenView()) {
@@ -1634,8 +1634,8 @@ function renderTable(view = getTokenView()) {
   prev.disabled = curPage <= 1; next.disabled = curPage >= pages;
   updateBatchBtns();
   // Toggle billing column and toolbar buttons based on provider filter
-  const showBilling = curProvider === 'grok_build';
-  const showWeb = curProvider === 'grok_web' || curProvider === 'all';
+  const showBilling = curAccountType === 'build';
+  const showWeb = curAccountType === 'web';
   document.querySelectorAll('.build-billing-col').forEach(el => {
     el.style.display = showBilling ? '' : 'none';
   });
@@ -1782,13 +1782,17 @@ function switchPool(pool) {
     renderTable();
   });
 }
-function switchProvider(provider) {
+function switchAccountType(type) {
   preserveScroll(() => {
-    curProvider = provider || 'all';
+    curAccountType = type || 'build';
     curPage = 1;
     sel.clear();
     invalidateTokenView();
     render();
+  });
+  // Update pill active state
+  document.querySelectorAll('[data-account-type]').forEach(el => {
+    el.classList.toggle('active', el.dataset.accountType === curAccountType);
   });
 }
 function prevPage() { if (curPage > 1) { curPage--; renderTable(); } }
