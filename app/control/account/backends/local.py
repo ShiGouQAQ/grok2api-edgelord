@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from app.platform.runtime.clock import now_ms
-from ..commands import AccountPatch, AccountUpsert, BulkReplacePoolCommand, ListAccountsQuery
+from ..commands import (
+    AccountPatch,
+    AccountUpsert,
+    BulkReplacePoolCommand,
+    ListAccountsQuery,
+)
 from ..enums import AccountStatus
 from ..models import (
     AccountChangeSet,
@@ -17,17 +22,22 @@ from ..models import (
     AccountRecord,
     RuntimeSnapshot,
 )
-from ..quota_defaults import default_quota_set, BASIC_CONSOLE_LIMIT, BASIC_CONSOLE_WINDOW_SECONDS
+from ..quota_defaults import (
+    default_quota_set,
+    BASIC_CONSOLE_LIMIT,
+    BASIC_CONSOLE_WINDOW_SECONDS,
+)
 
 _TBL = "accounts"
 _META = "account_meta"
 _TOKEN_PAYLOAD_QUOTAS = (
-    ("auto",      "quota_auto",      True),
-    ("fast",      "quota_fast",      True),
-    ("expert",    "quota_expert",    True),
-    ("heavy",     "quota_heavy",     False),
-    ("grok_4_3",  "quota_grok_4_3",  False),  # 补上，避免 super/heavy 账号余额显示为空
-    ("console",   "quota_console",   True),
+    ("auto", "quota_auto", True),
+    ("fast", "quota_fast", True),
+    ("expert", "quota_expert", True),
+    ("heavy", "quota_heavy", False),
+    ("grok_4_3", "quota_grok_4_3", False),  # 补上，避免 super/heavy 账号余额显示为空
+    ("console", "quota_console", True),
+    ("build", "quota_build", True),
 )
 
 
@@ -69,6 +79,7 @@ class LocalAccountRepository:
                 CREATE TABLE IF NOT EXISTS {_TBL} (
                     token              TEXT    NOT NULL PRIMARY KEY,
                     pool               TEXT    NOT NULL DEFAULT 'basic',
+                    provider           TEXT    NOT NULL DEFAULT 'grok_web',
                     status             TEXT    NOT NULL DEFAULT 'active',
                     created_at         INTEGER NOT NULL,
                     updated_at         INTEGER NOT NULL,
@@ -79,6 +90,7 @@ class LocalAccountRepository:
                     quota_heavy        TEXT    NOT NULL DEFAULT '{{}}',
                     quota_grok_4_3     TEXT    NOT NULL DEFAULT '{{}}',
                     quota_console      TEXT    NOT NULL DEFAULT '{{}}',
+                    quota_build        TEXT    NOT NULL DEFAULT '{{}}',
                     usage_use_count    INTEGER NOT NULL DEFAULT 0,
                     usage_fail_count   INTEGER NOT NULL DEFAULT 0,
                     usage_sync_count   INTEGER NOT NULL DEFAULT 0,
@@ -101,8 +113,16 @@ class LocalAccountRepository:
                 CREATE INDEX IF NOT EXISTS idx_acc_live_updated
                     ON {_TBL} (updated_at DESC) WHERE deleted_at IS NULL;
             """)
-            self._ensure_column_sync(conn, "quota_grok_4_3", "TEXT NOT NULL DEFAULT '{}'")
-            self._ensure_column_sync(conn, "quota_console", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column_sync(
+                conn, "quota_grok_4_3", "TEXT NOT NULL DEFAULT '{}'"
+            )
+            self._ensure_column_sync(
+                conn, "quota_console", "TEXT NOT NULL DEFAULT '{}'"
+            )
+            self._ensure_column_sync(
+                conn, "provider", "TEXT NOT NULL DEFAULT 'grok_web'"
+            )
+            self._ensure_column_sync(conn, "quota_build", "TEXT NOT NULL DEFAULT '{}'")
             conn.commit()
 
     @staticmethod
@@ -129,21 +149,25 @@ class LocalAccountRepository:
     @staticmethod
     def _row_to_record(row: sqlite3.Row) -> AccountRecord:
         d = dict(row)
-        d["tags"]  = json.loads(d.get("tags")  or "[]")
-        heavy_raw     = d.pop("quota_heavy",     "{}") or "{}"
-        grok_4_3_raw  = d.pop("quota_grok_4_3",  "{}") or "{}"
-        console_raw   = d.pop("quota_console",   "{}") or "{}"
-        heavy_dict    = json.loads(heavy_raw)
+        d["tags"] = json.loads(d.get("tags") or "[]")
+        heavy_raw = d.pop("quota_heavy", "{}") or "{}"
+        grok_4_3_raw = d.pop("quota_grok_4_3", "{}") or "{}"
+        console_raw = d.pop("quota_console", "{}") or "{}"
+        build_raw = d.pop("quota_build", "{}") or "{}"
+        heavy_dict = json.loads(heavy_raw)
         grok_4_3_dict = json.loads(grok_4_3_raw)
-        console_dict  = json.loads(console_raw)
+        console_dict = json.loads(console_raw)
+        build_dict = json.loads(build_raw)
         d["quota"] = {
-            "auto":   json.loads(d.pop("quota_auto",   "{}") or "{}"),
-            "fast":   json.loads(d.pop("quota_fast",   "{}") or "{}"),
+            "auto": json.loads(d.pop("quota_auto", "{}") or "{}"),
+            "fast": json.loads(d.pop("quota_fast", "{}") or "{}"),
             "expert": json.loads(d.pop("quota_expert", "{}") or "{}"),
-            **({"heavy":    heavy_dict}    if heavy_dict    else {}),
+            **({"heavy": heavy_dict} if heavy_dict else {}),
             **({"grok_4_3": grok_4_3_dict} if grok_4_3_dict else {}),
-            **({"console":  console_dict}  if console_dict  else {}),
+            **({"console": console_dict} if console_dict else {}),
+            **({"quota_build": build_dict} if build_dict else {}),
         }
+        d.setdefault("provider", "grok_web")
         d["ext"] = json.loads(d.get("ext") or "{}")
         return AccountRecord.model_validate(d)
 
@@ -151,30 +175,36 @@ class LocalAccountRepository:
     def _record_to_row(record: AccountRecord, revision: int) -> dict[str, Any]:
         qs = record.quota_set()
         return {
-            "token":            record.token,
-            "pool":             record.pool,
-            "status":           record.status.value,
-            "created_at":       record.created_at,
-            "updated_at":       record.updated_at,
-            "tags":             json.dumps(record.tags),
-            "quota_auto":       json.dumps(qs.auto.to_dict()),
-            "quota_fast":       json.dumps(qs.fast.to_dict()),
-            "quota_expert":     json.dumps(qs.expert.to_dict()),
-            "quota_heavy":      json.dumps(qs.heavy.to_dict())    if qs.heavy    else "{}",
-            "quota_grok_4_3":   json.dumps(qs.grok_4_3.to_dict()) if qs.grok_4_3 else "{}",
-            "quota_console":    json.dumps(qs.console.to_dict())   if qs.console  else "{}",
-            "usage_use_count":  record.usage_use_count,
+            "token": record.token,
+            "pool": record.pool,
+            "provider": record.provider,
+            "status": record.status.value,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "tags": json.dumps(record.tags),
+            "quota_auto": json.dumps(qs.auto.to_dict()),
+            "quota_fast": json.dumps(qs.fast.to_dict()),
+            "quota_expert": json.dumps(qs.expert.to_dict()),
+            "quota_heavy": json.dumps(qs.heavy.to_dict()) if qs.heavy else "{}",
+            "quota_grok_4_3": json.dumps(qs.grok_4_3.to_dict())
+            if qs.grok_4_3
+            else "{}",
+            "quota_console": json.dumps(qs.console.to_dict()) if qs.console else "{}",
+            "quota_build": json.dumps(qs.quota_build.to_dict())
+            if qs.quota_build
+            else "{}",
+            "usage_use_count": record.usage_use_count,
             "usage_fail_count": record.usage_fail_count,
             "usage_sync_count": record.usage_sync_count,
-            "last_use_at":      record.last_use_at,
-            "last_fail_at":     record.last_fail_at,
+            "last_use_at": record.last_use_at,
+            "last_fail_at": record.last_fail_at,
             "last_fail_reason": record.last_fail_reason,
-            "last_sync_at":     record.last_sync_at,
-            "last_clear_at":    record.last_clear_at,
-            "state_reason":     record.state_reason,
-            "deleted_at":       record.deleted_at,
-            "ext":              json.dumps(record.ext),
-            "revision":         revision,
+            "last_sync_at": record.last_sync_at,
+            "last_clear_at": record.last_clear_at,
+            "state_reason": record.state_reason,
+            "deleted_at": record.deleted_at,
+            "ext": json.dumps(record.ext),
+            "revision": revision,
         }
 
     @staticmethod
@@ -204,6 +234,7 @@ class LocalAccountRepository:
         return {
             "token": row["token"],
             "pool": row["pool"] or "basic",
+            "provider": row["provider"] if "provider" in row.keys() else "grok_web",
             "status": row["status"],
             "state_reason": row["state_reason"],
             "quota": quota,
@@ -233,9 +264,10 @@ class LocalAccountRepository:
                 "qa": json.dumps(qs.auto.to_dict()),
                 "qf": json.dumps(qs.fast.to_dict()),
                 "qe": json.dumps(qs.expert.to_dict()),
-                "qh": json.dumps(qs.heavy.to_dict())    if qs.heavy    else "{}",
+                "qh": json.dumps(qs.heavy.to_dict()) if qs.heavy else "{}",
                 "qg": json.dumps(qs.grok_4_3.to_dict()) if qs.grok_4_3 else "{}",
-                "qc": json.dumps(qs.console.to_dict())  if qs.console  else "{}",
+                "qc": json.dumps(qs.console.to_dict()) if qs.console else "{}",
+                "qb": json.dumps(qs.quota_build.to_dict()) if qs.quota_build else "{}",
             }
             _quota_json_cache[pool] = result
             return result
@@ -250,15 +282,31 @@ class LocalAccountRepository:
             token = token.encode("ascii", errors="ignore").decode("ascii").strip()
             if not token:
                 continue
-            pool = item.pool if item.pool in ("basic", "super", "heavy") else "basic"
+            pool = (
+                item.pool
+                if item.pool in ("basic", "super", "heavy", "build")
+                else "basic"
+            )
             q = _get_quota_json(pool)
-            rows.append((
-                token, pool, ts, ts,
-                json.dumps(item.tags),
-                q["qa"], q["qf"], q["qe"], q["qh"], q["qg"], q["qc"],
-                json.dumps(item.ext),
-                revision,
-            ))
+            rows.append(
+                (
+                    token,
+                    pool,
+                    item.provider or "grok_web",
+                    ts,
+                    ts,
+                    json.dumps(item.tags),
+                    q["qa"],
+                    q["qf"],
+                    q["qe"],
+                    q["qh"],
+                    q["qg"],
+                    q["qc"],
+                    q["qb"],
+                    json.dumps(item.ext),
+                    revision,
+                )
+            )
 
         if not rows:
             return 0
@@ -267,22 +315,24 @@ class LocalAccountRepository:
         conn.executemany(
             f"""
             INSERT INTO {_TBL} (
-                token, pool, status, created_at, updated_at,
-                tags, quota_auto, quota_fast, quota_expert, quota_heavy, quota_grok_4_3, quota_console,
+                token, pool, provider, status, created_at, updated_at,
+                tags, quota_auto, quota_fast, quota_expert, quota_heavy, quota_grok_4_3, quota_console, quota_build,
                 usage_use_count, usage_fail_count, usage_sync_count,
                 ext, revision
             ) VALUES (
-                ?, ?, 'active', ?, ?,
-                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, 'active', ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?,
                 0, 0, 0, ?, ?
             )
             ON CONFLICT(token) DO UPDATE SET
                 pool           = excluded.pool,
+                provider       = excluded.provider,
                 status         = 'active',
                 deleted_at     = NULL,
                 updated_at     = excluded.updated_at,
                 tags           = excluded.tags,
                 quota_console  = excluded.quota_console,
+                quota_build    = excluded.quota_build,
                 ext            = excluded.ext,
                 revision       = excluded.revision
             """,
@@ -312,6 +362,8 @@ class LocalAccountRepository:
 
             if patch.pool is not None:
                 sets["pool"] = patch.pool
+            if patch.provider is not None:
+                sets["provider"] = patch.provider
             if patch.status is not None:
                 sets["status"] = patch.status.value
             if patch.state_reason is not None:
@@ -329,11 +381,17 @@ class LocalAccountRepository:
 
             # Usage counters (delta).
             if patch.usage_use_delta is not None:
-                sets["usage_use_count"] = max(0, record.usage_use_count + patch.usage_use_delta)
+                sets["usage_use_count"] = max(
+                    0, record.usage_use_count + patch.usage_use_delta
+                )
             if patch.usage_fail_delta is not None:
-                sets["usage_fail_count"] = max(0, record.usage_fail_count + patch.usage_fail_delta)
+                sets["usage_fail_count"] = max(
+                    0, record.usage_fail_count + patch.usage_fail_delta
+                )
             if patch.usage_sync_delta is not None:
-                sets["usage_sync_count"] = max(0, record.usage_sync_count + patch.usage_sync_delta)
+                sets["usage_sync_count"] = max(
+                    0, record.usage_sync_count + patch.usage_sync_delta
+                )
 
             # Quota windows.
             if patch.quota_auto is not None:
@@ -348,6 +406,8 @@ class LocalAccountRepository:
                 sets["quota_grok_4_3"] = json.dumps(patch.quota_grok_4_3)
             if patch.quota_console is not None:
                 sets["quota_console"] = json.dumps(patch.quota_console)
+            if patch.quota_build is not None:
+                sets["quota_build"] = json.dumps(patch.quota_build)
 
             # Tags — use set arithmetic to avoid O(n×m) membership tests.
             tag_set: set[str] = set(record.tags)
@@ -364,15 +424,22 @@ class LocalAccountRepository:
             if patch.ext_merge:
                 ext.update(patch.ext_merge)
             if patch.clear_failures:
-                for k in ("cooldown_until", "cooldown_reason", "disabled_at",
-                          "disabled_reason", "expired_at", "expired_reason",
-                          "forbidden_strikes", "console_429_count"):
+                for k in (
+                    "cooldown_until",
+                    "cooldown_reason",
+                    "disabled_at",
+                    "disabled_reason",
+                    "expired_at",
+                    "expired_reason",
+                    "forbidden_strikes",
+                    "console_429_count",
+                ):
                     ext.pop(k, None)
-                sets["status"]           = AccountStatus.ACTIVE.value
+                sets["status"] = AccountStatus.ACTIVE.value
                 sets["usage_fail_count"] = 0
-                sets["last_fail_at"]     = None
+                sets["last_fail_at"] = None
                 sets["last_fail_reason"] = None
-                sets["state_reason"]     = None
+                sets["state_reason"] = None
             sets["ext"] = json.dumps(ext)
 
             col_sql = ", ".join(f"{k} = :{k}" for k in sets)
@@ -395,6 +462,7 @@ class LocalAccountRepository:
         def _sync() -> int:
             with closing(self._connect()) as conn:
                 return self._get_revision_sync(conn)
+
         return await asyncio.to_thread(_sync)
 
     async def runtime_snapshot(self) -> RuntimeSnapshot:
@@ -408,6 +476,7 @@ class LocalAccountRepository:
                     revision=rev,
                     items=[self._row_to_record(r) for r in rows],
                 )
+
         return await asyncio.to_thread(_sync)
 
     async def scan_changes(
@@ -442,6 +511,7 @@ class LocalAccountRepository:
                     deleted_tokens=deleted,
                     has_more=has_more,
                 )
+
         return await asyncio.to_thread(_sync)
 
     async def upsert_accounts(
@@ -453,7 +523,7 @@ class LocalAccountRepository:
 
         def _sync() -> AccountMutationResult:
             with closing(self._connect()) as conn:
-                rev   = self._bump_revision(conn)
+                rev = self._bump_revision(conn)
                 count = self._upsert_sync(conn, items, rev)
                 conn.commit()
                 return AccountMutationResult(upserted=count, revision=rev)
@@ -470,7 +540,7 @@ class LocalAccountRepository:
 
         def _sync() -> AccountMutationResult:
             with closing(self._connect()) as conn:
-                rev   = self._bump_revision(conn)
+                rev = self._bump_revision(conn)
                 count = self._patch_sync(conn, patches, rev)
                 conn.commit()
                 return AccountMutationResult(patched=count, revision=rev)
@@ -537,13 +607,24 @@ class LocalAccountRepository:
                     where_parts.append("status = ?")
                     params.append(query.status.value)
 
-                where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+                where_sql = (
+                    ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+                )
                 order_dir = "DESC" if query.sort_desc else "ASC"
                 # Allow only known column names to prevent injection.
-                safe_sort = query.sort_by if query.sort_by in {
-                    "updated_at", "created_at", "last_use_at", "token",
-                    "usage_use_count", "usage_fail_count",
-                } else "updated_at"
+                safe_sort = (
+                    query.sort_by
+                    if query.sort_by
+                    in {
+                        "updated_at",
+                        "created_at",
+                        "last_use_at",
+                        "token",
+                        "usage_use_count",
+                        "usage_fail_count",
+                    }
+                    else "updated_at"
+                )
                 order_sql = f"ORDER BY {safe_sort} {order_dir}"
 
                 total = conn.execute(
@@ -552,8 +633,7 @@ class LocalAccountRepository:
 
                 offset = (query.page - 1) * query.page_size
                 rows = conn.execute(
-                    f"SELECT * FROM {_TBL} {where_sql} {order_sql} "
-                    f"LIMIT ? OFFSET ?",
+                    f"SELECT * FROM {_TBL} {where_sql} {order_sql} LIMIT ? OFFSET ?",
                     params + [query.page_size, offset],
                 ).fetchall()
                 items = [self._row_to_record(r) for r in rows]
@@ -704,6 +784,7 @@ class LocalAccountRepository:
         2. 新条件 (M6)：reset_at 已过期（即使 remaining>0）→ 异常数据归位
            （来源：人工 patch、迁移数据、M1 历史副作用等）
         """
+
         def _sync() -> int:
             with closing(self._connect()) as conn:
                 now = now_ms()
@@ -734,14 +815,16 @@ class LocalAccountRepository:
                     return 0
 
                 # 从 quota_defaults.py 动态读取，不硬编码
-                reset_json = json.dumps({
-                    "remaining": BASIC_CONSOLE_LIMIT,
-                    "total": BASIC_CONSOLE_LIMIT,
-                    "window_seconds": BASIC_CONSOLE_WINDOW_SECONDS,
-                    "reset_at": None,
-                    "synced_at": now,
-                    "source": 0,
-                })
+                reset_json = json.dumps(
+                    {
+                        "remaining": BASIC_CONSOLE_LIMIT,
+                        "total": BASIC_CONSOLE_LIMIT,
+                        "window_seconds": BASIC_CONSOLE_WINDOW_SECONDS,
+                        "reset_at": None,
+                        "synced_at": now,
+                        "source": 0,
+                    }
+                )
                 rev = self._bump_revision(conn)
                 conn.execute(
                     f"""
@@ -782,6 +865,7 @@ class LocalAccountRepository:
         - usage_use_count > 5
         - ext.expired_at <= now - 1 hour
         """
+
         def _sync() -> int:
             with closing(self._connect()) as conn:
                 now = now_ms()
@@ -811,8 +895,12 @@ class LocalAccountRepository:
                     except (ValueError, TypeError):
                         ext = {}
                     # 清理 EXPIRED 相关字段
-                    for k in ("expired_at", "expired_reason",
-                              "console_429_count", "console_429_last_at"):
+                    for k in (
+                        "expired_at",
+                        "expired_reason",
+                        "console_429_count",
+                        "console_429_last_at",
+                    ):
                         ext.pop(k, None)
                     conn.execute(
                         f"""

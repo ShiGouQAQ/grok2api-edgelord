@@ -47,6 +47,7 @@ accounts_table = sa.Table(
     metadata,
     sa.Column("token", sa.String(512), primary_key=True),
     sa.Column("pool", sa.Text, nullable=False, default="basic"),
+    sa.Column("provider", sa.Text, nullable=False, default="grok_web"),
     sa.Column("status", sa.Text, nullable=False, default="active"),
     sa.Column("created_at", sa.BigInteger, nullable=False),
     sa.Column("updated_at", sa.BigInteger, nullable=False),
@@ -57,6 +58,7 @@ accounts_table = sa.Table(
     sa.Column("quota_heavy", sa.Text, nullable=False, default="{}"),
     sa.Column("quota_grok_4_3", sa.Text, nullable=False, default="{}"),
     sa.Column("quota_console", sa.Text, nullable=False, default="{}"),
+    sa.Column("quota_build", sa.Text, nullable=False, default="{}"),
     sa.Column("usage_use_count", sa.Integer, nullable=False, default=0),
     sa.Column("usage_fail_count", sa.Integer, nullable=False, default=0),
     sa.Column("usage_sync_count", sa.Integer, nullable=False, default=0),
@@ -451,9 +453,11 @@ def _row_to_record(row: Any) -> AccountRecord:
     heavy_raw = d.pop("quota_heavy", "{}") or "{}"
     grok_4_3_raw = d.pop("quota_grok_4_3", "{}") or "{}"
     console_raw = d.pop("quota_console", "{}") or "{}"
+    build_raw = d.pop("quota_build", "{}") or "{}"
     heavy_dict = json.loads(heavy_raw)
     grok_4_3_dict = json.loads(grok_4_3_raw)
     console_dict = json.loads(console_raw)
+    build_dict = json.loads(build_raw)
     d["quota"] = {
         "auto": json.loads(d.pop("quota_auto", "{}") or "{}"),
         "fast": json.loads(d.pop("quota_fast", "{}") or "{}"),
@@ -461,7 +465,9 @@ def _row_to_record(row: Any) -> AccountRecord:
         **({"heavy": heavy_dict} if heavy_dict else {}),
         **({"grok_4_3": grok_4_3_dict} if grok_4_3_dict else {}),
         **({"console": console_dict} if console_dict else {}),
+        **({"quota_build": build_dict} if build_dict else {}),
     }
+    d.setdefault("provider", "grok_web")
     d["ext"] = json.loads(d.get("ext") or "{}")
     return AccountRecord.model_validate(d)
 
@@ -616,6 +622,43 @@ class SqlAccountRepository:
                     f"ALTER TABLE {_TBL_ACCOUNTS} "
                     f"ADD COLUMN quota_console TEXT NOT NULL DEFAULT '{{}}'"
                 )
+        if "provider" not in existing:
+            if self._dialect == "mysql":
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} ADD COLUMN provider TEXT"
+                )
+                await conn.exec_driver_sql(
+                    f"UPDATE {_TBL_ACCOUNTS} "
+                    f"SET provider = 'grok_web' "
+                    f"WHERE provider IS NULL"
+                )
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} MODIFY COLUMN provider TEXT NOT NULL"
+                )
+            else:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} "
+                    f"ADD COLUMN provider TEXT NOT NULL DEFAULT 'grok_web'"
+                )
+        if "quota_build" not in existing:
+            if self._dialect == "mysql":
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} ADD COLUMN quota_build TEXT"
+                )
+                await conn.exec_driver_sql(
+                    f"UPDATE {_TBL_ACCOUNTS} "
+                    f"SET quota_build = '{{}}' "
+                    f"WHERE quota_build IS NULL"
+                )
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} "
+                    f"MODIFY COLUMN quota_build TEXT NOT NULL"
+                )
+            else:
+                await conn.exec_driver_sql(
+                    f"ALTER TABLE {_TBL_ACCOUNTS} "
+                    f"ADD COLUMN quota_build TEXT NOT NULL DEFAULT '{{}}'"
+                )
 
     async def _table_columns(self, conn: Any, table: str) -> set[str]:
         if self._dialect == "postgresql":
@@ -714,12 +757,15 @@ class SqlAccountRepository:
                 except Exception:
                     continue
                 pool = (
-                    item.pool if item.pool in ("basic", "super", "heavy") else "basic"
+                    item.pool
+                    if item.pool in ("basic", "super", "heavy", "build")
+                    else "basic"
                 )
                 qs = default_quota_set(pool)
                 row = {
                     "token": token,
                     "pool": pool,
+                    "provider": item.provider or "grok_web",
                     "status": "active",
                     "created_at": ts,
                     "updated_at": ts,
@@ -734,6 +780,9 @@ class SqlAccountRepository:
                     else "{}",
                     "quota_console": json.dumps(qs.console.to_dict())
                     if qs.console
+                    else "{}",
+                    "quota_build": json.dumps(qs.quota_build.to_dict())
+                    if qs.quota_build
                     else "{}",
                     "usage_use_count": 0,
                     "usage_fail_count": 0,
@@ -775,6 +824,8 @@ class SqlAccountRepository:
                 updates: dict[str, Any] = {"updated_at": ts, "revision": rev}
                 if patch.pool is not None:
                     updates["pool"] = patch.pool
+                if patch.provider is not None:
+                    updates["provider"] = patch.provider
                 if patch.status is not None:
                     updates["status"] = patch.status.value
                 if patch.state_reason is not None:
@@ -801,6 +852,8 @@ class SqlAccountRepository:
                     updates["quota_grok_4_3"] = json.dumps(patch.quota_grok_4_3)
                 if patch.quota_console is not None:
                     updates["quota_console"] = json.dumps(patch.quota_console)
+                if patch.quota_build is not None:
+                    updates["quota_build"] = json.dumps(patch.quota_build)
                 # S3 修复：数值列使用原子表达式 GREATEST(0, col+delta)，
                 # 而不是基于 SELECT 出的旧值在 Python 中算新值。
                 # GREATEST 在 MySQL/PostgreSQL 上均原生支持。
