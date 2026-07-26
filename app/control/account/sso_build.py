@@ -84,6 +84,12 @@ async def convert_sso_to_build(sso_token: str) -> dict[str, str]:
         poll_interval = int(device.get("interval", 5))
 
         # 2. Poll for token (SSO session should allow auto-approval)
+        logger.info(
+            "SSO→Build device flow started: user_code={} device_code={} interval={}s",
+            device.get("user_code", "?"),
+            device_code,
+            poll_interval,
+        )
         for attempt in range(60):
             async with session.post(
                 TOKEN_URL,
@@ -95,8 +101,15 @@ async def convert_sso_to_build(sso_token: str) -> dict[str, str]:
                 proxy=http_proxy,
             ) as resp:
                 if resp.status not in (200, 400):
+                    body_snippet = (await resp.text())[:200]
+                    logger.warning(
+                        "SSO→Build poll attempt=%d unexpected_status=%d body=%s",
+                        attempt + 1,
+                        resp.status,
+                        body_snippet,
+                    )
                     raise RuntimeError(
-                        f"Token poll failed ({resp.status}): {(await resp.text())[:200]}"
+                        f"Token poll failed ({resp.status}): {body_snippet}"
                     )
                 body = await resp.json()
                 if "access_token" in body:
@@ -112,10 +125,31 @@ async def convert_sso_to_build(sso_token: str) -> dict[str, str]:
                     }
                 error = body.get("error", "")
                 if error == "slow_down":
+                    logger.info(
+                        "SSO→Build poll attempt=%d slow_down, backing off", attempt + 1
+                    )
                     poll_interval = min(poll_interval + 2, 30)
                 elif error in ("access_denied", "expired_token"):
+                    logger.warning(
+                        "SSO→Build poll attempt=%d terminal_error=%s",
+                        attempt + 1,
+                        error,
+                    )
                     raise PermissionError(f"SSO→Build conversion denied: {error}")
-                # authorization_pending or unknown: keep polling
+                elif error == "authorization_pending":
+                    if attempt == 0 or (attempt + 1) % 10 == 0:
+                        logger.info(
+                            "SSO→Build poll attempt=%d still pending (interval=%ds)",
+                            attempt + 1,
+                            poll_interval,
+                        )
+                else:
+                    logger.info(
+                        "SSO→Build poll attempt=%d status=%s body=%s",
+                        attempt + 1,
+                        error or "unknown",
+                        str(body)[:200],
+                    )
             await asyncio.sleep(poll_interval)
 
         raise TimeoutError("SSO→Build conversion timed out after 120s")

@@ -75,6 +75,11 @@
       background:#222;
       border-color:#222;
     }
+    .page-action-btn:disabled {
+      opacity:.5;
+      pointer-events:none;
+      cursor:default;
+    }
     /* Stats */
     .stat-grid {
       display:grid;
@@ -1326,15 +1331,22 @@ function waitI18n() {
 })();
 
 // ── API ────────────────────────────────────────────────────────────────────
-async function _api(method, path, body) {
+async function _api(method, path, body, timeoutMs) {
   const key = await adminKey.get();
-  const r = await fetch(ADMIN_API + path, {
-    method,
-    headers: { ...(body != null && { 'Content-Type': 'application/json' }), Authorization: `Bearer ${key}` },
-    ...(body != null && { body: JSON.stringify(body) }),
-  });
-  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || r.status); }
-  return r.json();
+  const ctrl = timeoutMs ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+  try {
+    const r = await fetch(ADMIN_API + path, {
+      method,
+      signal: ctrl?.signal,
+      headers: { ...(body != null && { 'Content-Type': 'application/json' }), Authorization: `Bearer ${key}` },
+      ...(body != null && { body: JSON.stringify(body) }),
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || r.status); }
+    return r.json();
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // Selection strategy reported by /status — "quota" | "random".
@@ -2527,9 +2539,11 @@ let _buildPollTimer = null;
 
 async function startBuildImport() {
   const btn = document.getElementById('btn-build-import');
+  const origText = btn.innerHTML;
   btn.disabled = true;
+  btn.innerHTML = '<span data-i18n="build.importing">导入中…</span>';
   try {
-    const data = await _api('POST', '/tokens/build-start');
+    const data = await _api('POST', '/tokens/build-start', null, 30000);
     const info = document.getElementById('build-device-info');
     info.style.display = '';
     document.getElementById('build-user-code').textContent = data.user_code || '—';
@@ -2542,6 +2556,7 @@ async function startBuildImport() {
     showToast(`Build import failed: ${e.message}`, 'error');
   } finally {
     btn.disabled = false;
+    btn.innerHTML = origText;
   }
 }
 
