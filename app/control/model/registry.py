@@ -70,10 +70,6 @@ MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("grok-4.20-multi-agent-high",             ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 Multi-Agent High"),
     ModelSpec("grok-4.20-multi-agent-xhigh",            ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 Multi-Agent XHigh"),
     ModelSpec("grok-4.20-0309-non-reasoning-console",   ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 0309 Non-Reasoning (Console)"),
-    # grok-build-console: console.x.ai 已移除所有 grok-build-* 模型。
-    # Go 上游已切换到独立 Build API (cli-chat-proxy.grok.com)，
-    # Python 尚需移植 Build 客户端。详见 go-port-ledger.md 条目 74-75。
-    ModelSpec("grok-build-console",                     ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, False, "Grok Build 0.1 (Console) — 上游已移除"),
 )
 # fmt: on
 
