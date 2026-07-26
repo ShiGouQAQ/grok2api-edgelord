@@ -15,6 +15,7 @@ class ModeId(IntEnum):
     HEAVY = 3  # modeId="heavy"    — only available on heavy-pool accounts
     GROK_4_3 = 4  # modeId="grok-420-computer-use-sa" — super/heavy only
     CONSOLE = 5  # console.x.ai 独立配额 — basic pool console 模型专用
+    BUILD = 6  # grok.com build 端点
 
     def to_api_str(self) -> str:
         _OVERRIDES: dict[int, str] = {
@@ -41,6 +42,7 @@ class Capability(IntFlag):
     VOICE = 16
     ASSET = 32
     CONSOLE_CHAT = 64  # 通过 console.x.ai/v1/responses 路由
+    BUILD = 128  # grok.com build 端点
 
 
 # Human-readable mode strings in API order.

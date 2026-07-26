@@ -70,6 +70,11 @@ MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("grok-4.20-multi-agent-high",             ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 Multi-Agent High"),
     ModelSpec("grok-4.20-multi-agent-xhigh",            ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 Multi-Agent XHigh"),
     ModelSpec("grok-4.20-0309-non-reasoning-console",   ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 0309 Non-Reasoning (Console)"),
+
+    # === Build (grok.com build 端点) ==========================================
+    ModelSpec("grok-4.5",              ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok 4.5 (Build)"),
+    ModelSpec("grok-4.5-latest",       ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok 4.5 Latest (Build)"),
+    ModelSpec("grok-build-latest",     ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok Build Latest"),
 )
 # fmt: on
 

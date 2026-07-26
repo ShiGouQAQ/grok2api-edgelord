@@ -46,6 +46,19 @@ show_search_sources = false
 # 全局附加指令
 custom_instruction = ""
 
+# Build provider configuration
+[build]
+# Build client version (recommended: 0.2.111)
+client_version = "0.2.111"
+# Build client identifier
+client_identifier = "grok-shell"
+# Build token auth header value
+token_auth = "xai-grok-cli"
+# Build user agent (default: grok-shell/{version})
+user_agent = ""
+# 403 fallback: prefer Free tier accounts for Build
+prefer_free_build = false
+
 # 图片返回格式
 #   grok_url  — 直接返回 Grok CDN URL
 #   local_url — 下载后存本地，返回本地代理 URL
