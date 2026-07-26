@@ -168,6 +168,7 @@
     "statFast": "Fast-Guthaben",
     "statExpert": "Expert-Guthaben",
     "statHeavy": "Heavy-Guthaben",
+    "statBuild": "Build Balance",
     "filterStatusLabel": "Status",
     "filterNsfwLabel": "NSFW",
     "filterTypeLabel": "Typ",
@@ -180,6 +181,10 @@
     "filterNsfwEnabled": "Ein",
     "filterNsfwDisabled": "Aus",
     "filterTypeAll": "Alle",
+    "filterProviderLabel": "Anbieter",
+    "filterProviderAll": "Alle Anbieter",
+    "filterProviderWeb": "Web (grok.com)",
+    "filterProviderBuild": "Build (CLI)",
     "filter": "Filtern",
     "export": "Daten exportieren",
     "batchNsfw": "NSFW aktivieren",
@@ -293,13 +298,15 @@
       "autoRecommended": "Automatisch erkennen (empfohlen)",
       "basic": "Basic",
       "super": "Super",
-      "heavy": "Heavy"
+      "heavy": "Heavy",
+      "build": "Build"
     },
     "mode": {
       "auto": "Auto",
       "fast": "Fast",
       "expert": "Expert",
       "heavy": "Heavy",
+      "build": "Build",
       "grok_4_3": "Grok 4.3 Beta"
     },
     "status": {

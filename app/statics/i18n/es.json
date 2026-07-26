@@ -168,6 +168,7 @@
     "statFast": "Saldo Fast",
     "statExpert": "Saldo Expert",
     "statHeavy": "Saldo Heavy",
+    "statBuild": "Build Balance",
     "filterStatusLabel": "Estado",
     "filterNsfwLabel": "NSFW",
     "filterTypeLabel": "Tipo",
@@ -180,6 +181,10 @@
     "filterNsfwEnabled": "Activado",
     "filterNsfwDisabled": "Desactivado",
     "filterTypeAll": "Todos",
+    "filterProviderLabel": "Proveedor",
+    "filterProviderAll": "Todos los proveedores",
+    "filterProviderWeb": "Web (grok.com)",
+    "filterProviderBuild": "Build (CLI)",
     "filter": "Filtrar",
     "export": "Exportar datos",
     "batchNsfw": "Activar NSFW",
@@ -293,13 +298,15 @@
       "autoRecommended": "Detección automática (recomendada)",
       "basic": "Basic",
       "super": "Super",
-      "heavy": "Heavy"
+      "heavy": "Heavy",
+      "build": "Build"
     },
     "mode": {
       "auto": "Auto",
       "fast": "Fast",
       "expert": "Expert",
       "heavy": "Heavy",
+      "build": "Build",
       "grok_4_3": "Grok 4.3 Beta"
     },
     "status": {

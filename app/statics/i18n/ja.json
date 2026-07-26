@@ -168,6 +168,7 @@
     "statFast": "Fast 残高",
     "statExpert": "Expert 残高",
     "statHeavy": "Heavy 残高",
+    "statBuild": "Build Balance",
     "filterStatusLabel": "状態",
     "filterNsfwLabel": "NSFW",
     "filterTypeLabel": "タイプ",
@@ -180,6 +181,10 @@
     "filterNsfwEnabled": "オン",
     "filterNsfwDisabled": "オフ",
     "filterTypeAll": "すべて",
+    "filterProviderLabel": "プロバイダー",
+    "filterProviderAll": "すべてのプロバイダー",
+    "filterProviderWeb": "Web (grok.com)",
+    "filterProviderBuild": "Build (CLI)",
     "filter": "絞り込み",
     "export": "データをエクスポート",
     "batchNsfw": "NSFW を有効化",
@@ -293,13 +298,15 @@
       "autoRecommended": "自動判定（推奨）",
       "basic": "Basic",
       "super": "Super",
-      "heavy": "Heavy"
+      "heavy": "Heavy",
+      "build": "Build"
     },
     "mode": {
       "auto": "Auto",
       "fast": "Fast",
       "expert": "Expert",
       "heavy": "Heavy",
+      "build": "Build",
       "grok_4_3": "Grok 4.3 Beta"
     },
     "status": {

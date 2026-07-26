@@ -403,6 +403,10 @@
       color:#b07a45;
       background:#fbf5ed;
     }
+    .table-card .badge-build {
+      color:#0284c7;
+      background:#f0f9ff;
+    }
     .table-card .badge-active {
       color:#3e8f69;
       background:#f2f8f4;
@@ -923,6 +927,15 @@
       </div>
       <div class="stat-num" id="s-qc" style="color:#2e7d52">0</div>
     </div>
+    <div class="stat-cell" data-quota-only>
+      <div class="stat-top">
+        <div class="stat-label" data-i18n="account.statBuild">Build 余额</div>
+        <span class="stat-icon" style="color:#0284c7">
+          <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M4 19h16"/><path d="M6 16v-1"/><path d="M9 16v-3"/><path d="M12 16v-6"/><path d="M15 16V8"/><path d="M18 16V5"/></svg>
+        </span>
+      </div>
+      <div class="stat-num" id="s-qb" style="color:#0284c7">0</div>
+    </div>
   </div>
 
   <div class="section-head" style="margin-top:40px">
@@ -995,6 +1008,20 @@
                 <button type="button" class="filter-chip" data-nsfw="disabled" onclick="switchNsfw('disabled')">
                   <span data-i18n="account.filterNsfwDisabled">关闭</span>
                   <span class="filter-chip-count" id="fc-nsfw-disabled">0</span>
+                </button>
+              </div>
+            </div>
+            <div class="filter-group">
+              <span class="filter-label" data-i18n="account.filterProviderLabel">提供者</span>
+              <div class="filter-chip-list" id="provider-filter-chips">
+                <button type="button" class="filter-chip active" data-provider="all" onclick="switchProvider('all')">
+                  <span data-i18n="account.filterProviderAll">所有提供者</span>
+                </button>
+                <button type="button" class="filter-chip" data-provider="grok_web" onclick="switchProvider('grok_web')">
+                  <span data-i18n="account.filterProviderWeb">Web (grok.com)</span>
+                </button>
+                <button type="button" class="filter-chip" data-provider="grok_build" onclick="switchProvider('grok_build')">
+                  <span data-i18n="account.filterProviderBuild">Build (CLI)</span>
                 </button>
               </div>
             </div>
@@ -1231,7 +1258,7 @@
 const PAGE_SIZE_KEY = 'admin.account.page_size';
 const PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000, 2000];
 
-let allTokens = [], curStatus = 'all', curNsfw = 'all', curPool = 'all', curPage = 1, pageSize = loadSavedPageSize();
+let allTokens = [], curStatus = 'all', curNsfw = 'all', curPool = 'all', curProvider = 'all', curPage = 1, pageSize = loadSavedPageSize();
 const sel = new Set();
 const refreshingTokens = new Set();
 let _cb = null;
@@ -1360,7 +1387,7 @@ function render() {
 }
 
 function getTokenView() {
-  const cacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}`;
+  const cacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}|${curProvider}`;
   if (_tokenViewCache && _tokenViewCacheKey === cacheKey) return _tokenViewCache;
 
   const stats = {
@@ -1376,11 +1403,12 @@ function getTokenView() {
     qe: 0,
     qh: 0,
     qc: 0,
+    qb: 0,
   };
   const statusCounts = { all: 0, active: 0, cooling: 0, invalid: 0, disabled: 0 };
   const nsfwCounts = { all: 0, enabled: 0, disabled: 0 };
   const poolCounts = new Map([['all', 0]]);
-  const poolsSet = new Set(['basic', 'super', 'heavy']);
+  const poolsSet = new Set(['basic', 'super', 'heavy', 'build']);
   const filteredItems = [];
 
   for (const token of allTokens) {
@@ -1393,6 +1421,7 @@ function getTokenView() {
     const matchesStatus = curStatus === 'all'
       || (curStatus === 'invalid' ? invalid : curStatus === 'disabled' ? disabled : token.status === curStatus);
     const matchesNsfw = curNsfw === 'all' || (curNsfw === 'enabled' ? nsfwEnabled : !nsfwEnabled);
+    const matchesProvider = curProvider === 'all' || (token.provider || 'grok_web') === curProvider;
 
     poolsSet.add(pool);
     const successCount = token.use_count || 0;
@@ -1405,6 +1434,7 @@ function getTokenView() {
     stats.qe += quota.expert?.remaining || 0;
     stats.qh += quota.heavy?.remaining || 0;
     stats.qc += quota.console?.remaining || 0;
+    stats.qb += quota.build?.remaining || 0;
 
     if (token.status === 'active') stats.active += 1;
     if (token.status === 'cooling') stats.cooling += 1;
@@ -1430,7 +1460,7 @@ function getTokenView() {
       poolCounts.set(pool, (poolCounts.get(pool) || 0) + 1);
     }
 
-    if (matchesPool && matchesStatus && matchesNsfw) filteredItems.push(token);
+    if (matchesPool && matchesStatus && matchesNsfw && matchesProvider) filteredItems.push(token);
   }
 
   if (curPool !== 'all' && !poolsSet.has(curPool)) {
@@ -1438,7 +1468,7 @@ function getTokenView() {
     return getTokenView();
   }
 
-  _tokenViewCacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}`;
+  _tokenViewCacheKey = `${_tokenViewVersion}|${curStatus}|${curNsfw}|${curPool}|${curProvider}`;
   _tokenViewCache = {
     stats,
     statusCounts,
@@ -1477,13 +1507,14 @@ function renderStats(view = getTokenView()) {
   $('s-calls', fmt(stats.calls));
   $('s-success', fmt(stats.success));
   $('s-rate', fmtRate(stats.success, stats.fail));
-  $('s-qa', fmt(stats.qa)); $('s-qf', fmt(stats.qf)); $('s-qe', fmt(stats.qe)); $('s-qh', fmt(stats.qh)); $('s-qc', fmt(stats.qc));
+  $('s-qa', fmt(stats.qa)); $('s-qf', fmt(stats.qf)); $('s-qe', fmt(stats.qe)); $('s-qh', fmt(stats.qh)); $('s-qc', fmt(stats.qc)); $('s-qb', fmt(stats.qb));
 }
 
 function renderFilters(view = getTokenView()) {
   renderStatusFilters(view);
   renderNsfwFilters(view);
   renderPoolFilters(view);
+  renderProviderFilters();
   syncFilterTrigger();
 }
 
@@ -1523,7 +1554,7 @@ function syncFilterTrigger() {
   const menu = document.getElementById('filter-menu');
   const trigger = document.getElementById('btn-filter');
   if (!menu || !trigger) return;
-  const active = curStatus !== 'all' || curPool !== 'all' || curNsfw !== 'all' || menu.classList.contains('open');
+  const active = curStatus !== 'all' || curPool !== 'all' || curNsfw !== 'all' || curProvider !== 'all' || menu.classList.contains('open');
   trigger.classList.toggle('is-active', active);
 }
 
@@ -1541,6 +1572,10 @@ function renderNsfwFilters(view = getTokenView()) {
   setFilterCount('fc-nsfw-enabled', view.nsfwCounts.enabled);
   setFilterCount('fc-nsfw-disabled', view.nsfwCounts.disabled);
   document.querySelectorAll('[data-nsfw]').forEach(el => el.classList.toggle('active', el.dataset.nsfw === curNsfw));
+}
+
+function renderProviderFilters() {
+  document.querySelectorAll('[data-provider]').forEach(el => el.classList.toggle('active', el.dataset.provider === curProvider));
 }
 
 function renderPoolFilters(view = getTokenView()) {
@@ -1673,6 +1708,7 @@ function qpills(q) {
     ['heavy',    'H', 'q-h', true],
     ['grok_4_3', 'B', 'q-b', false],
     ['console',  'C', 'q-c', false],
+    ['build',    'B', 'q-z', false],
   ];
   return modes.map(([m,l,c,showEmpty]) => {
     const win = q[m];
@@ -1711,6 +1747,15 @@ function switchPool(pool) {
     sel.clear();
     renderFilters();
     renderTable();
+  });
+}
+function switchProvider(provider) {
+  preserveScroll(() => {
+    curProvider = provider || 'all';
+    curPage = 1;
+    sel.clear();
+    invalidateTokenView();
+    render();
   });
 }
 function prevPage() { if (curPage > 1) { curPage--; renderTable(); } }

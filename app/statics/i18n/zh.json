@@ -169,6 +169,7 @@
     "statFast": "Fast 余额",
     "statExpert": "Expert 余额",
     "statHeavy": "Heavy 余额",
+    "statBuild": "构建余额",
     "filterStatusLabel": "状态",
     "filterNsfwLabel": "NSFW",
     "filterTypeLabel": "类型",
@@ -181,6 +182,10 @@
     "filterNsfwEnabled": "开启",
     "filterNsfwDisabled": "关闭",
     "filterTypeAll": "全部",
+    "filterProviderLabel": "提供者",
+    "filterProviderAll": "所有提供者",
+    "filterProviderWeb": "Web (grok.com)",
+    "filterProviderBuild": "Build (CLI)",
     "filter": "筛选",
     "export": "导出数据",
     "batchNsfw": "开启 NSFW",
@@ -296,13 +301,15 @@
       "autoRecommended": "自动检测（推荐）",
       "basic": "Basic",
       "super": "Super",
-      "heavy": "Heavy"
+      "heavy": "Heavy",
+      "build": "Build"
     },
     "mode": {
       "auto": "Auto",
       "fast": "Fast",
       "expert": "Expert",
       "heavy": "Heavy",
+      "build": "Build",
       "grok_4_3": "Grok 4.3 Beta"
     },
     "status": {
