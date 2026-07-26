@@ -8,10 +8,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
+
+from app.platform.config.snapshot import get_config
+from app.dataplane.proxy.adapters.session import normalize_proxy_url
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +93,51 @@ class DeviceFlowClient:
         self.client_version = client_version
         self._session = session
         self._own_session = session is None
+        self._proxy_url: str | None = (
+            None  # cache: None=unresolved, ""=no proxy, else=normalized URL
+        )
+        self._http_proxy: str | None = None  # cache: proxy param for requests
+
+    def _resolve_proxy_url(self) -> str | None:
+        """Resolve and cache normalized proxy URL from config."""
+        if self._proxy_url is not None:
+            return self._proxy_url or None
+        cfg = get_config()
+        raw = str(cfg.get_str("proxy.egress.proxy_url", ""))
+        normalized = normalize_proxy_url(raw) if raw else None
+        self._proxy_url = normalized or ""
+        return normalized
+
+    def _build_connector(self) -> tuple[aiohttp.TCPConnector, str | None]:
+        """Build connector and http_proxy following canonical proxy pattern.
+
+        Result is cached for the session lifetime — _ensure_session calls this
+        once and stores _http_proxy for _request to use without rebuilding.
+        """
+        proxy_url = self._resolve_proxy_url()
+        if not proxy_url:
+            return aiohttp.TCPConnector(), None
+
+        ssl_ctx = ssl.create_default_context()
+        cfg = get_config()
+        if cfg.get_bool("proxy.egress.skip_ssl_verify", False):
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        scheme = urlparse(proxy_url).scheme.lower()
+        if scheme.startswith("socks"):
+            from aiohttp_socks import ProxyConnector
+
+            return ProxyConnector.from_url(proxy_url, ssl=ssl_ctx), None
+        return aiohttp.TCPConnector(ssl=ssl_ctx), proxy_url
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            connector, self._http_proxy = self._build_connector()
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=60),
+            )
             self._own_session = True
         return self._session
 
@@ -106,10 +152,13 @@ class DeviceFlowClient:
 
         Manages session lifecycle: creates a session if none was provided
         and closes it when done (only for internally-created sessions).
+        Uses egress proxy if configured.
         """
         session = await self._ensure_session()
         try:
-            async with session.request(method, url, data=data, headers=headers) as resp:
+            async with session.request(
+                method, url, data=data, headers=headers, proxy=self._http_proxy
+            ) as resp:
                 body: dict[str, Any] = await resp.json()
                 if resp.status == 400:
                     error = body.get("error", "")

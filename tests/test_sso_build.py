@@ -7,13 +7,14 @@ import pytest
 from app.control.account.sso_build import convert_sso_to_build
 
 
-def _make_ctx_resp(data: dict) -> MagicMock:
+def _make_ctx_resp(data: dict, status: int = 200) -> MagicMock:
     """Create a mock aiohttp response context manager that returns JSON.
 
     aiohttp's session.post() is synchronous — it returns an async context manager,
     NOT a coroutine. So the mock must be a plain MagicMock with async __aenter__/__aexit__.
     """
     resp = MagicMock()
+    resp.status = status
     resp.json = AsyncMock(return_value=data)
     resp.__aenter__ = AsyncMock(return_value=resp)
     resp.__aexit__ = AsyncMock(return_value=False)
@@ -33,7 +34,7 @@ def _make_session(responses: list) -> MagicMock:
 async def test_convert_sso_to_build_invalid_token():
     """Invalid SSO token → device flow succeeds, token poll returns access_denied."""
     device_resp = _make_ctx_resp({"device_code": "dc"})
-    denied_resp = _make_ctx_resp({"error": "access_denied"})
+    denied_resp = _make_ctx_resp({"error": "access_denied"}, status=400)
 
     with patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls:
         mock_cls.return_value = _make_session([device_resp, denied_resp])
@@ -45,7 +46,7 @@ async def test_convert_sso_to_build_invalid_token():
 @pytest.mark.asyncio
 async def test_convert_sso_to_build_success():
     """Valid SSO token → returns credentials dict."""
-    device_resp = _make_ctx_resp({"device_code": "dc-123"})
+    device_resp = _make_ctx_resp({"device_code": "dc-123"}, status=200)
     token_resp = _make_ctx_resp(
         {
             "access_token": "at-ok",
@@ -70,7 +71,7 @@ async def test_convert_sso_to_build_success():
 async def test_convert_sso_to_build_timeout():
     """Polling never resolves → TimeoutError."""
     device_resp = _make_ctx_resp({"device_code": "dc"})
-    pending_resp = _make_ctx_resp({"error": "authorization_pending"})
+    pending_resp = _make_ctx_resp({"error": "authorization_pending"}, status=400)
 
     with patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls:
         mock_cls.return_value = _make_session([device_resp] + [pending_resp] * 60)

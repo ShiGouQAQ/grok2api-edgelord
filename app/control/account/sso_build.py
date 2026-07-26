@@ -6,11 +6,14 @@ automatically complete the Build OAuth Device Flow.
 
 import asyncio
 import logging
+import ssl
+from urllib.parse import urlparse
 
 import aiohttp
 
 from app.platform.auth.oauth_device import DeviceFlowClient
 from app.platform.config.snapshot import get_config
+from app.dataplane.proxy.adapters.session import normalize_proxy_url
 
 CLIENT_ID = DeviceFlowClient.CLIENT_ID
 DEVICE_URL = DeviceFlowClient.DEVICE_URL
@@ -28,7 +31,14 @@ async def convert_sso_to_build(sso_token: str) -> dict[str, str]:
     Returns a dict with access_token, refresh_token, id_token, expires_in.
     """
     cfg = get_config()
-    proxy_url = str(cfg.get_str("proxy.egress.proxy_url", "")) or None
+    raw_proxy = str(cfg.get_str("proxy.egress.proxy_url", ""))
+    proxy_url = normalize_proxy_url(raw_proxy) if raw_proxy else None
+
+    # Canonical SSL context: respect skip_ssl_verify config
+    ssl_ctx = ssl.create_default_context()
+    if proxy_url and cfg.get_bool("proxy.egress.skip_ssl_verify", False):
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
 
     headers = {
         "Cookie": f"sso={sso_token}",
@@ -36,7 +46,18 @@ async def convert_sso_to_build(sso_token: str) -> dict[str, str]:
         "Origin": "https://grok.com",
         "Referer": "https://grok.com/",
     }
-    connector = aiohttp.TCPConnector(ssl=False) if proxy_url else None
+
+    # For SOCKS proxies, use ProxyConnector; for HTTP proxies, pass proxy= param
+    scheme = urlparse(proxy_url).scheme.lower() if proxy_url else ""
+    if proxy_url and scheme.startswith("socks"):
+        from aiohttp_socks import ProxyConnector
+
+        connector = ProxyConnector.from_url(proxy_url, ssl=ssl_ctx)
+        http_proxy = None
+    else:
+        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+        http_proxy = proxy_url
+
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(
         headers=headers, connector=connector, timeout=timeout
@@ -49,11 +70,18 @@ async def convert_sso_to_build(sso_token: str) -> dict[str, str]:
                 "scope": "openid profile email offline_access grok-cli:access api:access",
                 "referrer": "grok-build",
             },
-            proxy=proxy_url,
+            proxy=http_proxy,
         ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(
+                    f"Device code request failed ({resp.status}): {(await resp.text())[:200]}"
+                )
             device = await resp.json()
 
-        device_code = device["device_code"]
+        device_code = device.get("device_code")
+        if not device_code:
+            raise ValueError(f"No device_code in response: {device}")
+        poll_interval = int(device.get("interval", 5))
 
         # 2. Poll for token (SSO session should allow auto-approval)
         for attempt in range(60):
@@ -64,8 +92,12 @@ async def convert_sso_to_build(sso_token: str) -> dict[str, str]:
                     "client_id": CLIENT_ID,
                     "device_code": device_code,
                 },
-                proxy=proxy_url,
+                proxy=http_proxy,
             ) as resp:
+                if resp.status not in (200, 400):
+                    raise RuntimeError(
+                        f"Token poll failed ({resp.status}): {(await resp.text())[:200]}"
+                    )
                 body = await resp.json()
                 if "access_token" in body:
                     logger.info(
@@ -79,8 +111,11 @@ async def convert_sso_to_build(sso_token: str) -> dict[str, str]:
                         "expires_in": str(body.get("expires_in", 3600)),
                     }
                 error = body.get("error", "")
-                if error in ("access_denied", "expired_token"):
+                if error == "slow_down":
+                    poll_interval = min(poll_interval + 2, 30)
+                elif error in ("access_denied", "expired_token"):
                     raise PermissionError(f"SSO→Build conversion denied: {error}")
-            await asyncio.sleep(2)
+                # authorization_pending or unknown: keep polling
+            await asyncio.sleep(poll_interval)
 
         raise TimeoutError("SSO→Build conversion timed out after 120s")
