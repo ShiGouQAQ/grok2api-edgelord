@@ -1057,6 +1057,12 @@
       <button type="button" onclick="deleteAllInvalid()" id="btn-delete-invalid-all" class="toolbar-icon-btn toolbar-icon-btn-danger">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 7h14"/><path d="M9 7V4h6v3"/><path d="M8 10v7"/><path d="M12 10v7"/><path d="M16 10v7"/><path d="M7 7l1 13h8l1-13"/><path d="M12 2v2"/></svg>
       </button>
+      <button type="button" onclick="batchRefreshBuildBilling()" id="btn-refresh-build-billing" class="toolbar-icon-btn" style="display:none" data-tip="Refresh Build Billing">
+        <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48 2.83-2.83"/></svg>
+      </button>
+      <button type="button" onclick="batchConvertToBuild()" id="btn-convert-build" class="toolbar-icon-btn" style="display:none" data-tip="Convert to Build">
+        <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+      </button>
       <button type="button" onclick="batchNSFW()" id="btn-nsfw" class="row-nsfw-btn" style="display:none">
         <svg viewBox="0 0 20 20" aria-hidden="true">
           <circle cx="10" cy="10" r="7.25"/>
@@ -1274,6 +1280,8 @@ function applyAccountI18n() {
     ['btn-export', 'account.export', '导出数据'],
     ['btn-nsfw-all', 'account.batchNsfwAll', '全部开启 NSFW'],
     ['btn-refresh-all', 'account.refreshAllManageable', '重新测试全部正常账户'],
+    ['btn-refresh-build-billing', 'build.billing.refresh', '刷新 Build 额度'],
+    ['btn-convert-build', 'build.convertAction', '转为构建账号'],
     ['btn-delete-invalid-all', 'account.deleteInvalidAll', '删除全部异常'],
     ['btn-nsfw', 'account.batchNsfw', '开启 NSFW'],
     ['btn-refresh', 'account.batchRefresh', '刷新选中'],
@@ -1625,10 +1633,19 @@ function renderTable(view = getTokenView()) {
   const prev = document.getElementById('btn-prev'), next = document.getElementById('btn-next');
   prev.disabled = curPage <= 1; next.disabled = curPage >= pages;
   updateBatchBtns();
-  // Toggle billing column visibility based on provider filter
+  // Toggle billing column and toolbar buttons based on provider filter
   const showBilling = curProvider === 'grok_build';
+  const showWeb = curProvider === 'grok_web' || curProvider === 'all';
   document.querySelectorAll('.build-billing-col').forEach(el => {
     el.style.display = showBilling ? '' : 'none';
+  });
+  ['btn-refresh-build-billing'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = showBilling && sel.size === 0 ? '' : 'none';
+  });
+  ['btn-convert-build'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = showWeb && sel.size > 0 ? '' : 'none';
   });
 }
 
@@ -1697,11 +1714,15 @@ function rowHtml(t) {
       <button onclick="refreshOne('${xe(t.token)}')" class="row-icon-btn${isRefreshing ? ' is-loading' : ''}" data-tip="${xe(isRefreshing ? tr('account.refreshing', { n: 1 }, '正在刷新 1 个账户…') : tr('account.actionRefresh', null, '刷新 Usage'))}" aria-label="${xe(tr('account.actionRefresh', null, '刷新 Usage'))}">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg>
       </button>
-      ${(t.provider || 'grok_web') === 'grok_build'
+      ${t.provider === 'grok_build'
         ? `<button onclick="refreshBuildBilling('${xe(t.token)}')" class="row-icon-btn" data-tip="${xe(tr('build.billing.refresh', null, '刷新额度'))}" aria-label="${xe(tr('build.billing.refresh', null, '刷新额度'))}">
             <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48 2.83-2.83"/></svg>
           </button>`
-        : ''}
+        : (t.provider || 'grok_web') !== 'grok_build'
+          ? `<button onclick="convertOneToBuild('${xe(t.token)}')" class="row-icon-btn" data-tip="${xe(tr('build.convertAction', null, '转为构建'))}" aria-label="${xe(tr('build.convertAction', null, '转为构建'))}">
+              <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            </button>`
+          : ''}
       <button onclick="openEdit('${xe(t.token)}')" class="row-icon-btn" data-tip="${xe(tr('account.actionEdit', null, '编辑'))}" aria-label="${xe(tr('account.actionEdit', null, '编辑'))}">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="m4 20 4.5-1 9.5-9.5-3.5-3.5L5 15.5z"/><path d="m13.5 5.5 3.5 3.5"/></svg>
       </button>
@@ -2203,6 +2224,60 @@ async function refreshBuildBilling(token) {
   } catch (e) {
     showToast(`${tr('build.billing.refreshFailed', null, '刷新额度失败')}: ${e.message}`, 'error');
   }
+}
+
+async function batchRefreshBuildBilling() {
+  const manageable = allTokens.filter(t => t.provider === 'grok_build' && !t.is_deleted).map(t => t.token);
+  if (!manageable.length) return showToast(tr('build.billing.noAccounts', null, '没有可刷新的 Build 账号'), 'error');
+  try {
+    showToast(tr('build.billing.refreshing', null, '刷新额度中…'), 'info');
+    await _api('POST', '/tokens/build/refresh-billing', { tokens: manageable });
+    showToast(tr('build.billing.refreshDone', null, '额度已刷新'), 'success');
+    load();
+  } catch (e) {
+    showToast(`${tr('build.billing.refreshFailed', null, '刷新额度失败')}: ${e.message}`, 'error');
+  }
+}
+
+async function convertOneToBuild(token) {
+  if (!token) return;
+  openConfirm(tr('build.convertConfirm', null, '转为构建账号'),
+    tr('build.convertConfirmBody', { token: mask(token) }, `确认将 <code>${mask(token)}</code> 转为构建账号？<br><small style="color:var(--fg-muted)">该操作会使用 SSO 凭证获取 Build OAuth 令牌。</small>`),
+    async () => {
+      try {
+        showToast(tr('build.converting', null, '转换中…'), 'info');
+        const r = await _api('POST', '/tokens/build-convert', { sso_tokens: [token] });
+        if (r.success > 0) {
+          showToast(tr('build.convertDone', null, '转换完成'), 'success');
+        } else {
+          showToast(tr('build.convertFailed', null, '转换失败') + (r.errors?.[0] ? ': ' + r.errors[0] : ''), 'error');
+        }
+        load();
+      } catch (e) {
+        showToast(`${tr('build.convertFailed', null, '转换失败')}: ${e.message}`, 'error');
+      }
+    });
+}
+
+async function batchConvertToBuild() {
+  if (!sel.size) return;
+  const tokens = [...sel];
+  openConfirm(tr('build.convertBatchTitle', null, '批量转为构建'),
+    tr('build.convertBatchBody', { n: tokens.length }, `确认将选中的 <b>${tokens.length}</b> 个 Web 账号转为构建账号？`),
+    async () => {
+      try {
+        showToast(tr('build.converting', { n: tokens.length }, `正在转换 ${tokens.length} 个账号…`), 'info');
+        const r = await _api('POST', '/tokens/build-convert', { sso_tokens: tokens });
+        const msg = r.success > 0
+          ? tr('build.convertDone', { ok: r.success, fail: r.failed }, `转换完成：成功 ${r.success}，失败 ${r.failed}`)
+          : tr('build.convertFailed', null, '转换失败');
+        showToast(msg, r.failed > 0 ? 'warning' : 'success');
+        sel.clear();
+        load();
+      } catch (e) {
+        showToast(`${tr('build.convertFailed', null, '转换失败')}: ${e.message}`, 'error');
+      }
+    });
 }
 
 async function setDisabled(token, disabled) {
