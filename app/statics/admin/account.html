@@ -606,6 +606,79 @@
     .pagi-btn.on     { background:var(--fg); color:#fff }
     .pagi-btn:disabled { opacity:.35; pointer-events:none }
 
+    /* Build accounts section */
+    .build-section {
+      margin-top:24px;
+      background:#fff;
+      border-radius:12px;
+      padding:16px;
+    }
+    .build-section .section-title-row {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin-bottom:12px;
+    }
+    .build-import-row {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin-bottom:12px;
+    }
+    .build-device-info {
+      margin-top:12px;
+      padding:12px 16px;
+      border-radius:10px;
+      background:#f9f7f3;
+      border:1px solid #ece3d6;
+    }
+    .build-device-info .field-row {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin-bottom:6px;
+      font-size:13px;
+    }
+    .build-device-info .field-label {
+      font-weight:600;
+      color:#222;
+      min-width:100px;
+    }
+    .build-device-info .field-value {
+      color:#444;
+      font-family:ui-monospace,monospace;
+      font-size:12px;
+      word-break:break-all;
+    }
+    .build-device-info a {
+      color:#111;
+      text-decoration:underline;
+    }
+    .build-polling {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin-top:10px;
+      font-size:12px;
+      color:#8a8a8a;
+    }
+    .build-polling .spinner {
+      width:14px;
+      height:14px;
+      border:2px solid #ddd;
+      border-top-color:#111;
+      border-radius:50%;
+      animation:spin .85s linear infinite;
+    }
+    .build-accounts-list {
+      margin-top:12px;
+    }
+    .build-accounts-list .empty {
+      font-size:13px;
+      color:#8a8a8a;
+      padding:8px 0;
+    }
+
     /* Dialogs */
     #modal-import .modal,
     #modal-import-file .modal { width:min(440px,92vw) }
@@ -1008,6 +1081,37 @@
       </thead>
       <tbody id="tbody"></tbody>
     </table>
+  </div>
+
+  <!-- ── Build Accounts Section ─────────────────────────────────────────────── -->
+  <div class="build-section">
+    <div class="section-title-row">
+      <div class="section-title" data-i18n="build.title">Build</div>
+    </div>
+    <div class="build-import-row">
+      <button onclick="startBuildImport()" class="page-action-btn page-action-btn-primary" id="btn-build-import">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span data-i18n="build.importAccount">Import Build Account</span>
+      </button>
+    </div>
+    <div id="build-device-info" class="build-device-info" style="display:none">
+      <div class="field-row">
+        <span class="field-label" data-i18n="build.deviceCode">Authorization Code</span>
+        <span class="field-value" id="build-user-code"></span>
+        <button onclick="copyBuildCode()" class="row-icon-btn" data-tip="Copy" aria-label="Copy">
+          <svg viewBox="0 0 24 24" stroke-width="1.8"><rect x="9" y="9" width="10" height="10" rx="2"/><path d="M7 15H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+      </div>
+      <div class="field-row">
+        <span class="field-label" data-i18n="build.verificationUri">Verify at</span>
+        <span class="field-value"><a id="build-verify-link" href="#" target="_blank" rel="noopener"></a></span>
+      </div>
+      <div class="build-polling" id="build-polling-status" style="display:none">
+        <div class="spinner"></div>
+        <span data-i18n="build.polling">Waiting for authorization…</span>
+      </div>
+    </div>
+    <div class="build-accounts-list" id="build-accounts-list"></div>
   </div>
 
 </main>
@@ -2257,6 +2361,58 @@ document.addEventListener('click', (e) => {
   const enabled = btn.getAttribute('data-nsfw-enabled') === 'true';
   if (token) nsfwOne(token, enabled);
 });
+
+// ── Build OAuth Device Flow ──────────────────────────────────────────────
+let _buildPollTimer = null;
+
+async function startBuildImport() {
+  const btn = document.getElementById('btn-build-import');
+  btn.disabled = true;
+  try {
+    const data = await _api('POST', '/tokens/build-start');
+    const info = document.getElementById('build-device-info');
+    info.style.display = '';
+    document.getElementById('build-user-code').textContent = data.user_code || '—';
+    const link = document.getElementById('build-verify-link');
+    link.href = data.verification_uri || '#';
+    link.textContent = data.verification_uri || '—';
+    document.getElementById('build-polling-status').style.display = '';
+    _pollBuildAuth(data.device_code, data.interval || 5);
+  } catch (e) {
+    showToast(`Build import failed: ${e.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function _pollBuildAuth(deviceCode, intervalSec) {
+  if (_buildPollTimer) clearInterval(_buildPollTimer);
+  _buildPollTimer = setInterval(async () => {
+    try {
+      const res = await _api('POST', '/tokens/build-poll', { device_code: deviceCode });
+      if (res.status === 'success' || res.status === 'complete') {
+        clearInterval(_buildPollTimer);
+        _buildPollTimer = null;
+        document.getElementById('build-polling-status').style.display = 'none';
+        document.getElementById('build-device-info').style.display = 'none';
+        showToast(tr('build.importDone', null, 'Build account imported'), 'success');
+        load();
+      } else if (res.status === 'expired' || res.status === 'denied') {
+        clearInterval(_buildPollTimer);
+        _buildPollTimer = null;
+        document.getElementById('build-polling-status').style.display = 'none';
+        showToast(tr('build.importFailed', null, 'Authorization expired or denied'), 'error');
+      }
+    } catch (e) {
+      // Keep polling on transient errors
+    }
+  }, (intervalSec || 5) * 1000);
+}
+
+function copyBuildCode() {
+  const code = document.getElementById('build-user-code').textContent;
+  if (code && code !== '—') copy(code);
+}
 </script>
 </body>
 </html>

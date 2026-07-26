@@ -804,6 +804,15 @@ const SCHEMA_DEF = [
         ]
       },
       {
+        title: 'Build Provider Configuration', titleKey: 'config.schema.groups.buildProvider',
+        section: 'build',
+        fields: [
+          { key: 'client_version', label: 'Client Version', labelKey: 'config.schema.fields.buildClientVersion.label', type: 'text', desc: 'Build CLI client version identifier.', descKey: 'config.schema.fields.buildClientVersion.desc' },
+          { key: 'token_auth', label: 'Token Auth', labelKey: 'config.schema.fields.buildTokenAuth.label', type: 'text', desc: 'Build token authentication header value.', descKey: 'config.schema.fields.buildTokenAuth.desc' },
+          { key: 'prefer_free_build', label: 'Prefer Free Tier', labelKey: 'config.schema.fields.buildPreferFree.label', type: 'bool', desc: 'When enabled, prefer free tier Build accounts when available.', descKey: 'config.schema.fields.buildPreferFree.desc' },
+        ]
+      },
+      {
         title: '请求超时设置', titleKey: 'config.schema.groups.timeouts',
         section: 'chat',
         fields: [

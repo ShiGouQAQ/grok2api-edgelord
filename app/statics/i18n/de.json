@@ -355,7 +355,8 @@
         "timeouts": "Zeitlimits",
         "imageProtocol": "NSFW und Bild-Streaming",
         "logging": "Protokollierung",
-        "localMediaCache": "Lokaler Medien-Cache"
+        "localMediaCache": "Lokaler Medien-Cache",
+        "buildProvider": "Build Provider"
       },
       "options": {
         "imageFormat": {
@@ -443,7 +444,10 @@
         "streamTimeout": { "label": "Streaming-Leerlauf-Timeout (s)" },
         "interRoundWait": { "label": "Wartezeit zwischen Runden (s)" },
         "fileLogLevel": { "label": "Datei-Protokollebene", "desc": "Mindeststufe für Protokolldateien, unabhängig von der Konsole konfigurierbar. Standard: INFO." },
-        "logMaxFiles": { "label": "Protokoll-Aufbewahrung (Tage)", "desc": "Maximale Anzahl täglicher Protokolldateien bei der Rotation. Standard: 7." }
+        "logMaxFiles": { "label": "Protokoll-Aufbewahrung (Tage)", "desc": "Maximale Anzahl täglicher Protokolldateien bei der Rotation. Standard: 7." },
+        "buildClientVersion": { "label": "Client Version", "desc": "Build CLI client version identifier." },
+        "buildTokenAuth": { "label": "Token Auth", "desc": "Build token authentication header value." },
+        "buildPreferFree": { "label": "Prefer Free Tier", "desc": "When enabled, prefer free tier Build accounts when available." }
       }
     }
   },
@@ -556,5 +560,21 @@
     "confirmClear": "Möchten Sie wirklich alle Verlaufseinträge löschen?",
     "clearSuccess": "Verlaufseinträge gelöscht",
     "clearFailed": "Löschen fehlgeschlagen"
+  },
+  "build": {
+    "title": "Build",
+    "importAccount": "Import Build Account",
+    "deviceCode": "Authorization Code",
+    "verificationUri": "Verify at",
+    "routeMode": "Route Mode",
+    "billing": "Billing",
+    "tokenExpiry": "Token Expiry",
+    "configTitle": "Build Provider Configuration",
+    "clientVersion": "Client Version",
+    "tokenAuth": "Token Auth",
+    "preferFree": "Prefer Free Tier",
+    "polling": "Waiting for authorization…",
+    "importDone": "Build account imported",
+    "importFailed": "Authorization expired or denied"
   }
 }

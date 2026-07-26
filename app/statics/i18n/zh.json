@@ -360,7 +360,8 @@
         "timeouts": "请求超时设置",
         "imageProtocol": "NSFW 与图像协议",
         "logging": "日志配置",
-        "localMediaCache": "本地媒体缓存"
+        "localMediaCache": "本地媒体缓存",
+        "buildProvider": "构建提供者"
       },
       "options": {
         "imageFormat": {
@@ -632,6 +633,18 @@
         "logMaxFiles": {
           "label": "日志保留天数",
           "desc": "按天轮转时最多保留的日志文件数量。默认 7。"
+        },
+        "buildClientVersion": {
+          "label": "客户端版本",
+          "desc": "Build CLI 客户端版本标识。"
+        },
+        "buildTokenAuth": {
+          "label": "Token Auth",
+          "desc": "Build 令牌认证头值。"
+        },
+        "buildPreferFree": {
+          "label": "优先免费",
+          "desc": "启用后，在可用时优先使用免费层级的 Build 账号。"
         }
       }
     }
@@ -745,5 +758,21 @@
     "confirmClear": "确定要清空所有历史记录吗？",
     "clearSuccess": "历史记录已清空",
     "clearFailed": "清空失败"
+  },
+  "build": {
+    "title": "构建",
+    "importAccount": "导入构建账号",
+    "deviceCode": "授权码",
+    "verificationUri": "验证地址",
+    "routeMode": "路由模式",
+    "billing": "计费",
+    "tokenExpiry": "令牌过期",
+    "configTitle": "构建提供者配置",
+    "clientVersion": "客户端版本",
+    "tokenAuth": "Token Auth",
+    "preferFree": "优先免费",
+    "polling": "等待授权中…",
+    "importDone": "构建账号已导入",
+    "importFailed": "授权已过期或被拒绝"
   }
 }

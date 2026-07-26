@@ -355,7 +355,8 @@
         "timeouts": "Délais d’attente",
         "imageProtocol": "NSFW et streaming d'images",
         "logging": "Journalisation",
-        "localMediaCache": "Cache multimédia local"
+        "localMediaCache": "Cache multimédia local",
+        "buildProvider": "Build Provider"
       },
       "options": {
         "imageFormat": {
@@ -443,7 +444,10 @@
         "streamTimeout": { "label": "Délai d’inactivité du streaming (s)" },
         "interRoundWait": { "label": "Attente inter-cycle (s)" },
         "fileLogLevel": { "label": "Niveau de journal fichier", "desc": "Niveau minimum écrit dans les fichiers de journal, configurable indépendamment de la console. Par défaut : INFO." },
-        "logMaxFiles": { "label": "Rétention des journaux (jours)", "desc": "Nombre maximum de fichiers de journal quotidiens conservés lors de la rotation. Par défaut : 7." }
+        "logMaxFiles": { "label": "Rétention des journaux (jours)", "desc": "Nombre maximum de fichiers de journal quotidiens conservés lors de la rotation. Par défaut : 7." },
+        "buildClientVersion": { "label": "Client Version", "desc": "Build CLI client version identifier." },
+        "buildTokenAuth": { "label": "Token Auth", "desc": "Build token authentication header value." },
+        "buildPreferFree": { "label": "Prefer Free Tier", "desc": "When enabled, prefer free tier Build accounts when available." }
       }
     }
   },
@@ -556,5 +560,21 @@
     "confirmClear": "Êtes-vous sûr de vouloir effacer tous les enregistrements d'historique ?",
     "clearSuccess": "Enregistrements d'historique effacés",
     "clearFailed": "Échec de l'effacement"
+  },
+  "build": {
+    "title": "Build",
+    "importAccount": "Import Build Account",
+    "deviceCode": "Authorization Code",
+    "verificationUri": "Verify at",
+    "routeMode": "Route Mode",
+    "billing": "Billing",
+    "tokenExpiry": "Token Expiry",
+    "configTitle": "Build Provider Configuration",
+    "clientVersion": "Client Version",
+    "tokenAuth": "Token Auth",
+    "preferFree": "Prefer Free Tier",
+    "polling": "Waiting for authorization…",
+    "importDone": "Build account imported",
+    "importFailed": "Authorization expired or denied"
   }
 }

@@ -360,7 +360,8 @@
         "timeouts": "Request Timeouts",
         "imageProtocol": "NSFW and Image Streaming",
         "logging": "Logging",
-        "localMediaCache": "Local Media Cache"
+        "localMediaCache": "Local Media Cache",
+        "buildProvider": "Build Provider"
       },
       "options": {
         "imageFormat": {
@@ -632,6 +633,18 @@
         "logMaxFiles": {
           "label": "Log Retention (days)",
           "desc": "Maximum number of daily log files to keep during rotation. Default: 7."
+        },
+        "buildClientVersion": {
+          "label": "Client Version",
+          "desc": "Build CLI client version identifier."
+        },
+        "buildTokenAuth": {
+          "label": "Token Auth",
+          "desc": "Build token authentication header value."
+        },
+        "buildPreferFree": {
+          "label": "Prefer Free Tier",
+          "desc": "When enabled, prefer free tier Build accounts when available."
         }
       }
     }
@@ -745,5 +758,21 @@
     "confirmClear": "Are you sure you want to clear all history records?",
     "clearSuccess": "History records cleared",
     "clearFailed": "Clear failed"
+  },
+  "build": {
+    "title": "Build",
+    "importAccount": "Import Build Account",
+    "deviceCode": "Authorization Code",
+    "verificationUri": "Verify at",
+    "routeMode": "Route Mode",
+    "billing": "Billing",
+    "tokenExpiry": "Token Expiry",
+    "configTitle": "Build Provider Configuration",
+    "clientVersion": "Client Version",
+    "tokenAuth": "Token Auth",
+    "preferFree": "Prefer Free Tier",
+    "polling": "Waiting for authorization…",
+    "importDone": "Build account imported",
+    "importFailed": "Authorization expired or denied"
   }
 }

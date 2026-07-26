@@ -355,7 +355,8 @@
         "timeouts": "リクエストタイムアウト",
         "imageProtocol": "NSFW と画像ストリーミング",
         "logging": "ログ設定",
-        "localMediaCache": "ローカルメディアキャッシュ"
+        "localMediaCache": "ローカルメディアキャッシュ",
+        "buildProvider": "Build Provider"
       },
       "options": {
         "imageFormat": {
@@ -443,7 +444,10 @@
         "streamTimeout": { "label": "ストリーミング待機タイムアウト（秒）" },
         "interRoundWait": { "label": "ラウンド間待機時間（秒）" },
         "fileLogLevel": { "label": "ファイルログレベル", "desc": "ログファイルに書き込む最低レベル。コンソールとは独立して設定できます。デフォルト: INFO。" },
-        "logMaxFiles": { "label": "ログ保持日数", "desc": "日次ローテーション時に保持するログファイルの最大数。デフォルト: 7。" }
+        "logMaxFiles": { "label": "ログ保持日数", "desc": "日次ローテーション時に保持するログファイルの最大数。デフォルト: 7。" },
+        "buildClientVersion": { "label": "Client Version", "desc": "Build CLI client version identifier." },
+        "buildTokenAuth": { "label": "Token Auth", "desc": "Build token authentication header value." },
+        "buildPreferFree": { "label": "Prefer Free Tier", "desc": "When enabled, prefer free tier Build accounts when available." }
       }
     }
   },
@@ -556,5 +560,21 @@
     "confirmClear": "すべての履歴レコードをクリアしてもよろしいですか？",
     "clearSuccess": "履歴レコードをクリアしました",
     "clearFailed": "クリア失敗"
+  },
+  "build": {
+    "title": "Build",
+    "importAccount": "Import Build Account",
+    "deviceCode": "Authorization Code",
+    "verificationUri": "Verify at",
+    "routeMode": "Route Mode",
+    "billing": "Billing",
+    "tokenExpiry": "Token Expiry",
+    "configTitle": "Build Provider Configuration",
+    "clientVersion": "Client Version",
+    "tokenAuth": "Token Auth",
+    "preferFree": "Prefer Free Tier",
+    "polling": "Waiting for authorization…",
+    "importDone": "Build account imported",
+    "importFailed": "Authorization expired or denied"
   }
 }
