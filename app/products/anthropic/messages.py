@@ -454,6 +454,22 @@ async def create(
         )
 
     # -------------------------------------------------------------------------
+    # Build 模型路由 — 走 cli-chat-proxy.grok.com，输出转为 Anthropic Messages 格式
+    # -------------------------------------------------------------------------
+    if spec.is_build():
+        from .build_messages import create as build_messages_create
+
+        return await build_messages_create(
+            model=model,
+            messages=internal_messages,
+            stream=stream,
+            emit_think=emit_think,
+            temperature=temperature,
+            top_p=top_p,
+            msg_id=msg_id,
+        )
+
+    # -------------------------------------------------------------------------
     # Streaming (grok.com path)
     # -------------------------------------------------------------------------
     async def _run_stream() -> AsyncGenerator[str, None]:

@@ -326,6 +326,26 @@ async def create(
         )
 
     # -------------------------------------------------------------------------
+    # Build 模型路由 — 走 cli-chat-proxy.grok.com/v1/responses
+    # -------------------------------------------------------------------------
+    if spec.is_build():
+        from .build_responses import create as build_responses_create
+
+        return await build_responses_create(
+            model=model,
+            messages=messages,
+            stream=stream,
+            emit_think=emit_think,
+            temperature=temperature,
+            top_p=top_p,
+            response_id=response_id,
+            reasoning_id=reasoning_id,
+            message_id=message_id,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+
+    # -------------------------------------------------------------------------
     # Streaming (grok.com path)
     # -------------------------------------------------------------------------
     async def _run_stream() -> AsyncGenerator[str, None]:

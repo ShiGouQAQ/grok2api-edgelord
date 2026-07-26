@@ -519,6 +519,22 @@ async def completions(
         )
     # ─────────────────────────────────────────────────────────────────────────
 
+    # ── Build 路由 (cli-chat-proxy.grok.com/v1/responses) ────────────────────
+    if spec.is_build():
+        from .build_chat import completions as build_completions
+
+        return await build_completions(
+            model=model,
+            messages=messages,
+            stream=is_stream,
+            emit_think=emit_think,
+            temperature=temperature,
+            top_p=top_p,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+    # ─────────────────────────────────────────────────────────────────────────
+
     message, files = _extract_message(messages)
     if not message.strip():
         raise UpstreamError("Empty message after extraction", status=400)

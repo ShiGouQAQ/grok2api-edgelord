@@ -73,7 +73,6 @@ _CODEX_CONTEXT_WINDOWS: dict[str, int] = {
     "grok-4.3": 131_072,
     "grok-4.20": 131_072,
     "grok-imagine": 0,
-    "grok-build": 2_000_000,
 }
 
 _CODEX_REASONING_MODELS: frozenset[str] = frozenset(
@@ -87,14 +86,12 @@ _CODEX_REASONING_MODELS: frozenset[str] = frozenset(
         "grok-4.20-0309-reasoning-super",
         "grok-4.20-0309-reasoning-heavy",
         "grok-4.20-0309-reasoning-console",
-        "grok-build-console",
     }
 )
 
 _CODEX_REASONING_LEVELS: dict[str, list[str]] = {
     "default": ["low", "medium", "high"],
     "reasoning": ["low", "medium", "high", "xhigh"],
-    "build": ["low", "medium", "high"],
 }
 
 _CODEX_MEDIA_MODELS: frozenset[str] = frozenset(
@@ -118,8 +115,6 @@ def _codex_context_window(model_name: str) -> int:
 def _codex_reasoning_levels(model_name: str) -> list[str]:
     if model_name in _CODEX_REASONING_MODELS or "reasoning" in model_name:
         return _CODEX_REASONING_LEVELS["reasoning"]
-    if model_name.startswith("grok-build"):
-        return _CODEX_REASONING_LEVELS["build"]
     return _CODEX_REASONING_LEVELS["default"]
 
 
