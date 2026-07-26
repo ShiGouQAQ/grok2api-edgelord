@@ -10,6 +10,7 @@ import logging
 import aiohttp
 
 from app.platform.auth.oauth_device import DeviceFlowClient
+from app.platform.config.snapshot import get_config
 
 CLIENT_ID = DeviceFlowClient.CLIENT_ID
 DEVICE_URL = DeviceFlowClient.DEVICE_URL
@@ -26,13 +27,20 @@ async def convert_sso_to_build(sso_token: str) -> dict[str, str]:
 
     Returns a dict with access_token, refresh_token, id_token, expires_in.
     """
+    cfg = get_config()
+    proxy_url = str(cfg.get_str("proxy.egress.proxy_url", "")) or None
+
     headers = {
         "Cookie": f"sso={sso_token}",
         "User-Agent": "grok-shell/0.2.111",
         "Origin": "https://grok.com",
         "Referer": "https://grok.com/",
     }
-    async with aiohttp.ClientSession(headers=headers) as session:
+    connector = aiohttp.TCPConnector(ssl=False) if proxy_url else None
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(
+        headers=headers, connector=connector, timeout=timeout
+    ) as session:
         # 1. Start device flow
         async with session.post(
             DEVICE_URL,
@@ -41,6 +49,7 @@ async def convert_sso_to_build(sso_token: str) -> dict[str, str]:
                 "scope": "openid profile email offline_access grok-cli:access api:access",
                 "referrer": "grok-build",
             },
+            proxy=proxy_url,
         ) as resp:
             device = await resp.json()
 
@@ -55,6 +64,7 @@ async def convert_sso_to_build(sso_token: str) -> dict[str, str]:
                     "client_id": CLIENT_ID,
                     "device_code": device_code,
                 },
+                proxy=proxy_url,
             ) as resp:
                 body = await resp.json()
                 if "access_token" in body:

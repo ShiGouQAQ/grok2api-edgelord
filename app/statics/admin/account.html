@@ -2247,17 +2247,16 @@ async function convertOneToBuild(token) {
   openConfirm(tr('build.convertConfirm', null, '转为构建账号'),
     tr('build.convertConfirmBody', { token: mask(token) }, `确认将 <code>${mask(token)}</code> 转为构建账号？<br><small style="color:var(--fg-muted)">该操作会使用 SSO 凭证获取 Build OAuth 令牌。</small>`),
     async () => {
+      const progress = showProgressToast(tr('build.converting', null, '转换中…'));
       try {
-        showToast(tr('build.converting', null, '转换中…'), 'info');
         const r = await _api('POST', '/tokens/build-convert', { sso_tokens: [token] });
-        if (r.success > 0) {
-          showToast(tr('build.convertDone', null, '转换完成'), 'success');
-        } else {
-          showToast(tr('build.convertFailed', null, '转换失败') + (r.errors?.[0] ? ': ' + r.errors[0] : ''), 'error');
-        }
+        const msg = r.success > 0
+          ? tr('build.convertDone', null, '转换完成')
+          : tr('build.convertFailed', null, '转换失败') + (r.errors?.[0] ? ': ' + r.errors[0] : '');
+        progress.finish(msg, r.success > 0 ? 'success' : 'error');
         load();
       } catch (e) {
-        showToast(`${tr('build.convertFailed', null, '转换失败')}: ${e.message}`, 'error');
+        progress.finish(`${tr('build.convertFailed', null, '转换失败')}: ${e.message}`, 'error');
       }
     });
 }
@@ -2268,17 +2267,17 @@ async function batchConvertToBuild() {
   openConfirm(tr('build.convertBatchTitle', null, '批量转为构建'),
     tr('build.convertBatchBody', { n: tokens.length }, `确认将选中的 <b>${tokens.length}</b> 个 Web 账号转为构建账号？`),
     async () => {
+      const progress = showProgressToast(tr('build.converting', { n: tokens.length }, `正在转换 ${tokens.length} 个账号…`));
       try {
-        showToast(tr('build.converting', { n: tokens.length }, `正在转换 ${tokens.length} 个账号…`), 'info');
         const r = await _api('POST', '/tokens/build-convert', { sso_tokens: tokens });
         const msg = r.success > 0
           ? tr('build.convertDone', { ok: r.success, fail: r.failed }, `转换完成：成功 ${r.success}，失败 ${r.failed}`)
           : tr('build.convertFailed', null, '转换失败');
-        showToast(msg, r.failed > 0 ? 'warning' : 'success');
+        progress.finish(msg, r.failed > 0 ? 'warning' : 'success');
         sel.clear();
         load();
       } catch (e) {
-        showToast(`${tr('build.convertFailed', null, '转换失败')}: ${e.message}`, 'error');
+        progress.finish(`${tr('build.convertFailed', null, '转换失败')}: ${e.message}`, 'error');
       }
     });
 }
