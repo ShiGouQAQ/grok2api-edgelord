@@ -132,7 +132,7 @@ class SaveTokensRequest(RootModel[dict[str, list[str | TokenImportItem]]]):
 def _quota_brief(q: dict) -> dict:
     """Extract {auto, fast, expert, heavy, console} with only remaining/total from stored quota dict."""
     out = {}
-    for mode in ("auto", "fast", "expert", "heavy", "console"):
+    for mode in ("auto", "fast", "expert", "heavy", "console", "build"):
         v = q.get(mode)
         if isinstance(v, dict):
             out[mode] = {
@@ -590,6 +590,259 @@ async def replace_pool(
             )
         )
     return _json({"pool": req.pool, "count": len(cleaned)})
+
+
+# ---------------------------------------------------------------------------
+# Build account management endpoints
+# ---------------------------------------------------------------------------
+
+
+class BuildPollRequest(BaseModel):
+    device_code: str
+
+
+class BuildConvertRequest(BaseModel):
+    sso_tokens: list[str]
+
+
+class BuildBillingRefreshRequest(BaseModel):
+    tokens: list[str] = []
+
+
+@router.post("/tokens/build-start")
+async def build_start():
+    """Start OAuth Device Flow for Build account import.
+
+    Returns user_code + verification_uri for the admin to open in browser.
+    """
+    from app.platform.auth.oauth_device import DeviceFlowClient
+
+    client = DeviceFlowClient()
+    try:
+        resp = await client.start_device()
+        return _json(
+            {
+                "status": "success",
+                "device_code": resp.device_code,
+                "user_code": resp.user_code,
+                "verification_uri": resp.verification_uri,
+                "verification_uri_complete": resp.verification_uri_complete,
+                "interval": resp.interval,
+                "expires_in": resp.expires_in,
+            }
+        )
+    except Exception as exc:
+        logger.warning("build-start failed: error={}", exc)
+        raise AppError(
+            "Failed to start Build device flow",
+            kind=ErrorKind.UPSTREAM,
+            code="build_device_flow_failed",
+            status=502,
+        )
+
+
+@router.post("/tokens/build-poll")
+async def build_poll(
+    req: BuildPollRequest,
+    repo: "AccountRepository" = Depends(get_repo),
+):
+    """Poll OAuth Device Flow completion and import Build account on success."""
+    from app.platform.auth.oauth_device import (
+        AccessDenied,
+        AuthorizationPending,
+        DeviceFlowClient,
+        ExpiredToken,
+        SlowDown,
+    )
+    from app.control.account.build_refresh import compute_refresh_due_at
+
+    client = DeviceFlowClient()
+    try:
+        token_resp = await client.poll_device(req.device_code)
+    except AuthorizationPending:
+        return _json({"status": "pending"})
+    except SlowDown:
+        return _json({"status": "pending", "slow_down": True})
+    except (AccessDenied, ExpiredToken):
+        return _json({"status": "denied"})
+    except Exception as exc:
+        logger.warning("build-poll failed: error={}", exc)
+        return _json({"status": "error", "message": str(exc)})
+
+    access_token = token_resp.access_token
+    now = now_ms()
+    expires_at = now + token_resp.expires_in * 1000
+    refresh_due_at = int(compute_refresh_due_at(expires_at / 1000, access_token) * 1000)
+
+    ext_data = {
+        "build_access_token": token_resp.access_token,
+        "build_refresh_token": token_resp.refresh_token,
+        "build_id_token": token_resp.id_token,
+        "build_expires_at": int(expires_at),
+        "build_refresh_due_at": refresh_due_at,
+    }
+
+    await repo.upsert_accounts(
+        [
+            AccountUpsert(
+                token=access_token,
+                pool="build",
+                provider="grok_build",
+                tags=["build"],
+                ext=ext_data,
+            )
+        ]
+    )
+
+    logger.info("build account imported: token={}...", access_token[:10])
+    return _json({"status": "success", "token": access_token, "pool": "build"})
+
+
+@router.post("/tokens/build-convert")
+async def build_convert(
+    req: BuildConvertRequest,
+    repo: "AccountRepository" = Depends(get_repo),
+):
+    """Batch-convert SSO tokens to Build OAuth credentials."""
+    from app.control.account.sso_build import convert_sso_to_build
+    from app.control.account.build_refresh import compute_refresh_due_at
+    from app.platform.runtime.batch import run_batch
+
+    results: dict = {"success": 0, "failed": 0, "errors": []}
+
+    async def _convert_one(sso_token: str) -> None:
+        try:
+            creds = await convert_sso_to_build(sso_token.strip())
+            access_token = creds["access_token"]
+            now = now_ms()
+            expires_at = now + int(creds.get("expires_in", "3600")) * 1000
+            refresh_due_at = int(
+                compute_refresh_due_at(expires_at / 1000, access_token) * 1000
+            )
+
+            ext_data = {
+                "build_access_token": creds["access_token"],
+                "build_refresh_token": creds.get("refresh_token", ""),
+                "build_id_token": creds.get("id_token", ""),
+                "build_expires_at": int(expires_at),
+                "build_refresh_due_at": refresh_due_at,
+            }
+
+            await repo.upsert_accounts(
+                [
+                    AccountUpsert(
+                        token=access_token,
+                        pool="build",
+                        provider="grok_build",
+                        tags=["build"],
+                        ext=ext_data,
+                    )
+                ]
+            )
+            results["success"] += 1
+        except Exception as exc:
+            results["failed"] += 1
+            results["errors"].append(str(exc))
+            logger.warning("SSO→Build conversion failed: error={}", exc)
+
+    await run_batch(
+        [t for t in req.sso_tokens if t.strip()],
+        _convert_one,
+        concurrency=5,
+    )
+
+    logger.info(
+        "batch SSO→Build conversion completed: success={} failed={}",
+        results["success"],
+        results["failed"],
+    )
+    return _json(results)
+
+
+@router.post("/tokens/build/refresh-billing")
+async def build_refresh_billing(
+    req: BuildBillingRefreshRequest,
+    repo: "AccountRepository" = Depends(get_repo),
+):
+    """Refresh Build billing data for specified accounts.
+
+    Queries upstream billing API for each Build account and updates
+    the billing info in ext dict.
+    """
+    import aiohttp
+
+    if req.tokens:
+        records = await repo.get_accounts(req.tokens)
+    else:
+        page = await repo.list_accounts(ListAccountsQuery(page=1, page_size=5000))
+        records = [r for r in page.items if r.pool == "build" and not r.is_deleted()]
+
+    results: dict = {"refreshed": 0, "failed": 0, "errors": []}
+
+    async def _refresh_one(record) -> None:
+        try:
+            ext = record.ext or {}
+            access_token = ext.get("build_access_token", record.token)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://api.x.ai/billing/usage",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status != 200:
+                        results["failed"] += 1
+                        return
+                    billing_data = await resp.json()
+
+            billing_info = {
+                "plan_code": billing_data.get("plan_code", ""),
+                "plan_name": billing_data.get("plan_name", ""),
+                "monthly_limit": float(billing_data.get("monthly_limit", 0)),
+                "used": float(billing_data.get("used", 0)),
+                "remaining": float(
+                    billing_data.get("monthly_limit", 0) - billing_data.get("used", 0)
+                ),
+                "on_demand_cap": float(billing_data.get("on_demand_cap", 0)),
+                "on_demand_used": float(billing_data.get("on_demand_used", 0)),
+                "prepaid_balance": float(billing_data.get("prepaid_balance", 0)),
+                "credit_usage_percent": float(
+                    billing_data.get("credit_usage_percent", 0)
+                ),
+                "usage_period_end": billing_data.get("usage_period_end", ""),
+                "billing_period_end": billing_data.get("billing_period_end", ""),
+                "synced_at": now_ms(),
+            }
+
+            await repo.patch_accounts(
+                [
+                    AccountPatch(
+                        token=record.token,
+                        ext_merge={**ext, "build_billing": billing_info},
+                    )
+                ]
+            )
+            results["refreshed"] += 1
+
+        except Exception as exc:
+            results["failed"] += 1
+            results["errors"].append(str(exc))
+            logger.warning(
+                "build billing refresh failed: token={}... error={}",
+                record.token[:10],
+                exc,
+            )
+
+    from app.platform.runtime.batch import run_batch
+
+    await run_batch(records, _refresh_one, concurrency=5)
+
+    logger.info(
+        "build billing refresh completed: refreshed={} failed={}",
+        results["refreshed"],
+        results["failed"],
+    )
+    return _json(results)
 
 
 # ---------------------------------------------------------------------------
