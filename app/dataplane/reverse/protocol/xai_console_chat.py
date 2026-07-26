@@ -59,7 +59,6 @@ CONSOLE_MODELS: dict[str, str] = {
     "grok-4.20-multi-agent-medium": "grok-4.20-multi-agent-0309",
     "grok-4.20-multi-agent-high": "grok-4.20-multi-agent-0309",
     "grok-4.20-multi-agent-xhigh": "grok-4.20-multi-agent-0309",
-    "grok-build-console": "grok-build-0.2.111",
 }
 
 # 需要附带 reasoning 字段的模型（grok-4.3 系列需要，grok-4.20 系列不需要）
@@ -84,7 +83,6 @@ _MODEL_FIXED_EFFORT: dict[str, str] = {
 # 特殊 max_output_tokens（默认 1_000_000）
 _MODEL_MAX_OUTPUT_TOKENS: dict[str, int] = {
     "grok-4.20-multi-agent-0309": 2_000_000,
-    "grok-build-0.2.111": 256_000,
 }
 
 # 支持 web_search / x_search 工具的模型
@@ -95,7 +93,6 @@ _MODELS_WITH_SEARCH_TOOLS: frozenset[str] = frozenset(
         "grok-4.20-0309-reasoning",
         "grok-4.20-0309-non-reasoning",
         "grok-4.3",
-        "grok-build-0.2.111",
     }
 )
 
@@ -137,7 +134,7 @@ def build_console_payload(
     ----------
     prompt_cache_key : str | None
         If set, injected as ``prompt_cache_key`` in the request payload.
-        Used by grok-build-0.1 for deterministic prompt caching.
+        Used for deterministic prompt caching.
     """
     from app.dataplane.reverse.protocol.prompt_cache import inject_prompt_cache_key
 

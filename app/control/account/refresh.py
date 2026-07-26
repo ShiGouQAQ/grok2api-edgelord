@@ -13,6 +13,7 @@ from app.control.model.enums import ALL_MODES_FULL
 from .enums import AccountStatus, QuotaSource
 from .models import AccountRecord, QuotaWindow
 from .quota_defaults import (
+    _MODE_KEYS,
     default_quota_window,
     infer_pool,
     normalize_quota_window,
@@ -43,16 +44,6 @@ class RefreshResult:
         self.disabled += other.disabled
         self.rate_limited += other.rate_limited
         self.failed += other.failed
-
-
-_MODE_KEYS = {
-    0: "quota_auto",
-    1: "quota_fast",
-    2: "quota_expert",
-    3: "quota_heavy",
-    4: "quota_grok_4_3",
-    5: "quota_console",  # console.x.ai 独立配额
-}
 
 
 def _infer_pool_from_live_windows(windows: dict[int, QuotaWindow]) -> str | None:

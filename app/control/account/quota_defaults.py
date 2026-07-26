@@ -52,6 +52,7 @@ BASIC_QUOTA_DEFAULTS = AccountQuotaSet(
     fast=_w(BASIC_FAST_LIMIT, BASIC_FAST_LIMIT, BASIC_FAST_WINDOW_SECONDS),
     expert=_w(0, 0, 0),  # unsupported on basic accounts
     console=_w(BASIC_CONSOLE_LIMIT, BASIC_CONSOLE_LIMIT, BASIC_CONSOLE_WINDOW_SECONDS),
+    quota_build=_w(100, 100, 7_200),  # 100 queries / 2 h
 )
 
 SUPER_QUOTA_DEFAULTS = AccountQuotaSet(
@@ -59,6 +60,7 @@ SUPER_QUOTA_DEFAULTS = AccountQuotaSet(
     fast=_w(140, 140, 7_200),  # 140 queries / 2 h
     expert=_w(50, 50, 7_200),  # 50  queries / 2 h
     grok_4_3=_w(50, 50, 7_200),  # 50  queries / 2 h
+    quota_build=_w(100, 100, 7_200),  # 100 queries / 2 h
 )
 
 HEAVY_QUOTA_DEFAULTS = AccountQuotaSet(
@@ -67,6 +69,7 @@ HEAVY_QUOTA_DEFAULTS = AccountQuotaSet(
     expert=_w(150, 150, 7_200),  # 150 queries / 2 h
     heavy=_w(20, 20, 7_200),  # 20  queries / 2 h
     grok_4_3=_w(150, 150, 7_200),  # 150 queries / 2 h
+    quota_build=_w(100, 100, 7_200),  # 100 queries / 2 h
 )
 
 # Map pool name → defaults object (used by backends on upsert).
@@ -77,9 +80,26 @@ _POOL_DEFAULTS: dict[str, AccountQuotaSet] = {
 }
 
 _SUPPORTED_MODE_IDS_BY_POOL: dict[str, frozenset[int]] = {
-    "basic": frozenset((1, 5)),
-    "super": frozenset((0, 1, 2, 4, 5)),
-    "heavy": frozenset((0, 1, 2, 3, 4, 5)),
+    "basic": frozenset((1, 5, 6)),
+    "super": frozenset((0, 1, 2, 4, 5, 6)),
+    "heavy": frozenset((0, 1, 2, 3, 4, 5, 6)),
+}
+
+# Mode ID → quota key in AccountQuotaSet storage
+_MODE_KEYS: dict[int, str] = {
+    0: "quota_auto",
+    1: "quota_fast",
+    2: "quota_expert",
+    3: "quota_heavy",
+    4: "quota_grok_4_3",
+    5: "quota_console",
+    6: "quota_build",
+}
+
+# Default quota totals for Build mode
+BUILD_QUOTA_DEFAULTS: dict[str, int] = {
+    "quota_build": 100,
+    "console": BASIC_CONSOLE_LIMIT,
 }
 
 # ---------------------------------------------------------------------------
@@ -111,6 +131,12 @@ def default_quota_set(pool: str) -> AccountQuotaSet:
         qs.console = _w(
             src.console.remaining, src.console.total, src.console.window_seconds
         )
+    if src.quota_build is not None:
+        qs.quota_build = _w(
+            src.quota_build.remaining,
+            src.quota_build.total,
+            src.quota_build.window_seconds,
+        )
     return qs
 
 
@@ -126,7 +152,7 @@ def supported_mode_ids(pool: str) -> tuple[int, ...]:
     supported = _SUPPORTED_MODE_IDS_BY_POOL.get(
         pool, _SUPPORTED_MODE_IDS_BY_POOL["basic"]
     )
-    return tuple(mode_id for mode_id in (0, 1, 2, 3, 4, 5) if mode_id in supported)
+    return tuple(mode_id for mode_id in (0, 1, 2, 3, 4, 5, 6) if mode_id in supported)
 
 
 def default_quota_window(pool: str, mode_id: int) -> QuotaWindow | None:
@@ -177,6 +203,7 @@ def normalize_quota_set(pool: str, quota_set: AccountQuotaSet) -> AccountQuotaSe
     qs.heavy = normalize_quota_window(pool, 3, quota_set.heavy)
     qs.grok_4_3 = normalize_quota_window(pool, 4, quota_set.grok_4_3)
     qs.console = normalize_quota_window(pool, 5, quota_set.console) or defaults.console
+    qs.quota_build = normalize_quota_window(pool, 6, quota_set.quota_build)
     return qs
 
 
@@ -193,6 +220,8 @@ def infer_pool(windows: dict[int, QuotaWindow]) -> str:
 
 
 __all__ = [
+    "_MODE_KEYS",
+    "BUILD_QUOTA_DEFAULTS",
     "BASIC_QUOTA_DEFAULTS",
     "SUPER_QUOTA_DEFAULTS",
     "HEAVY_QUOTA_DEFAULTS",
