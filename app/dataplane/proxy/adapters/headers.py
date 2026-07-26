@@ -377,9 +377,55 @@ def build_console_headers(
     return headers
 
 
+def build_build_headers(
+    access_token: str,
+    agent_id: str,
+    *,
+    client_version: str = "0.2.111",
+    client_identifier: str = "grok-shell",
+    session_id: str | None = None,
+    model: str | None = None,
+    turn_idx: str | None = None,
+) -> dict[str, str]:
+    """Build headers for Grok Build (grok-shell) requests."""
+    tok = _sanitize(access_token, field="access_token", strip_spaces=True)
+    aid = _sanitize(agent_id, field="agent_id", strip_spaces=True)
+
+    # traceparent: 00-{16 hex}-{8 hex}-01
+    trace_id = uuid.uuid4().hex[:16]
+    span_id = uuid.uuid4().hex[:8]
+    traceparent = f"00-{trace_id}-{span_id}-01"
+
+    headers: dict[str, str] = {
+        "Authorization": f"Bearer {tok}",
+        "x-xai-token-auth": "xai-grok-cli",
+        "x-grok-client-version": client_version,
+        "x-grok-client-identifier": client_identifier,
+        "x-grok-client-mode": "headless",
+        "x-authenticateresponse": "authenticate-response",
+        "x-grok-agent-id": aid,
+        "x-grok-req-id": str(uuid.uuid4()),
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        "traceparent": traceparent,
+    }
+
+    if session_id:
+        sid = _sanitize(session_id, field="session_id", strip_spaces=True)
+        headers["x-grok-session-id"] = sid
+        headers["x-grok-conv-id"] = sid
+    if model:
+        headers["x-grok-model-override"] = _sanitize(model, field="model")
+    if turn_idx:
+        headers["x-grok-turn-idx"] = _sanitize(turn_idx, field="turn_idx")
+
+    return headers
+
+
 __all__ = [
     "build_http_headers",
     "build_sso_cookie",
     "build_ws_headers",
     "build_console_headers",
+    "build_build_headers",
 ]
