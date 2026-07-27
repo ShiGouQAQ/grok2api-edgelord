@@ -251,10 +251,22 @@ async def _mint_via_pkce_cs(
         kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
 
     async with CurlAsyncSession(**kwargs) as session:
-        # Set SSO cookies on all relevant domains
+        # Resolve CF clearance once to avoid multiple get_config() calls
+        _cf_clearance = str(
+            get_config().get_str("proxy.clearance.cf_clearance", "")
+            or get_config().get_str("proxy.cf_clearance", "")
+            or ""
+        )
+
+        # Set SSO cookies + CF clearance on all relevant domains.
+        # CF clearance is needed to avoid Cloudflare 403 on accounts.x.ai / auth.x.ai.
         for domain in ("accounts.x.ai", ".x.ai", "auth.x.ai"):
             session.cookies.set("sso", sso_token, domain=domain, path="/")
             session.cookies.set("sso-rw", sso_token, domain=domain, path="/")
+            if _cf_clearance:
+                session.cookies.set(
+                    "cf_clearance", _cf_clearance, domain=domain, path="/"
+                )
 
         # Generate PKCE params
         verifier = _code_verifier()
@@ -502,9 +514,22 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
     async with aiohttp.ClientSession(
         connector=connector, timeout=timeout, cookie_jar=cookie_jar
     ) as session:
-        # Seed SSO cookies
+        # Seed SSO + CF clearance cookies on auth/accounts domains.
+        # Without cf_clearance, Cloudflare returns 403 on accounts.x.ai pre-validation.
         cookie_jar.update_cookies({"sso": sso_token}, _URL("https://auth.x.ai"))
         cookie_jar.update_cookies({"sso": sso_token}, _URL("https://accounts.x.ai"))
+        _cf_clearance = str(
+            get_config().get_str("proxy.clearance.cf_clearance", "")
+            or get_config().get_str("proxy.cf_clearance", "")
+            or ""
+        )
+        if _cf_clearance:
+            cookie_jar.update_cookies(
+                {"cf_clearance": _cf_clearance}, _URL("https://accounts.x.ai")
+            )
+            cookie_jar.update_cookies(
+                {"cf_clearance": _cf_clearance}, _URL("https://auth.x.ai")
+            )
 
         # 1. SSO pre-validation: GET accounts.x.ai/ — check not redirected to sign-in
         async with session.get(
