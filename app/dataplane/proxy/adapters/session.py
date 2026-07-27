@@ -38,6 +38,7 @@ def build_session_kwargs(
     *,
     lease: ProxyLease | None = None,
     browser_override: str | None = None,
+    disable_fingerprint: bool = False,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build kwargs suitable for ``curl_cffi.requests.AsyncSession``.
@@ -45,8 +46,15 @@ def build_session_kwargs(
     Uses Chrome 148 custom fingerprint (ja3/akamai/extra_fp) by default
     when no explicit impersonate is set, ensuring TLS and HTTP/2 fingerprints
     match the browser profile used for headers.
+
+    Pass *disable_fingerprint=True* to suppress browser impersonation entirely
+    (standard curl TLS), matching the Go upstream behaviour for the Build CLI
+    proxy endpoint (grok-shell UA + clean HTTP stack).
     """
     kwargs: dict[str, Any] = dict(extra or {})
+
+    if disable_fingerprint:
+        return kwargs
 
     # Browser impersonation with custom fingerprint.
     if not kwargs.get("impersonate"):

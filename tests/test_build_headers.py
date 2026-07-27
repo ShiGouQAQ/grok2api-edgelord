@@ -1,4 +1,8 @@
-"""Tests for build_build_headers — Grok Build (grok-shell) header builder."""
+"""Tests for build_build_headers — Grok Build (grok-shell) header builder.
+
+Port of Go adapter.go applyHeaders() + doResponseRequest().
+Default params: is_stream=True, is_trace=True (inference / streaming).
+"""
 
 from app.dataplane.proxy.adapters.headers import build_build_headers
 
@@ -13,11 +17,17 @@ def test_build_build_headers_required():
     assert headers["x-grok-client-version"] == "0.2.111"
     assert headers["x-grok-client-identifier"] == "grok-shell"
     assert headers["x-grok-client-mode"] == "headless"
+    assert headers["Content-Type"] == "application/json"
+    assert headers["User-Agent"] == "grok-shell/0.2.111 (linux; x86_64)"
+
+    # Default: is_stream=True → streaming Accept/Encoding
+    assert headers["Accept"] == "text/event-stream"
+    assert headers["Accept-Encoding"] == "identity"
+
+    # Default: is_trace=True → inference headers
     assert headers["x-authenticateresponse"] == "authenticate-response"
     assert headers["x-grok-agent-id"] == "550e8400-e29b-41d4-a716-446655440000"
     assert "x-grok-req-id" in headers
-    assert headers["Accept"] == "application/json"
-    assert headers["Accept-Encoding"] == "gzip"
     assert "traceparent" in headers
 
 
@@ -49,6 +59,7 @@ def test_build_build_headers_client_version():
         client_version="0.2.102",
     )
     assert headers["x-grok-client-version"] == "0.2.102"
+    assert headers["User-Agent"] == "grok-shell/0.2.102 (linux; x86_64)"
 
 
 def test_build_build_headers_traceparent_format():
@@ -74,3 +85,51 @@ def test_build_build_headers_optional_absent():
     assert "x-grok-conv-id" not in headers
     assert "x-grok-model-override" not in headers
     assert "x-grok-turn-idx" not in headers
+
+
+# ---------------------------------------------------------------------------
+# is_stream variants
+# ---------------------------------------------------------------------------
+
+
+def test_build_build_headers_stream_true():
+    headers = build_build_headers(access_token="t", agent_id="a", is_stream=True)
+    assert headers["Accept"] == "text/event-stream"
+    assert headers["Accept-Encoding"] == "identity"
+
+
+def test_build_build_headers_stream_false():
+    headers = build_build_headers(access_token="t", agent_id="a", is_stream=False)
+    assert headers["Accept"] == "application/json"
+    assert headers["Accept-Encoding"] == "gzip"
+
+
+# ---------------------------------------------------------------------------
+# is_trace variants
+# ---------------------------------------------------------------------------
+
+
+def test_build_build_headers_trace_true():
+    headers = build_build_headers(access_token="t", agent_id="a", is_trace=True)
+    assert "x-authenticateresponse" in headers
+    assert "x-grok-agent-id" in headers
+    assert "x-grok-req-id" in headers
+    assert "traceparent" in headers
+
+
+def test_build_build_headers_trace_false():
+    headers = build_build_headers(access_token="t", agent_id="a", is_trace=False)
+    assert "x-authenticateresponse" not in headers
+    assert "x-grok-req-id" not in headers
+    assert "traceparent" not in headers
+    # agent-id still absent when trace=False (Go sets x-userid / x-email instead)
+    assert "x-grok-agent-id" not in headers
+
+
+def test_build_build_headers_no_session_when_trace_false():
+    """Session headers are inference-only (trace=True)."""
+    headers = build_build_headers(
+        access_token="t", agent_id="a", session_id="ses-x", is_trace=False
+    )
+    assert "x-grok-session-id" not in headers
+    assert "x-grok-conv-id" not in headers

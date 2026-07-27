@@ -166,19 +166,46 @@ class AccountRefreshScheduler:
                             ext.get("build_refresh_token", "")
                         )
                         if new_tokens is None:
-                            logger.warning(
-                                "build token refresh permanently failed: token={}...",
-                                record.token[:10],
-                            )
-                            await self._service._repo.patch_accounts(
-                                [
-                                    AccountPatch(
-                                        token=record.token,
-                                        status=AccountStatus.DISABLED,
-                                        state_reason="build_refresh_permanent_failure",
-                                    )
-                                ]
-                            )
+                            build_expires_at = ext.get("build_expires_at", 0)
+                            now_ms = int(time.time() * 1000)
+                            if build_expires_at > now_ms:
+                                # Access token still valid — defer re-auth to expiry.
+                                # Port of Go's resolvePermanentRefreshFailure().
+                                logger.info(
+                                    "build refresh token permanently invalid but access token still valid"
+                                    " (expires_at={} > now={}), deferring re-auth until expiry",
+                                    build_expires_at,
+                                    now_ms,
+                                )
+                                new_ext = {
+                                    **ext,
+                                    "build_refresh_permanent": True,
+                                    "build_refresh_error": "refresh_token_invalid",
+                                    "build_refresh_due_at": build_expires_at,
+                                }
+                                await self._service._repo.patch_accounts(
+                                    [
+                                        AccountPatch(
+                                            token=record.token, ext_merge=new_ext
+                                        )
+                                    ]
+                                )
+                            else:
+                                # Access token also expired — disable the account
+                                logger.warning(
+                                    "build token refresh permanently failed and access token expired:"
+                                    " token={}...",
+                                    record.token[:10],
+                                )
+                                await self._service._repo.patch_accounts(
+                                    [
+                                        AccountPatch(
+                                            token=record.token,
+                                            status=AccountStatus.DISABLED,
+                                            state_reason="build_refresh_permanent_failure",
+                                        )
+                                    ]
+                                )
                             continue
 
                         new_expires_at = now + new_tokens.expires_in * 1000
@@ -249,6 +276,29 @@ class AccountRefreshScheduler:
             try:
                 new_tokens = await refresh_build_token(refresh_token_val)
                 if new_tokens is None:
+                    build_expires_at = ext.get("build_expires_at", 0)
+                    if build_expires_at > now:
+                        # Access token still valid — defer re-auth to expiry
+                        new_ext = {
+                            **ext,
+                            "build_refresh_permanent": True,
+                            "build_refresh_error": "refresh_token_invalid",
+                            "build_refresh_due_at": build_expires_at,
+                        }
+                        await self._service._repo.patch_accounts(
+                            [AccountPatch(token=record.token, ext_merge=new_ext)]
+                        )
+                    else:
+                        # Access token expired too — disable the account
+                        await self._service._repo.patch_accounts(
+                            [
+                                AccountPatch(
+                                    token=record.token,
+                                    status=AccountStatus.DISABLED,
+                                    state_reason="build_refresh_permanent_failure",
+                                )
+                            ]
+                        )
                     continue
 
                 new_expires_at = now + new_tokens.expires_in * 1000

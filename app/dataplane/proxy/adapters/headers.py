@@ -386,15 +386,20 @@ def build_build_headers(
     session_id: str | None = None,
     model: str | None = None,
     turn_idx: str | None = None,
+    is_stream: bool = True,
+    is_trace: bool = True,
 ) -> dict[str, str]:
-    """Build headers for Grok Build (grok-shell) requests."""
+    """Build headers for Grok Build (grok-shell) requests.
+
+    Port of Go adapter.go applyHeaders() + doResponseRequest():
+    - is_stream=True  → Accept: text/event-stream, Accept-Encoding: identity
+    - is_stream=False → Accept: application/json
+    - is_trace=True   → inference headers (x-authenticateresponse, x-grok-req-id,
+                        x-grok-agent-id, traceparent, session_id)
+    - is_trace=False  → control-plane headers (x-userid, x-email)
+    """
     tok = _sanitize(access_token, field="access_token", strip_spaces=True)
     aid = _sanitize(agent_id, field="agent_id", strip_spaces=True)
-
-    # traceparent: 00-{16 hex}-{8 hex}-01
-    trace_id = uuid.uuid4().hex[:16]
-    span_id = uuid.uuid4().hex[:8]
-    traceparent = f"00-{trace_id}-{span_id}-01"
 
     headers: dict[str, str] = {
         "Authorization": f"Bearer {tok}",
@@ -402,18 +407,27 @@ def build_build_headers(
         "x-grok-client-version": client_version,
         "x-grok-client-identifier": client_identifier,
         "x-grok-client-mode": "headless",
-        "x-authenticateresponse": "authenticate-response",
-        "x-grok-agent-id": aid,
-        "x-grok-req-id": str(uuid.uuid4()),
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip",
-        "traceparent": traceparent,
+        "Content-Type": "application/json",
+        "User-Agent": f"grok-shell/{client_version} (linux; x86_64)",
+        "Accept": "text/event-stream" if is_stream else "application/json",
+        "Accept-Encoding": "identity" if is_stream else "gzip",
     }
 
-    if session_id:
-        sid = _sanitize(session_id, field="session_id", strip_spaces=True)
-        headers["x-grok-session-id"] = sid
-        headers["x-grok-conv-id"] = sid
+    # Inference headers — only when trace=True (Go: applyHeaders trace param)
+    if is_trace:
+        trace_id = uuid.uuid4().hex[:16]
+        span_id = uuid.uuid4().hex[:8]
+        headers["x-authenticateresponse"] = "authenticate-response"
+        headers["x-grok-agent-id"] = aid
+        headers["x-grok-req-id"] = str(uuid.uuid4())
+        headers["traceparent"] = f"00-{trace_id}-{span_id}-01"
+
+        if session_id:
+            sid = _sanitize(session_id, field="session_id", strip_spaces=True)
+            headers["x-grok-session-id"] = sid
+            headers["x-grok-conv-id"] = sid
+    # Control-plane headers (Go: x-userid, x-email) omitted — not used by current callers
+
     if model:
         headers["x-grok-model-override"] = _sanitize(model, field="model")
     if turn_idx:

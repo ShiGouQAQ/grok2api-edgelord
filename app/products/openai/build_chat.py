@@ -491,9 +491,13 @@ async def stream_build_chat(
         access_token=token,
         agent_id=agent_id,
         model=model,
+        is_stream=True,
+        is_trace=True,
     )
     payload_bytes = orjson.dumps(payload)
-    session_kwargs = build_session_kwargs(lease=lease)
+    # Go upstream uses standard TLS (no browser impersonation) for Build API.
+    # Browser TLS fingerprint is reserved for Grok Web — see buildclient.go.
+    session_kwargs = build_session_kwargs(lease=lease, disable_fingerprint=True)
 
     async with ResettableSession(**session_kwargs) as session:
         try:

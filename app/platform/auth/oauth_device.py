@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import ssl
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
@@ -72,6 +72,8 @@ class DeviceFlowClient:
     """OAuth 2.0 Device Authorization Grant client for auth.x.ai."""
 
     DEVICE_URL = "https://auth.x.ai/oauth2/device/code"
+    VERIFY_URL = "https://auth.x.ai/oauth2/device/verify"
+    APPROVE_URL = "https://auth.x.ai/oauth2/device/approve"
     TOKEN_URL = "https://auth.x.ai/oauth2/token"
     CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
     SCOPE = (
