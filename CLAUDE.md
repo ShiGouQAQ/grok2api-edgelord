@@ -103,7 +103,7 @@ app/
 6. **Structured UpstreamError** — `app/platform/errors.py`:
    - Flags: `account_scoped`, `permanent_account_denial`, `quota_exhausted`, `free_quota_exhausted`, `model_quota_exhausted`, `credential_rejected`
    - `from_http_response()` — auto-classifies HTTP status + body into flags
-   - 3 mappers: `to_feedback_kind()` (account state machine), `to_proxy_feedback_kind()` (proxy health), `to_result_category()` (reverse pipeline)
+   - 2 mappers: `to_feedback_kind()` (account state machine), `to_proxy_feedback_kind()` (proxy health)
    - Classification engine: `_classify_upstream_status()` ports Go `failure.go` patterns
    - `to_dict()` always includes `param` (null when unset) per OpenAI spec
    - 510 tests covering classification + new ported Go fixes
@@ -131,6 +131,7 @@ When `proxy.egress.mode = mihomo`:
 **429 vs 403 轮换规则：**
 - 429 = 账号配额耗尽，**不触发代理轮换**，只清零账号配额
 - 403 = 代理 IP 被封/CF 挑战，触发代理轮换或 clearance 重新求解
+- `NODE_BANNED`（403 + CF "Attention Required" 标记）= 当前出口 IP 被 CF 封禁，`ProxyDirectory.feedback()` **失效该 bundle**（bundle 由被封 IP 铸出）+ 池光标前进 + mihomo `switch_and_blacklist_current()`（`app/control/proxy/__init__.py`）
 
 ## CF Clearance
 
@@ -148,10 +149,13 @@ Leader-only background tasks (started in `app/main.py` lifespan):
 |------|----------|----------|
 | `console-quota-reset` | 30s | `reset_expired_console_windows()` — 重置过期/卡死的 console 配额窗口 |
 | `console-expired-recovery` | 10min | `recover_console_expired_accounts()` — 自动恢复 429 EXPIRED 账号 |
+| `reauth-stuck-recovery` | 1h | `recover_stuck_reauth_accounts()` — REAUTH_REQUIRED 连续失败 ≥3 次标 EXPIRED（`app/control/account/recovery.py`） |
 
 Console 配额参数：`BASIC_CONSOLE_LIMIT=20`, `BASIC_CONSOLE_WINDOW_SECONDS=3600`。
 轮换策略：`remaining <= 12` 时启动恢复计时器（`app/control/account/refresh.py`）。
 429 处理：12小时滑动窗口，3次标 EXPIRED，1小时后自动恢复。
+
+REAUTH 恢复参数：`account.recovery.reauth_stuck_threshold=3`（连续 reauth 失败次数阈值）、`account.recovery.reauth_stuck_interval_sec=3600`（巡检间隔）。每次 `_expire_invalid_credentials` 命中 REAUTH 时 `bump_reauth_fail_count()` 递增计数；达到阈值后 leader 任务标 EXPIRED（`state_reason=reauth_stuck`），由人工恢复或刷新成功后自动恢复。
 
 ## i18n
 
