@@ -14,9 +14,10 @@ import orjson
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
-from app.platform.errors import RateLimitError, UpstreamError, ValidationError
+from app.platform.errors import AppError, RateLimitError, UpstreamError, ValidationError
 from app.platform.runtime.clock import now_s
 from app.platform.storage import save_local_image
+from app.platform.storage.media_audit import log_media_input_summary
 from app.control.model.registry import resolve as resolve_model
 from app.control.model.enums import ModeId
 from app.control.model.spec import ModelSpec
@@ -341,6 +342,11 @@ async def generate(
         )
 
     response_id = make_response_id()
+    log_media_input_summary(
+        logger,
+        response_id,
+        orjson.dumps({"model": model, "prompt": prompt, "n": n}),
+    )
     enable_pro = model in _PRO_IMAGE_MODELS
     _ws_mode_id = int(spec.mode_id)
 
@@ -440,6 +446,7 @@ async def generate(
     max_retries = selection_max_retries()
     retry_codes = _configured_retry_codes(get_config())
     excluded: list[str] = []
+    last_credential_error: AppError | None = None
 
     for attempt in range(max_retries + 1):
         acct = await _acct_dir.reserve_any(
@@ -513,14 +520,17 @@ async def generate(
             break
         except UpstreamError as exc:
             fail_exc = exc
-            if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
-                retry = True
-                logger.warning(
-                    "image generation retry scheduled: attempt={}/{} token={}...",
-                    attempt + 1,
-                    max_retries,
-                    token[:8],
-                )
+            if _should_retry_upstream(exc, retry_codes):
+                last_credential_error = exc
+                if attempt < max_retries:
+                    retry = True
+                    logger.warning(
+                        "image generation retry scheduled: attempt={}/{} token={}...",
+                        attempt + 1,
+                        max_retries,
+                        token[:8],
+                    )
+                # Final attempt: fall through to the post-loop 503 audit.
             else:
                 raise
         except BaseException as exc:
@@ -536,6 +546,23 @@ async def generate(
 
         if retry:
             excluded.append(token)
+
+    # All attempts failed with retryable credential/upstream failures — port of
+    # Go executeImage's nil-response audit (8004840): 503 + wrapped error.
+    if not success:
+        if last_credential_error is None:
+            last_credential_error = RateLimitError(
+                "No available accounts for image generation"
+            )
+        logger.warning(
+            "image_generation_unavailable status=503 code=upstream_unavailable "
+            "error={}",
+            str(last_credential_error),
+        )
+        raise UpstreamError(
+            f"Image generation unavailable: {last_credential_error}",
+            status=503,
+        ) from last_credential_error
 
     if chat_format:
         content = "\n\n".join(image.markdown_value for image in finals)
@@ -578,6 +605,11 @@ async def _generate_lite(
     response_id = make_response_id()
     cfg = get_config()
     timeout_s = cfg.get_float("chat.timeout", 120.0)
+    log_media_input_summary(
+        logger,
+        response_id,
+        orjson.dumps({"model": spec.model_name, "prompt": prompt, "n": n}),
+    )
     logger.debug(
         "lite image fan-out started: request_count={} mode={}",
         n,
@@ -1246,6 +1278,11 @@ async def edit(
 
     token = acct.token
     response_id = make_response_id()
+    log_media_input_summary(
+        logger,
+        response_id,
+        orjson.dumps({"messages": messages}),
+    )
     edit_prompt = prompt
 
     try:

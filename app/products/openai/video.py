@@ -28,6 +28,7 @@ from app.platform.errors import (
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
 from app.platform.storage import save_local_video
+from app.platform.storage.media_audit import log_media_input_summary
 from app.control.account.enums import FeedbackKind
 from app.control.model import registry as model_registry
 from app.control.model.registry import resolve as resolve_model
@@ -1013,6 +1014,11 @@ async def create_video(
         created_at=int(time.time()),
     )
     await _put_video_job(job)
+    log_media_input_summary(
+        logger,
+        job.id,
+        orjson.dumps({"input_references": input_references or []}),
+    )
     asyncio.create_task(
         _run_video_job(
             job,
@@ -1128,6 +1134,11 @@ async def completions(
     cfg = get_config()
     is_stream = stream if stream is not None else cfg.get_bool("features.stream", False)
     response_id = make_response_id()
+    log_media_input_summary(
+        logger,
+        response_id,
+        orjson.dumps({"messages": messages}),
+    )
 
     async def _run(progress_cb: Callable[[int], Awaitable[None]] | None = None) -> str:
         async def _runner(token: str, timeout_s: float) -> str:
