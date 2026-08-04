@@ -10,9 +10,14 @@ from __future__ import annotations
 
 import base64
 import json
+import ssl
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
+import aiohttp
+
+from app.platform.errors import UpstreamError
 
 # ---------------------------------------------------------------------------
 # BuildBilling dataclass
@@ -167,10 +172,82 @@ def is_build_super(
     return billing is not None and billing.is_paid
 
 
+# ---------------------------------------------------------------------------
+# Billing fetch
+# ---------------------------------------------------------------------------
+
+
+async def fetch_build_billing(
+    access_token: str,
+    *,
+    timeout_s: float = 15.0,
+    proxy_url: str | None = None,
+) -> BuildBilling:
+    """Fetch Build billing from the upstream XAI billing API.
+
+    Returns parsed billing on 200. Raises UpstreamError with
+    credential_rejected=True on 401/403; plain UpstreamError on other
+    non-2xx statuses. Transport errors propagate as aiohttp exceptions.
+    """
+    from app.dataplane.proxy.adapters.session import normalize_proxy_url
+    from app.platform.config.snapshot import get_config
+
+    raw_proxy = (
+        proxy_url
+        if proxy_url is not None
+        else str(get_config().get_str("proxy.egress.proxy_url", ""))
+    )
+    normalized = normalize_proxy_url(raw_proxy) if raw_proxy else None
+    http_proxy: str | None = None
+    connector: aiohttp.TCPConnector | None = None
+    if normalized:
+        ssl_ctx = ssl.create_default_context()
+        if get_config().get_bool("proxy.egress.skip_ssl_verify", False):
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+        scheme = urlparse(normalized).scheme.lower()
+        if scheme.startswith("socks"):
+            from aiohttp_socks import ProxyConnector
+
+            connector = ProxyConnector.from_url(normalized, ssl=ssl_ctx)
+        else:
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+            http_proxy = normalized
+
+    try:
+        async with aiohttp.ClientSession(
+            connector=connector, connector_owner=False
+        ) as session, session.get(
+            "https://api.x.ai/billing/usage",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=aiohttp.ClientTimeout(total=timeout_s),
+            proxy=http_proxy,
+        ) as resp:
+            if resp.status == 200:
+                return parse_billing(await resp.json())
+            body = await resp.text()
+            if resp.status in (401, 403):
+                raise UpstreamError(
+                    f"Build billing access denied: HTTP {resp.status}",
+                    status=resp.status,
+                    credential_rejected=True,
+                    body=body,
+                )
+            raise UpstreamError(
+                f"Build billing upstream error: HTTP {resp.status}",
+                status=resp.status,
+                body=body,
+            )
+    finally:
+        if connector is not None:
+            await connector.close()
+
+
 __all__ = [
     "BuildBilling",
+    "fetch_build_billing",
+    "is_build_super",
     "parse_billing",
     "parse_subscription_tier",
     "subscription_tier_from_jwt",
-    "is_build_super",
 ]
