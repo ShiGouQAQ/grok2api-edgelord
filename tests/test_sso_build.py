@@ -17,7 +17,8 @@ from app.control.account.sso_build import (
     normalize_sso_token,
     safe_xai_url,
 )
-
+from app.control.proxy.config import ClearanceConfig
+from app.dataplane.proxy.adapters.profile import ProxyProfile
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Utility function tests
@@ -1229,24 +1230,200 @@ class _StubCfg:
         return str(value) if value is not None else default
 
 
-def test_resolve_cf_clearance_from_cookies() -> None:
+@pytest.mark.asyncio
+async def test_resolve_cf_clearance_from_cookies() -> None:
     """Schema key proxy.clearance.cf_cookies derives the cf_clearance value."""
     from app.control.account.sso_build import _resolve_cf_clearance_value
 
     cfg = _StubCfg({"proxy.clearance.cf_cookies": "cf_clearance=abc123; foo=1"})
-    assert _resolve_cf_clearance_value(cfg) == "abc123"
+    with patch("app.dataplane.proxy.get_proxy_runtime") as _mock:
+        assert await _resolve_cf_clearance_value(cfg) == "abc123"
 
 
-def test_resolve_cf_clearance_legacy_fallback() -> None:
+@pytest.mark.asyncio
+async def test_resolve_cf_clearance_legacy_fallback() -> None:
     """Legacy flat key proxy.cf_clearance still resolves."""
     from app.control.account.sso_build import _resolve_cf_clearance_value
 
     cfg = _StubCfg({"proxy.cf_clearance": "legacy"})
-    assert _resolve_cf_clearance_value(cfg) == "legacy"
+    with patch("app.dataplane.proxy.get_proxy_runtime") as _mock:
+        assert await _resolve_cf_clearance_value(cfg) == "legacy"
 
 
-def test_resolve_cf_clearance_empty() -> None:
+@pytest.mark.asyncio
+async def test_resolve_cf_clearance_empty() -> None:
     """No configured clearance resolves to empty string."""
     from app.control.account.sso_build import _resolve_cf_clearance_value
 
-    assert _resolve_cf_clearance_value(_StubCfg({})) == ""
+    with patch("app.dataplane.proxy.get_proxy_runtime") as _mock:
+        assert await _resolve_cf_clearance_value(_StubCfg({})) == ""
+
+
+@pytest.mark.asyncio
+async def test_resolve_cf_clearance_prefers_lease_bundle() -> None:
+    """Lease cf_cookies (turnstile-solved) wins over config — 403 root cause."""
+    from app.control.account.sso_build import _resolve_cf_clearance_value
+
+    lease = MagicMock()
+    lease.cf_cookies = "cf_clearance=turnstile-abc; other=1"
+    proxy = AsyncMock()
+    proxy.acquire.return_value = lease
+    with patch(
+        "app.dataplane.proxy.get_proxy_runtime", new=AsyncMock(return_value=proxy)
+    ):
+        cfg = _StubCfg({"proxy.clearance.cf_cookies": "cf_clearance=config-val"})
+        assert await _resolve_cf_clearance_value(cfg) == "turnstile-abc"
+
+
+@pytest.mark.asyncio
+async def test_resolve_cf_clearance_lease_empty_falls_back_to_config() -> None:
+    """Empty lease cf_cookies falls back to config — no hard failure."""
+    from app.control.account.sso_build import _resolve_cf_clearance_value
+
+    lease = MagicMock()
+    lease.cf_cookies = ""
+    proxy = AsyncMock()
+    proxy.acquire.return_value = lease
+    with patch(
+        "app.dataplane.proxy.get_proxy_runtime", new=AsyncMock(return_value=proxy)
+    ):
+        cfg = _StubCfg({"proxy.clearance.cf_cookies": "cf_clearance=cfg-ok"})
+        assert await _resolve_cf_clearance_value(cfg) == "cfg-ok"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SSO→Build mint profile resolution (UA fingerprint alignment with turnstile)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestResolveMintProfile:
+    """_resolve_mint_profile returns the full lease profile (cf_cookies + UA)."""
+
+    @pytest.mark.asyncio
+    async def test_mint_profile_from_lease(self) -> None:
+        """Lease cf_cookies + user_agent → profile with matching clearance + UA."""
+        from app.control.account import sso_build
+
+        lease = MagicMock()
+        lease.cf_cookies = "cf_clearance=tc; foo=1"
+        lease.user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+        )
+        proxy = AsyncMock()
+        proxy.acquire.return_value = lease
+        with patch(
+            "app.dataplane.proxy.get_proxy_runtime",
+            new=AsyncMock(return_value=proxy),
+        ):
+            profile = await sso_build._resolve_mint_profile()
+
+        assert profile.cf_clearance == "tc"
+        assert profile.cf_cookies == "cf_clearance=tc; foo=1"
+        assert profile.user_agent == lease.user_agent
+
+    @pytest.mark.asyncio
+    async def test_mint_profile_config_fallback(self) -> None:
+        """Empty lease → profile falls back to configured clearance (full UA)."""
+        from app.control.account import sso_build
+
+        lease = MagicMock()
+        lease.cf_cookies = ""
+        lease.user_agent = ""
+        proxy = AsyncMock()
+        proxy.acquire.return_value = lease
+        with (
+            patch(
+                "app.dataplane.proxy.get_proxy_runtime",
+                new=AsyncMock(return_value=proxy),
+            ),
+            patch(
+                "app.dataplane.proxy.adapters.profile.resolve_clearance_config",
+                return_value=ClearanceConfig(
+                    cf_cookies="cf_clearance=cfgval; x=1",
+                    user_agent="UA-from-config",
+                    cf_clearance="cfgval",
+                    browser="chrome120",
+                ),
+            ),
+        ):
+            profile = await sso_build._resolve_mint_profile()
+
+        assert profile.cf_clearance == "cfgval"
+        assert profile.user_agent == "UA-from-config"
+
+    @pytest.mark.asyncio
+    async def test_mint_profile_acquire_failure_falls_back(self) -> None:
+        """acquire() raising → config fallback instead of a hard failure."""
+        from app.control.account import sso_build
+
+        with (
+            patch(
+                "app.dataplane.proxy.get_proxy_runtime",
+                new=AsyncMock(side_effect=RuntimeError("runtime down")),
+            ),
+            patch(
+                "app.dataplane.proxy.adapters.profile.resolve_clearance_config",
+                return_value=ClearanceConfig(
+                    cf_cookies="cf_clearance=c; x=1",
+                    user_agent="UA-x",
+                    cf_clearance="c",
+                    browser="chrome120",
+                ),
+            ),
+        ):
+            profile = await sso_build._resolve_mint_profile()
+
+        assert profile.cf_clearance == "c"
+        assert profile.user_agent == "UA-x"
+
+
+@pytest.mark.asyncio
+async def test_pkce_uses_profile_session_kwargs() -> None:
+    """PKCE-CS session kwargs come from the lease profile, not hardcoded chrome131."""
+    from app.control.account import sso_build
+
+    mock_session = MagicMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.get = AsyncMock(side_effect=RuntimeError("network stopped"))
+
+    with (
+        patch("curl_cffi.requests.AsyncSession", return_value=mock_session),
+        patch(
+            "app.control.account.sso_build._acquire_mint_lease",
+            new=AsyncMock(return_value=None),
+            create=True,
+        ),
+        patch(
+            "app.control.account.sso_build._resolve_mint_profile",
+            new=AsyncMock(
+                return_value=ProxyProfile(
+                    cf_cookies="cf_clearance=tc",
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/148.0.0.0 Safari/537.36"
+                    ),
+                    cf_clearance="tc",
+                )
+            ),
+            create=True,
+        ),
+        patch(
+            "app.control.account.sso_build._resolve_cf_clearance_value",
+            new=AsyncMock(return_value="tc"),
+            create=True,
+        ),
+        patch(
+            "app.dataplane.proxy.adapters.session.build_session_kwargs",
+            return_value={},
+        ) as mock_build,
+    ):
+        with pytest.raises(RuntimeError, match="network stopped"):
+            await sso_build._mint_via_pkce_cs("sso-token")
+
+    mock_build.assert_called_once()
+    # No hardcoded impersonate reaches the session constructor —
+    # impersonation now derives from the lease profile via build_session_kwargs.
+    assert not any("chrome131" in str(c) for c in mock_session.call_args_list)

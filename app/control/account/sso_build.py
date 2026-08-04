@@ -32,7 +32,7 @@ import ssl
 import time
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import aiohttp
@@ -40,13 +40,23 @@ from yarl import URL as _URL
 
 from app.dataplane.proxy.adapters.session import normalize_proxy_url
 from app.platform.auth.grpc_web_codec import (
-    encode_string as _grpc_encode_string,
-    frame_request as _grpc_frame_request,
-    parse_response as _grpc_parse_response,
     decode_message as _grpc_decode_message,
+)
+from app.platform.auth.grpc_web_codec import (
+    encode_string as _grpc_encode_string,
+)
+from app.platform.auth.grpc_web_codec import (
+    frame_request as _grpc_frame_request,
+)
+from app.platform.auth.grpc_web_codec import (
+    parse_response as _grpc_parse_response,
 )
 from app.platform.auth.oauth_device import DeviceFlowClient
 from app.platform.config.snapshot import get_config
+
+if TYPE_CHECKING:
+    from app.control.proxy.models import ProxyLease
+    from app.dataplane.proxy.adapters.profile import ProxyProfile
 
 CLIENT_ID = DeviceFlowClient.CLIENT_ID
 DEVICE_URL = DeviceFlowClient.DEVICE_URL
@@ -133,14 +143,54 @@ def normalize_sso_token(token: str) -> str:
     return value.replace("\r", "").replace("\n", "").replace("\x00", "")
 
 
-def _resolve_cf_clearance_value(cfg: Any | None = None) -> str:
-    """Resolve the cf_clearance cookie value for SSO→Build mint.
+async def _acquire_mint_lease() -> ProxyLease | None:
+    """Acquire a live proxy lease for the SSO→Build mint, or None on failure.
 
-    Derives from proxy.clearance.cf_cookies (schema key) via
-    resolve_clearance_config(), falling back to legacy flat keys.
-    Replaces the broken direct reads of the non-existent
-    proxy.clearance.cf_clearance / proxy.cf_clearance keys.
+    The lease carries the turnstile/flaresolverr solved bundle (cf_cookies +
+    user_agent + proxy_url) — the same source ordinary requests use, so the
+    cf_clearance Cloudflare issued matches the UA/TLS fingerprint we present.
     """
+    try:
+        from app.dataplane.proxy import get_proxy_runtime
+
+        proxy = await get_proxy_runtime()
+        lease = await proxy.acquire(clearance_origin=ACCOUNTS_ORIGIN)
+        if not isinstance(getattr(lease, "cf_cookies", ""), str):
+            return None
+        return lease
+    except Exception:
+        return None
+
+
+async def _resolve_mint_profile(lease: ProxyLease | None = None) -> ProxyProfile:
+    """Resolve the full proxy profile (cf_cookies + user_agent + browser) for mint.
+
+    Prefers a live lease from the proxy directory; falls back to the
+    configured clearance profile. Returns the complete profile — not just the
+    cf_clearance value — so header UA, client-hints and curl_cffi
+    impersonation all align with the Cloudflare-issued clearance.
+    """
+    from app.dataplane.proxy.adapters.profile import resolve_proxy_profile
+
+    if lease is None:
+        lease = await _acquire_mint_lease()
+    return resolve_proxy_profile(lease)
+
+
+async def _resolve_cf_clearance_value(cfg: Any | None = None) -> str:
+    """Backward-compatible thin wrapper: resolve just the cf_clearance value.
+
+    Full-profile resolution moved to _resolve_mint_profile(); kept for legacy
+    callers/tests that only need the single cookie value (and only consume
+    the lease's cf_cookies, never its UA).
+    """
+    lease = await _acquire_mint_lease()
+    if lease is not None and lease.cf_cookies:
+        from app.dataplane.proxy.adapters.profile import extract_cookie_value
+
+        extracted = extract_cookie_value(lease.cf_cookies, "cf_clearance")
+        if extracted:
+            return extracted
     from app.control.proxy.config import resolve_clearance_config
 
     return resolve_clearance_config(cfg).cf_clearance or ""
@@ -259,23 +309,32 @@ async def _mint_via_pkce_cs(
     """
     from curl_cffi.requests import AsyncSession as CurlAsyncSession
 
-    kwargs: dict[str, Any] = {"impersonate": "chrome131"}
-    if proxy_url:
+    from app.dataplane.proxy.adapters.session import build_session_kwargs
+
+    # Reuse the proxy lease three-piece (cf_cookies + user_agent + browser):
+    # session kwargs derive impersonate/TLS fingerprint from the lease profile
+    # so they match the cf_clearance Cloudflare issued.
+    lease = await _acquire_mint_lease()
+    profile = await _resolve_mint_profile(lease)
+    session_headers: dict[str, str] = {}
+    if profile.user_agent:
+        session_headers["User-Agent"] = profile.user_agent
+    kwargs = build_session_kwargs(lease=lease, extra={"headers": session_headers})
+    if not kwargs.get("proxies") and not kwargs.get("proxy") and proxy_url:
         kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
 
     async with CurlAsyncSession(**kwargs) as session:
-        # Resolve CF clearance once to avoid multiple get_config() calls
-        _cf_clearance = _resolve_cf_clearance_value()
-
-        # Set SSO cookies + CF clearance on all relevant domains.
+        # Set SSO cookies + full clearance cookie bundle (not just the
+        # cf_clearance value) on all relevant domains.
         # CF clearance is needed to avoid Cloudflare 403 on accounts.x.ai / auth.x.ai.
         for domain in ("accounts.x.ai", ".x.ai", "auth.x.ai"):
             session.cookies.set("sso", sso_token, domain=domain, path="/")
             session.cookies.set("sso-rw", sso_token, domain=domain, path="/")
-            if _cf_clearance:
-                session.cookies.set(
-                    "cf_clearance", _cf_clearance, domain=domain, path="/"
-                )
+            for part in profile.cf_cookies.split(";"):
+                name, _, value = part.partition("=")
+                name, value = name.strip(), value.strip()
+                if name and value:
+                    session.cookies.set(name, value, domain=domain, path="/")
 
         # Generate PKCE params
         verifier = _code_verifier()
@@ -499,9 +558,19 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
     - Accept HTTP 200-399 for verify/approve
     - Returns structured BuildCredentialSeed
     """
+    # Reuse the lease three-piece: proxy URL + UA + clearance from one source
+    # so the cf_clearance Cloudflare issued matches the UA we present.
+    lease = await _acquire_mint_lease()
+    profile = await _resolve_mint_profile(lease)
+
     cfg = get_config()
     raw_proxy = str(cfg.get_str("proxy.egress.proxy_url", ""))
-    proxy_url = normalize_proxy_url(raw_proxy) if raw_proxy else None
+    config_proxy = normalize_proxy_url(raw_proxy) if raw_proxy else None
+    proxy_url = (
+        normalize_proxy_url(lease.proxy_url)
+        if lease is not None and lease.proxy_url
+        else config_proxy
+    )
 
     ssl_ctx = ssl.create_default_context()
     if proxy_url and cfg.get_bool("proxy.egress.skip_ssl_verify", False):
@@ -520,20 +589,23 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
         http_proxy = proxy_url
 
     timeout = aiohttp.ClientTimeout(total=30)
+    session_headers = {"User-Agent": profile.user_agent} if profile.user_agent else None
     async with aiohttp.ClientSession(
-        connector=connector, timeout=timeout, cookie_jar=cookie_jar
+        connector=connector,
+        timeout=timeout,
+        cookie_jar=cookie_jar,
+        headers=session_headers,
     ) as session:
         # Seed SSO + CF clearance cookies on auth/accounts domains.
         # Without cf_clearance, Cloudflare returns 403 on accounts.x.ai pre-validation.
         cookie_jar.update_cookies({"sso": sso_token}, _URL("https://auth.x.ai"))
         cookie_jar.update_cookies({"sso": sso_token}, _URL("https://accounts.x.ai"))
-        _cf_clearance = _resolve_cf_clearance_value(cfg)
-        if _cf_clearance:
+        if profile.cf_clearance:
             cookie_jar.update_cookies(
-                {"cf_clearance": _cf_clearance}, _URL("https://accounts.x.ai")
+                {"cf_clearance": profile.cf_clearance}, _URL("https://accounts.x.ai")
             )
             cookie_jar.update_cookies(
-                {"cf_clearance": _cf_clearance}, _URL("https://auth.x.ai")
+                {"cf_clearance": profile.cf_clearance}, _URL("https://auth.x.ai")
             )
 
         # 1. SSO pre-validation: GET accounts.x.ai/ — check not redirected to sign-in
