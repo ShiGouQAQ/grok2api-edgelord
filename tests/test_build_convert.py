@@ -162,6 +162,46 @@ async def test_convert_smoke_401_fails_and_marks_source():
 
 
 @pytest.mark.asyncio
+async def test_convert_one_marks_account_on_device_precheck_rejected():
+    """Device Flow precheck raises SSOCredentialRejected → source account marked.
+
+    Mirrors Go markSSOCredentialRejected: an invalid SSO found at
+    pre-validation must invalidate the source Web account, not be retried.
+    """
+    from app.control.account.sso_build import SSOCredentialRejected
+
+    repo = _mock_repo()
+
+    with (
+        patch(
+            "app.control.account.sso_build._mint_via_device_flow",
+            AsyncMock(
+                side_effect=SSOCredentialRejected(
+                    "SSO token invalid or expired: redirected to sign-in"
+                )
+            ),
+        ),
+        patch(
+            "app.control.account.sso_build._mint_via_pkce_cs",
+            AsyncMock(side_effect=RuntimeError("PKCE must not run")),
+        ),
+        patch(
+            "app.control.account.invalid_credentials.mark_account_invalid_credentials",
+            AsyncMock(return_value=True),
+        ) as mock_mark,
+    ):
+        resp = await _convert_one_response(["sso-token-1"], repo)
+
+    assert resp["success"] == 0
+    assert resp["failed"] == 1
+    repo.upsert_accounts.assert_not_called()
+    mock_mark.assert_awaited_once()
+    assert mock_mark.await_args is not None
+    assert mock_mark.await_args.args[1] == "sso-token-1"
+    assert isinstance(mock_mark.await_args.args[2], SSOCredentialRejected)
+
+
+@pytest.mark.asyncio
 async def test_convert_valid_jwt_exp_used():
     """Present JWT exp wins over now + expires_in arithmetic."""
     repo = _mock_repo()

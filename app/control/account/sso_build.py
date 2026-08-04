@@ -72,11 +72,15 @@ logger = logging.getLogger(__name__)
 
 
 class SSOCredentialRejected(UpstreamError):
-    """SSO credential hard-rejected by upstream during PKCE-CS minting.
+    """SSO credential hard-rejected by upstream.
 
-    Mirrors Go upstream sso_build.go @8f979d4: invalid SSO → ErrUnauthorized
-    → markSSOCredentialRejected. Propagates instead of falling back to
-    Device Flow — a rejected SSO token would mint an unverified token there.
+    Raised for an invalid/expired SSO token both during PKCE-CS minting
+    (mirrors Go sso_build.go @8f979d4: invalid SSO → ErrUnauthorized →
+    markSSOCredentialRejected) and during Device Flow pre-validation
+    (redirected to sign-in). Propagates instead of falling back to the
+    other mint path — a rejected SSO token would mint an unverified token
+    there. Carries credential_rejected=True so account marking is
+    automatic in convert paths.
     """
 
     def __init__(self, message: str) -> None:
@@ -143,18 +147,32 @@ class BuildCredentialSeed:
 # ─── SSO token normalization ────────────────────────────────────────────────
 
 
+def _sanitize_sso_token(value: str) -> str:
+    """Strip whitespace and control characters from an SSO token value."""
+    return value.strip().replace("\r", "").replace("\n", "").replace("\x00", "")
+
+
 def normalize_sso_token(token: str) -> str:
     """Normalize SSO token.
 
-    Strip 'sso=' prefix, chop at first ';', remove control characters.
-    Port of Go normalizeSSOToken().
+    Accepts a raw SSO value, a bare 'sso=' prefix, or a full 'Cookie:'
+    header — in the cookie case the 'sso' / 'sso-rw' field value is
+    extracted (case-insensitive). Falls back to chopping at the first ';'
+    when no cookie field matches. Removes control characters.
+    Port of Go normalizeSSOToken() (sub2api sso_device.go).
     """
     value = token.strip()
-    if value.lower().startswith("sso="):
-        value = value[len("sso=") :].strip()
+    if value.lower().startswith("cookie:"):
+        value = value[len("cookie:") :].strip()
+    for part in value.split(";"):
+        name, sep, field_value = part.strip().partition("=")
+        if not sep:
+            continue
+        if name.strip().lower() in ("sso", "sso-rw"):
+            return _sanitize_sso_token(field_value)
     if ";" in value:
         value = value.split(";")[0].strip()
-    return value.replace("\r", "").replace("\n", "").replace("\x00", "")
+    return _sanitize_sso_token(value)
 
 
 async def _acquire_mint_lease() -> ProxyLease | None:
@@ -528,7 +546,9 @@ async def _mint_via_pkce_cs(
                         raise RuntimeError("PKCE-CS: consent page has no POST form")
                     action_url, form_inner = fm.group(1), fm.group(2)
                     fields_dict: dict[str, str] = {}
-                    for inp in re.findall(r"<input\b([^>]*)/?>", form_inner, re.IGNORECASE):
+                    for inp in re.findall(
+                        r"<input\b([^>]*)/?>", form_inner, re.IGNORECASE
+                    ):
                         nm = re.search(r'name="([^"]*)"', inp, re.IGNORECASE)
                         vl = re.search(r'value="([^"]*)"', inp, re.IGNORECASE)
                         if nm:
@@ -669,10 +689,14 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
         cookie_jar=cookie_jar,
         headers=session_headers,
     ) as session:
-        # Seed SSO + CF clearance cookies on auth/accounts domains.
+        # Seed SSO + sso-rw (required for write ops like approve) on auth/accounts domains.
         # Without cf_clearance, Cloudflare returns 403 on accounts.x.ai pre-validation.
-        cookie_jar.update_cookies({"sso": sso_token}, _URL("https://auth.x.ai"))
-        cookie_jar.update_cookies({"sso": sso_token}, _URL("https://accounts.x.ai"))
+        cookie_jar.update_cookies(
+            {"sso": sso_token, "sso-rw": sso_token}, _URL("https://auth.x.ai")
+        )
+        cookie_jar.update_cookies(
+            {"sso": sso_token, "sso-rw": sso_token}, _URL("https://accounts.x.ai")
+        )
         if profile.cf_clearance:
             cookie_jar.update_cookies(
                 {"cf_clearance": profile.cf_clearance}, _URL("https://accounts.x.ai")
@@ -693,7 +717,7 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
                 or "sign-in" in final_url
                 or "sign-up" in final_url
             ):
-                raise PermissionError(
+                raise SSOCredentialRejected(
                     "SSO token invalid or expired: redirected to sign-in"
                 )
             if pre_resp.status < 200 or pre_resp.status >= 400:
@@ -836,6 +860,11 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
                         "SSO→Build poll still pending (interval=%ds)", current_interval
                     )
                 else:
+                    if resp.status >= 400:
+                        raise RuntimeError(
+                            "SSO→Build Device Flow poll failed "
+                            f"({resp.status}): {error_desc or error or json.dumps(body)[:200]}"
+                        )
                     logger.info(
                         "SSO→Build poll status=%s error=%s desc=%s",
                         resp.status,
@@ -856,7 +885,8 @@ async def convert_sso_to_build(sso_token: str) -> BuildCredentialSeed:
 
     Device Flow first — the Go upstream-verified path (chenyme sso_build.go).
     Falls back to PKCE-CS only on transient (non-credential) failure.
-    Invalid-SSO errors (PermissionError) propagate without fallback.
+    Invalid-SSO errors (PermissionError from poll, SSOCredentialRejected
+    from pre-validation or PKCE-CS) propagate without fallback.
 
     Returns a BuildCredentialSeed with access_token, refresh_token, etc.
     """
@@ -872,9 +902,11 @@ async def convert_sso_to_build(sso_token: str) -> BuildCredentialSeed:
     try:
         logger.info("SSO→Build: trying Device Flow path")
         return await _mint_via_device_flow(token)
-    except PermissionError:
-        # SSO invalid/expired — both paths share the same credential, so
-        # falling back would only run the registration-bot path for nothing.
+    except (PermissionError, SSOCredentialRejected):
+        # SSO invalid/expired (PermissionError: device-poll denial;
+        # SSOCredentialRejected: pre-validation or PKCE-CS) — both paths
+        # share the same credential, so falling back would only run the
+        # registration-bot path for nothing.
         raise
     except Exception as df_err:
         logger.warning(

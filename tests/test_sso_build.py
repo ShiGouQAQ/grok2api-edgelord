@@ -13,6 +13,7 @@ import pytest
 from app.control.account import sso_build
 from app.control.account.sso_build import (
     BuildCredentialSeed,
+    SSOCredentialRejected,
     convert_sso_to_build,
     decode_build_claims,
     normalize_sso_token,
@@ -47,6 +48,25 @@ class TestNormalizeSSOToken:
 
     def test_sso_prefix_and_semicolon(self) -> None:
         assert normalize_sso_token("  SSO=  mytoken  ; extra=1  ") == "mytoken"
+
+    def test_normalize_sso_token_full_cookie_header(self) -> None:
+        """Full 'Cookie:' header → extract the sso field value."""
+        assert (
+            normalize_sso_token("Cookie: foo=bar; sso=abc123; sso-rw=abc123")
+            == "abc123"
+        )
+
+    def test_normalize_sso_token_cookie_prefix(self) -> None:
+        """Lowercase 'cookie:' prefix with only sso-rw field → extract it."""
+        assert normalize_sso_token("cookie: sso-rw=xyz; other=1") == "xyz"
+
+    def test_normalize_sso_token_plain_sso_prefix(self) -> None:
+        """Bare 'sso=xxx' input (existing behavior) → unchanged."""
+        assert normalize_sso_token("sso=token123") == "token123"
+
+    def test_normalize_sso_token_plain_raw(self) -> None:
+        """Bare raw token (existing behavior) → unchanged."""
+        assert normalize_sso_token("rawtoken") == "rawtoken"
 
 
 class TestSafeXAIURL:
@@ -465,7 +485,7 @@ async def test_device_flow_success(
 async def test_device_flow_invalid_sso(
     _patch_pkce_as_unavailable: Any, _patch_sleep: Any
 ) -> None:
-    """Invalid SSO token → PermissionError from pre-validation."""
+    """Invalid SSO token → SSOCredentialRejected from pre-validation."""
     pre_resp = _make_url_resp(status=200, url="https://accounts.x.ai/sign-in")
 
     with (
@@ -474,7 +494,7 @@ async def test_device_flow_invalid_sso(
         _patch_sleep,
     ):
         mock_cls.return_value = _make_session([pre_resp])
-        with pytest.raises(PermissionError, match="invalid or expired"):
+        with pytest.raises(SSOCredentialRejected, match="invalid or expired"):
             await convert_sso_to_build("invalid-token")
 
 
@@ -482,7 +502,7 @@ async def test_device_flow_invalid_sso(
 async def test_device_flow_unauthorized_status(
     _patch_pkce_as_unavailable: Any, _patch_sleep: Any
 ) -> None:
-    """Pre-validation returns 401 → PermissionError."""
+    """Pre-validation returns 401 → SSOCredentialRejected."""
     pre_resp = _make_url_resp(status=401, url="https://accounts.x.ai/login")
 
     with (
@@ -491,8 +511,89 @@ async def test_device_flow_unauthorized_status(
         _patch_sleep,
     ):
         mock_cls.return_value = _make_session([pre_resp])
-        with pytest.raises(PermissionError, match="invalid or expired"):
+        with pytest.raises(SSOCredentialRejected, match="invalid or expired"):
             await convert_sso_to_build("expired-token")
+
+
+@pytest.mark.asyncio
+async def test_device_flow_precheck_invalid_sso_raises_rejected(
+    _patch_pkce_as_unavailable: Any, _patch_sleep: Any
+) -> None:
+    """Pre-validation sign-in redirect → SSOCredentialRejected (marks source account)."""
+    pre_resp = _make_url_resp(status=200, url="https://accounts.x.ai/sign-in")
+
+    with (
+        patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
+        _patch_pkce_as_unavailable,
+        _patch_sleep,
+    ):
+        mock_cls.return_value = _make_session([pre_resp])
+        with pytest.raises(SSOCredentialRejected, match="invalid or expired"):
+            await convert_sso_to_build("invalid-sso-token")
+
+
+@pytest.mark.asyncio
+async def test_convert_device_precheck_rejected_no_fallback() -> None:
+    """Device Flow raises SSOCredentialRejected → propagates, PKCE-CS never runs."""
+    from app.control.account.sso_build import SSOCredentialRejected
+
+    with (
+        patch(
+            "app.control.account.sso_build._mint_via_device_flow",
+            new_callable=AsyncMock,
+            side_effect=SSOCredentialRejected(
+                "SSO token invalid or expired: redirected to sign-in"
+            ),
+        ) as mock_device,
+        patch(
+            "app.control.account.sso_build._mint_via_pkce_cs",
+            new_callable=AsyncMock,
+        ) as mock_pkce,
+        pytest.raises(SSOCredentialRejected, match="invalid or expired"),
+    ):
+        await convert_sso_to_build("invalid-sso-token")
+
+    mock_device.assert_called_once()
+    mock_pkce.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_device_flow_poll_expired_token_still_permission_error(
+    _patch_pkce_as_unavailable: Any, _patch_sleep: Any
+) -> None:
+    """Poll expired_token stays PermissionError — transient, must NOT mark account."""
+    device_resp = _make_ctx_resp(
+        {
+            "device_code": "dc-123",
+            "user_code": "UC-ABC",
+            "verification_uri_complete": "https://auth.x.ai/activate?user_code=UC-ABC",
+            "interval": 5,
+            "expires_in": 1800,
+        }
+    )
+    pre_resp = _make_url_resp(status=200, url="https://accounts.x.ai/")
+    verify_uri_resp = _make_url_resp(status=200)
+    verify_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/consent")
+    approve_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/done")
+    expired_resp = _make_ctx_resp({"error": "expired_token"}, status=400)
+
+    responses = [
+        pre_resp,
+        device_resp,
+        verify_uri_resp,
+        verify_resp,
+        approve_resp,
+        expired_resp,
+    ]
+
+    with (
+        patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
+        _patch_pkce_as_unavailable,
+        _patch_sleep,
+    ):
+        mock_cls.return_value = _make_session(responses)
+        with pytest.raises(PermissionError, match="denied"):
+            await convert_sso_to_build("sso-token")
 
 
 @pytest.mark.asyncio
@@ -865,6 +966,174 @@ class TestDeviceFlowMint:
                 await sso_build._mint_via_device_flow("sso-token")
 
     @pytest.mark.asyncio
+    async def test_device_flow_seeds_sso_and_sso_rw(self, _patch_sleep: Any) -> None:
+        """Device Flow seeds both sso and sso-rw cookies on auth.x.ai + accounts.x.ai.
+
+        Approve is a write op that requires sso-rw; seeding only sso leaves it
+        unauthenticated and the token poll stuck on authorization_pending.
+        Mirrors Go sso_device.go: `cookies: {"sso": tok, "sso-rw": tok}`.
+        """
+        device_resp = _make_ctx_resp(
+            {
+                "device_code": "dc-123",
+                "user_code": "UC-ABC",
+                "verification_uri_complete": "https://auth.x.ai/activate?user_code=UC-ABC",
+                "interval": 5,
+                "expires_in": 1800,
+            }
+        )
+        pre_resp = _make_url_resp(status=200, url="https://accounts.x.ai/")
+        verify_uri_resp = _make_url_resp(status=200)
+        verify_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/consent")
+        approve_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/done")
+        token_resp = _make_ctx_resp({"access_token": "at-device", "expires_in": 7200})
+
+        responses = [
+            pre_resp,
+            device_resp,
+            verify_uri_resp,
+            verify_resp,
+            approve_resp,
+            token_resp,
+        ]
+
+        jar = MagicMock()
+        with (
+            patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
+            patch("app.control.account.sso_build.aiohttp.CookieJar", return_value=jar),
+            _patch_sleep,
+        ):
+            mock_cls.return_value = _make_session(responses)
+            await sso_build._mint_via_device_flow("sso-token")
+
+        assert mock_cls.call_args.kwargs["cookie_jar"] is jar
+        sso_seeds = {
+            str(call.args[1]): dict(call.args[0])
+            for call in jar.update_cookies.call_args_list
+            if "sso" in call.args[0]
+        }
+        assert sso_seeds["https://auth.x.ai"] == {
+            "sso": "sso-token",
+            "sso-rw": "sso-token",
+        }
+        assert sso_seeds["https://accounts.x.ai"] == {
+            "sso": "sso-token",
+            "sso-rw": "sso-token",
+        }
+
+    @pytest.mark.asyncio
+    async def test_device_flow_poll_http_400_fails_fast(
+        self, _patch_sleep: Any
+    ) -> None:
+        """Poll 400 with unknown error → RuntimeError immediately (no 75s wait)."""
+        device_resp = _make_ctx_resp(
+            {
+                "device_code": "dc-123",
+                "user_code": "UC-ABC",
+                "verification_uri_complete": "https://auth.x.ai/activate?user_code=UC-ABC",
+                "interval": 5,
+                "expires_in": 1800,
+            }
+        )
+        pre_resp = _make_url_resp(status=200, url="https://accounts.x.ai/")
+        verify_uri_resp = _make_url_resp(status=200)
+        verify_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/consent")
+        approve_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/done")
+        error_resp = _make_ctx_resp({}, status=400)
+
+        responses = [
+            pre_resp,
+            device_resp,
+            verify_uri_resp,
+            verify_resp,
+            approve_resp,
+            error_resp,
+        ]
+
+        with (
+            patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
+            _patch_sleep,
+        ):
+            mock_cls.return_value = _make_session(responses)
+            with pytest.raises(RuntimeError, match="poll failed"):
+                await sso_build._mint_via_device_flow("sso-token")
+
+    @pytest.mark.asyncio
+    async def test_device_flow_poll_403_fails_fast(self, _patch_sleep: Any) -> None:
+        """Poll 403 (CF challenge) → RuntimeError immediately, not a 75s wait."""
+        device_resp = _make_ctx_resp(
+            {
+                "device_code": "dc-123",
+                "user_code": "UC-ABC",
+                "verification_uri_complete": "https://auth.x.ai/activate?user_code=UC-ABC",
+                "interval": 5,
+                "expires_in": 1800,
+            }
+        )
+        pre_resp = _make_url_resp(status=200, url="https://accounts.x.ai/")
+        verify_uri_resp = _make_url_resp(status=200)
+        verify_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/consent")
+        approve_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/done")
+        error_resp = _make_ctx_resp(
+            {"error": "cf_challenge", "error_description": "Cloudflare challenge"},
+            status=403,
+        )
+
+        responses = [
+            pre_resp,
+            device_resp,
+            verify_uri_resp,
+            verify_resp,
+            approve_resp,
+            error_resp,
+        ]
+
+        with (
+            patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
+            _patch_sleep,
+        ):
+            mock_cls.return_value = _make_session(responses)
+            with pytest.raises(RuntimeError, match="poll failed"):
+                await sso_build._mint_via_device_flow("sso-token")
+
+    @pytest.mark.asyncio
+    async def test_device_flow_poll_200_pending_continues(
+        self, _patch_sleep: Any
+    ) -> None:
+        """Poll 200 + authorization_pending → keeps polling until timeout (no fail-fast)."""
+        device_resp = _make_ctx_resp(
+            {
+                "device_code": "dc-123",
+                "user_code": "UC-ABC",
+                "verification_uri_complete": "https://auth.x.ai/activate?user_code=UC-ABC",
+                "interval": 5,
+                "expires_in": 1800,
+            }
+        )
+        pre_resp = _make_url_resp(status=200, url="https://accounts.x.ai/")
+        verify_uri_resp = _make_url_resp(status=200)
+        verify_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/consent")
+        approve_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/done")
+        pending_resp = _make_ctx_resp({"error": "authorization_pending"}, status=200)
+
+        responses = [
+            pre_resp,
+            device_resp,
+            verify_uri_resp,
+            verify_resp,
+            approve_resp,
+        ] + [pending_resp] * 15
+
+        with (
+            patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
+            _patch_sleep,
+            _patch_monotonic_with_advance(start=0.0, delta=5.0),
+        ):
+            mock_cls.return_value = _make_session(responses)
+            with pytest.raises(TimeoutError, match="timed out"):
+                await sso_build._mint_via_device_flow("sso-token")
+
+    @pytest.mark.asyncio
     async def test_slow_down_multiple_times(self) -> None:
         """slow_down returned multiple times → interval increases up to 30s cap, then succeeds."""
         device_resp = _make_ctx_resp(
@@ -1072,7 +1341,7 @@ class TestDeviceFlowMint:
 
     @pytest.mark.asyncio
     async def test_sso_validation_redirect_to_signup(self) -> None:
-        """GET accounts.x.ai/ redirects to sign-up → PermissionError."""
+        """GET accounts.x.ai/ redirects to sign-up → SSOCredentialRejected."""
         pre_resp = _make_url_resp(
             status=200,
             url="https://accounts.x.ai/sign-up",
@@ -1091,12 +1360,12 @@ class TestDeviceFlowMint:
             ),
         ):
             mock_cls.return_value = _make_session([pre_resp])
-            with pytest.raises(PermissionError, match="invalid or expired"):
+            with pytest.raises(SSOCredentialRejected, match="invalid or expired"):
                 await convert_sso_to_build("sso-token")
 
     @pytest.mark.asyncio
     async def test_sso_validation_status_unauthorized(self) -> None:
-        """GET accounts.x.ai/ returns 401 → PermissionError."""
+        """GET accounts.x.ai/ returns 401 → SSOCredentialRejected."""
         pre_resp = _make_url_resp(status=401, url="https://accounts.x.ai/login")
 
         with (
@@ -1112,7 +1381,7 @@ class TestDeviceFlowMint:
             ),
         ):
             mock_cls.return_value = _make_session([pre_resp])
-            with pytest.raises(PermissionError, match="invalid or expired"):
+            with pytest.raises(SSOCredentialRejected, match="invalid or expired"):
                 await convert_sso_to_build("sso-token")
 
 
