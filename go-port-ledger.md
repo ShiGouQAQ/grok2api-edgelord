@@ -382,3 +382,19 @@
 > - **M6**：`config.defaults.toml` 的 `image_format`/`imagine_public_image_proxy`/`video_format` 从 `[build]` 移回 `[features]`（与 jiujiu532 上游一致）。
 > - M4/M5（`storage.data_dir`、`browser.custom_fingerprint.enabled`）审计后 KEEP。
 > 测试：全套 1179 passed。TDD：每处修复先 RED 后 GREEN（tests/test_clearance_config.py、test_build_errors.py、test_config.py、test_sso_build.py 新增 16 测试）。
+
+---
+
+## 2026-08-04 移植批 9（Go 8f979d4 SSO→Build + QuotaBilling 对齐，非独立提交移植）
+
+上游对照：`backend/internal/infra/provider/web/sso_build.go`（@8f979d4）为 **Device Flow-only**（SSO 预检 → device/code → verify(consent) → approve(done) → poll token），**全仓库零 PKCE-CS**。`cli/definition.go` `grok_build → Quota: QuotaBilling`（api.x.ai/billing + Bearer），`accountsync/service.go` 按 QuotaKind 分派探测。本仓库此前 PKCE-CS 为注册机逆向移植（GrokRegisterAgent/cpa_grpcweb，公开源不可查），生产从未成功。
+
+| 提交 | 状态 | 说明 |
+|---|---|---|
+| `a16837c9` (v3.0.0) | 已审阅 | Go 重写引入 sso_build.go（Device Flow-only），无 PKCE-CS |
+| `8f979d45` (sso_build.go 现状) | **已移植** | convert_sso_to_build 改为 **Device Flow 首选**（PermissionError=SSO 无效直接传播对齐 ErrUnauthorized）；PKCE-CS 降级为可选 fallback（SSOCredentialRejected 硬失效传播） |
+| `cli/definition.go` `QuotaBilling` | **已移植** | build 账号探测从 grok.com/rest/rate-limits（错：OAuth token 当 sso cookie→401→误标 EXPIRED）改路由 `api.x.ai/billing/usage` + Bearer（`fetch_build_billing`），`_refresh_one` build 分支 + `_POOL_CONFIG["build"]` 6h 定时 |
+| `accountsync` QuotaKind 分派 | **已移植** | 转换 success 计数 = 验证通过才 success（非空 token + JWT exp + billing smoke 200）；冒烟 credential_rejected → 标源 SSO rejected（对齐 markSSOCredentialRejected） |
+
+本地增强保留：PKCE-CS 作为可选 fallback（注册机路径，仅临时性失败触发）；`SSOCredentialRejected` 异常类型；`fetch_build_billing` 共享 helper（tokens.py build_refresh_billing 同款逻辑提取）。
+测试：全套 1207 passed（新增 test_build_convert.py 5 + test_build_refresh_routing.py 5 + sso_build/xai_billing/admin_payload 增量）。
