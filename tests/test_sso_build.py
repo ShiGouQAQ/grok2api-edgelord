@@ -22,6 +22,28 @@ from app.control.account.sso_build import (
 from app.control.proxy.config import ClearanceConfig
 from app.dataplane.proxy.adapters.profile import ProxyProfile
 
+
+@pytest.fixture(autouse=True)
+def _no_real_mint_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Block real network calls in mint paths (caused intermittent test hangs).
+
+    Every Device Flow / PKCE-CS mint path calls ``_acquire_mint_lease()`` →
+    ``get_proxy_runtime()`` → ``proxy.acquire()`` which, with
+    clearance_mode=turnstile, runs a real Cloudflare Turnstile solve (live
+    network request) that never returns in CI. Mock the proxy runtime so
+    acquire() returns None — mint logic (incl. config fallback) stays real,
+    and tests that patch get_proxy_runtime themselves still override this.
+    """
+    from unittest.mock import AsyncMock
+
+    proxy = AsyncMock()
+    proxy.acquire.return_value = None
+    monkeypatch.setattr(
+        "app.dataplane.proxy.get_proxy_runtime",
+        AsyncMock(return_value=proxy),
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Utility function tests
 # ═══════════════════════════════════════════════════════════════════════════

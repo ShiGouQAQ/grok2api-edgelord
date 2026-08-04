@@ -38,4 +38,5 @@ dev = [
     "ruff>=0.15.0",
     "pytest>=9.0.0",
     "pytest-asyncio>=1.4.0",
+    "pytest-timeout>=2.4.0",
 ]
