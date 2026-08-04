@@ -68,6 +68,34 @@ def _infer_pool_from_live_windows(windows: dict[int, QuotaWindow]) -> str | None
     return None
 
 
+# Go ClassifyCredentialRejection credit-exhaustion markers (b4c7baab): bodies
+# carrying any of these are quota exhaustion, never credential rejection.
+_CREDIT_EXHAUSTION_SIGNALS = (
+    "run out of credits",
+    "out of credits",
+    "usage balance exhausted",
+    "usage limit reached",
+)
+
+
+def _is_quota_exhaustion_error(exc: UpstreamError) -> bool:
+    """Map Go ClassifyCredentialRejection quota signals onto errors.py flags.
+
+    errors.py's ``from_http_response`` already sets quota_exhausted /
+    free_quota_exhausted / model_quota_exhausted for 402/403/429; this bridge
+    covers manually-constructed UpstreamErrors (e.g. fetch_build_billing)
+    whose body carries a credit-exhaustion marker without classification.
+    Matches Go exactly: 401 is always credential rejection, quota markers win
+    over a generic credential_rejected flag on 403.
+    """
+    if exc.quota_exhausted or exc.free_quota_exhausted or exc.model_quota_exhausted:
+        return True
+    if exc.status == 401:
+        return False
+    text = f"{(exc.details or {}).get('body', '')} {exc}".lower()
+    return any(signal in text for signal in _CREDIT_EXHAUSTION_SIGNALS)
+
+
 class AccountRefreshService:
     """Fetches real quota data from the upstream usage API and persists it.
 
@@ -440,6 +468,12 @@ class AccountRefreshService:
         try:
             billing = await fetch_build_billing(token)
         except UpstreamError as exc:
+            # Go b4c7baab: quota exhaustion is not a credential death. Record
+            # the per-account failed outcome (ForEachObserved-style: each
+            # account's outcome captured independently, no batch abort) and
+            # keep the account in the pool — never EXPIRED on quota bodies.
+            if _is_quota_exhaustion_error(exc):
+                return RefreshResult(checked=1, failed=1)
             if not getattr(exc, "credential_rejected", False):
                 raise
             if not await self._expire_invalid_credentials(record, exc):

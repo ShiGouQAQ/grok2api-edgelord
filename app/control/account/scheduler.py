@@ -123,7 +123,11 @@ class AccountRefreshScheduler:
                 )
 
     async def _build_credential_loop(self) -> None:
-        from .build_refresh import compute_refresh_due_at, refresh_build_token
+        from .build_refresh import (
+            build_refresh_short_circuited,
+            compute_refresh_due_at,
+            refresh_build_token,
+        )
         from .commands import AccountPatch
 
         while not self._stop.is_set():
@@ -147,6 +151,12 @@ class AccountRefreshScheduler:
                     if record.provider != "grok_build":
                         continue
                     ext = record.ext or {}
+                    if build_refresh_short_circuited(ext, now):
+                        # Go resolvePermanentRefreshFailure (ef10c4cb): never
+                        # re-request OAuth for a permanent-marked account while
+                        # the access token is alive; manual (admin) retry
+                        # bypasses via refresh_build_token_manual.
+                        continue
                     refresh_token_val = ext.get("build_refresh_token", "")
                     refresh_due_at = ext.get("build_refresh_due_at", 0)
                     if not refresh_token_val or not refresh_due_at:
@@ -254,7 +264,11 @@ class AccountRefreshScheduler:
                 )
 
     async def recover_build_tokens(self) -> int:
-        from .build_refresh import compute_refresh_due_at, refresh_build_token
+        from .build_refresh import (
+            build_refresh_short_circuited,
+            compute_refresh_due_at,
+            refresh_build_token,
+        )
         from .commands import AccountPatch
 
         snapshot = await self._service._repo.runtime_snapshot()
@@ -268,6 +282,10 @@ class AccountRefreshScheduler:
             if record.provider != "grok_build":
                 continue
             ext = record.ext or {}
+            if build_refresh_short_circuited(ext, now):
+                # Go resolvePermanentRefreshFailure (ef10c4cb): permanent-
+                # marked accounts with a live access token are not re-requested.
+                continue
             expires_at = ext.get("build_expires_at", 0)
             if expires_at <= 0 or expires_at > recovery_threshold:
                 continue

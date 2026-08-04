@@ -5,6 +5,7 @@ Covers the ported Go 4f34707 mode_id=3 (heavy) boundary.
 
 from app.control.account.enums import QuotaSource
 from app.control.account.models import QuotaWindow
+from app.control.account.quota_defaults import BUILD_QUOTA_DEFAULTS
 from app.control.account.refresh import _infer_pool_from_live_windows
 
 
@@ -104,3 +105,15 @@ class TestInferPoolFromLiveWindows:
         """total < 0 → None"""
         windows = {3: _w(-1)}
         assert _infer_pool_from_live_windows(windows) is None
+
+
+class TestBuildQuotaEstimate:
+    """34811392 (Go estimatedFreeTokenLimit 1M → 500K) has no Python
+    counterpart: the Python Build quota is query-count based (quota_build
+    100/2h), not token-estimated. Pin the query-count model so a future port
+    of a token estimate updates this assertion deliberately."""
+
+    def test_build_quota_default_is_query_count_based(self):
+        assert BUILD_QUOTA_DEFAULTS.quota_build is not None
+        assert BUILD_QUOTA_DEFAULTS.quota_build.total == 100
+        assert BUILD_QUOTA_DEFAULTS.quota_build.window_seconds == 7_200

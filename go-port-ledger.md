@@ -331,10 +331,10 @@
 
 | # | 提交 | 范围 | 状态 | 描述 |
 |---|------|------|------|------|
-| 5 | `b4c7baab` | Build 账号 | 📋 待审阅 | 增强 Build 账号检测的错误分类 — Python 二级探测 `_refresh_one()` 已有等价逻辑，核对 |
-| 6 | `bcc6435f` | Build 账号 | 📋 待审阅 | 改进 Build 账号检测和路由 failover |
-| 7 | `ef10c4cb` | Build 凭证 | 📋 待审阅 | 允许手动重试无效 Build 凭证 — Python SSO→Build 导入路径相关 |
-| 8 | `34811392` | Build 配额 | 📋 待审阅 | 更新 Build free quota 估算 — Python console 配额窗口 (BASIC_CONSOLE_LIMIT) 相关 |
+| 5 | `b4c7baab` | Build 账号 | ✅ 已移植 (wave2-C) | 增强 Build 账号检测的错误分类 — refresh.py 新增 `_is_quota_exhaustion_error` 桥（credit markers "run out of credits"/"out of credits"/"usage balance exhausted"/"usage limit reached" → quota 标志，401 恒为凭据拒绝），`_refresh_build_billing` 配额体不再 EXPIRED（per-account failed，ForEachObserved 式独立结果）；build_detect.py 检测分类消费 quota/free/model 配额标志 |
+| 6 | `bcc6435f` | Build 账号 | ✅ 已移植 (wave2-C) | 改进 Build 账号检测和路由 failover — 仅移植检测面：`build_detect.py`（POST /responses 探测 grok-4.5/"hello,test" 非流式，401→手动刷新一次→重试→二次 401→reauth；网络错误 status==0 → failed 不累加计数 softNetworkCooldown；403 chat-denied 默认模型级 failed）；`/admin/api/batch/build-detect` 端点（sync/async SSE）；配置键 `account.build_detect.max_attempts=999`（拒 0）/`mark_build_chat_denied_as_reauth=false`（经 `should_invalidate_build_forbidden` 门控）。路由 selector 侧（selection session/softNetworkCooldown 5s 冷却）归 Wave-2 F |
+| 7 | `ef10c4cb` | Build 凭证 | ✅ 已移植 (wave2-C) | 允许手动重试无效 Build 凭证 — `build_refresh.py` `refresh_build_token_manual()`（`:manual-retry` 后缀 singleflight 守卫，绕过一次永久短回路）+ `build_refresh_short_circuited()`（scheduler 两循环对永久标记+access 存活账号跳过 OAuth，Go resolvePermanentRefreshFailure）；重试失败后永久标记回写，成功清除 |
+| 8 | `34811392` | Build 配额 | ✅ 已移植 (wave2-C) | 更新 Build free quota 估算 — Python 无 `estimated_free_token_limit`（Build 配额为查询次数制 quota_build=100/2h，非 token 估算）；Go 1M→500K 无可移植面，test_refresh_infer.py 钉住查询次数模型 |
 | 9 | `75f4f7a7` | Build 代理 | ✅ 已移植 (wave1-D) | `ProxyScope.BUILD` + `ProxyLease.fresh_tunnel`；`acquire()` proxy_pool+BUILD+非 sticky（`{account}` 占位符）每请求轮换 cursor；`build_session_kwargs` 消费 `fresh_tunnel` → curl `FRESH_CONNECT`+`FORBID_REUSE`（Go `request.Close=true`） |
 | 10 | `0893557a` | 代理健康 | ✅ 已移植 (wave1-D) | `EgressNode.failure_count` + 节点健康状态机：`feedback()` SUCCESS 分支修复健康/清零计数，失败分支按 kind 衰减 health → state（HEALTHY/DEGRADED/UNHEALTHY），`healthy_nodes()` 生效；`mark_failure_after_success()` 从基线 1 重新计数；节点未命中时记录 `proxy node failure write failed`（Go `stream_failure_health_write_failed`） |
 | 11 | `f1867395` | 代理节点 | ✅ 已移植 (wave1-D) | 验证仅 + 回归测试：Python `CancelledError` 是 BaseException，transport wrapper `except Exception` 已天然不捕获 → 取消请求不产生反馈/不冷却节点/不动 cursor/不进黑名单（test_proxy_health.py `TestCancelNoCooldown` 驱动真实 `post_stream` 验证） |

@@ -381,6 +381,65 @@ async def batch_refresh(
     )
 
 
+@router.post("/build-detect")
+async def batch_build_detect(
+    req: BatchRequest,
+    async_mode: bool = Query(False, alias="async"),
+    all_build: bool = Query(False),
+    concurrency: int | None = Query(None, ge=1),
+    repo: "AccountRepository" = Depends(get_repo),
+):
+    """Detect availability of Build accounts (port of Go bcc6435f+b4c7baab).
+
+    Probes each account with model grok-4.5 / prompt "hello,test"; outcomes:
+    ok / invalid (marked REAUTH_REQUIRED) / failed (no state change —
+    softNetworkCooldown: network errors never bump fail counters).
+    """
+    from app.control.account.build_detect import detect_build_account
+
+    tokens = [t.strip() for t in req.tokens if t.strip()]
+    try:
+        max_attempts = int(get_config("account.build_detect.max_attempts", 999))
+    except (TypeError, ValueError):
+        max_attempts = 0
+    if max_attempts <= 0:
+        raise ValidationError(
+            "account.build_detect.max_attempts must be > 0", param="max_attempts"
+        )
+    if all_build and tokens:
+        raise ValidationError(
+            "tokens must be empty when all_build=true", param="tokens"
+        )
+    if all_build:
+        page = await repo.list_accounts(ListAccountsQuery(page=1, page_size=5000))
+        tokens = [r.token for r in page.items if r.pool == "build" and is_manageable(r)]
+    else:
+        if not tokens:
+            raise ValidationError("No tokens provided", param="tokens")
+        records = await repo.get_accounts(tokens)
+        by_token = {r.token: r for r in records}
+        tokens = [
+            t
+            for t in tokens
+            if (rec := by_token.get(t)) and rec.pool == "build" and is_manageable(rec)
+        ]
+    if not tokens:
+        raise ValidationError("No build accounts available", param="tokens")
+
+    async def _detect_one(token: str) -> dict:
+        return await detect_build_account(repo, token, max_attempts=max_attempts)
+
+    c = _concurrency(concurrency, "batch.detect_concurrency", fallback=10)
+    logger.info(
+        "admin batch build detect: token_count={} concurrency={}",
+        len(tokens),
+        c,
+    )
+    return await _dispatch(
+        tokens, _detect_one, use_async=async_mode, concurrency=c, repo=repo
+    )
+
+
 @router.post("/cache-clear")
 async def batch_cache_clear(
     req: BatchRequest,

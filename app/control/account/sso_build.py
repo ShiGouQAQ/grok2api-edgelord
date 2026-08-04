@@ -183,10 +183,16 @@ async def _acquire_mint_lease() -> ProxyLease | None:
     cf_clearance Cloudflare issued matches the UA/TLS fingerprint we present.
     """
     try:
+        from app.control.proxy.models import ProxyScope
         from app.dataplane.proxy import get_proxy_runtime
 
         proxy = await get_proxy_runtime()
-        lease = await proxy.acquire(clearance_origin=ACCOUNTS_ORIGIN)
+        # Build mint gets fresh-tunnel proxy rotation (Wave-1 D port of Go
+        # 75f4f7a7): ProxyScope.BUILD rotates the egress per request on
+        # proxy_pool mode.
+        lease = await proxy.acquire(
+            scope=ProxyScope.BUILD, clearance_origin=ACCOUNTS_ORIGIN
+        )
         if not isinstance(getattr(lease, "cf_cookies", ""), str):
             return None
         return lease

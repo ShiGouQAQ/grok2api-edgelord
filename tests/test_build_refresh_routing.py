@@ -173,6 +173,117 @@ class TestBuildBillingRouting:
         assert "build_billing" not in (recs["web-tok"].ext or {})
 
 
+class TestBuildBillingQuotaClassification:
+    """b4c7baab: quota signals in refresh classification.
+
+    Go ClassifyCredentialRejection decoupled quota exhaustion from credential
+    rejection (QuotaExhausted/FreeQuotaExhausted/ModelQuotaExhausted flags).
+    The billing probe must therefore NOT expire an account on quota bodies —
+    per-account failed outcome, account stays in the pool.
+    """
+
+    @pytest.mark.asyncio
+    async def test_billing_403_credit_marker_not_expired(self):
+        """403 with 'usage limit reached' body → failed=1, account stays ACTIVE.
+
+        Regression: fetch_build_billing sets credential_rejected=True on any
+        403; the credit-exhaustion marker must win over that (Go b4c7baab)."""
+        repo = await _make_repo(_build_account())
+        svc = AccountRefreshService(repo)
+        record = (await repo.get_accounts(["build-tok"]))[0]
+
+        with patch(
+            "app.dataplane.reverse.protocol.xai_billing.fetch_build_billing",
+            new_callable=AsyncMock,
+            side_effect=UpstreamError(
+                "Build billing access denied: HTTP 403",
+                status=403,
+                credential_rejected=True,
+                body='{"error": "usage limit reached"}',
+            ),
+        ):
+            result = await svc._refresh_one(record, apply_fallback=True)
+
+        assert result.checked == 1
+        assert result.failed == 1
+        assert result.expired == 0
+
+        rec = (await repo.get_accounts(["build-tok"]))[0]
+        assert rec.status == AccountStatus.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_billing_402_quota_exhausted_not_expired(self):
+        """402 with quota_exhausted flag → failed, not expired."""
+        repo = await _make_repo(_build_account())
+        svc = AccountRefreshService(repo)
+        record = (await repo.get_accounts(["build-tok"]))[0]
+
+        with patch(
+            "app.dataplane.reverse.protocol.xai_billing.fetch_build_billing",
+            new_callable=AsyncMock,
+            side_effect=UpstreamError(
+                "Build billing payment required",
+                status=402,
+                quota_exhausted=True,
+                body='{"error": "run out of credits"}',
+            ),
+        ):
+            result = await svc._refresh_one(record, apply_fallback=True)
+
+        assert result.failed == 1
+        assert result.expired == 0
+        rec = (await repo.get_accounts(["build-tok"]))[0]
+        assert rec.status == AccountStatus.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_billing_429_free_usage_exhausted_not_expired(self):
+        """429 free_quota_exhausted flag → failed, not expired."""
+        repo = await _make_repo(_build_account())
+        svc = AccountRefreshService(repo)
+        record = (await repo.get_accounts(["build-tok"]))[0]
+
+        with patch(
+            "app.dataplane.reverse.protocol.xai_billing.fetch_build_billing",
+            new_callable=AsyncMock,
+            side_effect=UpstreamError(
+                "Build billing rate limited",
+                status=429,
+                free_quota_exhausted=True,
+                body='{"code": "subscription:free-usage-exhausted"}',
+            ),
+        ):
+            result = await svc._refresh_one(record, apply_fallback=True)
+
+        assert result.failed == 1
+        assert result.expired == 0
+        rec = (await repo.get_accounts(["build-tok"]))[0]
+        assert rec.status == AccountStatus.ACTIVE
+
+    @pytest.mark.asyncio
+    async def test_billing_401_credential_still_expires(self):
+        """401 credential rejection (no quota markers) still EXPIRES — the
+        quota bridge must not swallow genuine credential deaths."""
+        repo = await _make_repo(_build_account())
+        svc = AccountRefreshService(repo)
+        record = (await repo.get_accounts(["build-tok"]))[0]
+
+        with patch(
+            "app.dataplane.reverse.protocol.xai_billing.fetch_build_billing",
+            new_callable=AsyncMock,
+            side_effect=UpstreamError(
+                "Build billing access denied: HTTP 401",
+                status=401,
+                credential_rejected=True,
+                body="invalid-credentials",
+            ),
+        ):
+            result = await svc._refresh_one(record, apply_fallback=True)
+
+        assert result.expired == 1
+        rec = (await repo.get_accounts(["build-tok"]))[0]
+        assert rec.status == AccountStatus.EXPIRED
+
+
 class TestSchedulerBuildPool:
     """Scheduler includes the build pool with a sane default interval."""
 
