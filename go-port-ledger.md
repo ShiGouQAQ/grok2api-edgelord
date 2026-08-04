@@ -339,8 +339,8 @@
 | 10 | `0893557a` | 代理健康 | ✅ 已移植 (wave1-D) | `EgressNode.failure_count` + 节点健康状态机：`feedback()` SUCCESS 分支修复健康/清零计数，失败分支按 kind 衰减 health → state（HEALTHY/DEGRADED/UNHEALTHY），`healthy_nodes()` 生效；`mark_failure_after_success()` 从基线 1 重新计数；节点未命中时记录 `proxy node failure write failed`（Go `stream_failure_health_write_failed`） |
 | 11 | `f1867395` | 代理节点 | ✅ 已移植 (wave1-D) | 验证仅 + 回归测试：Python `CancelledError` 是 BaseException，transport wrapper `except Exception` 已天然不捕获 → 取消请求不产生反馈/不冷却节点/不动 cursor/不进黑名单（test_proxy_health.py `TestCancelNoCooldown` 驱动真实 `post_stream` 验证） |
 | 12 | `1edc9fbe` | 模型别名 | ✅ 已移植 | current (wave1-E) | `registry.py` ALIASES 映射 + `resolve_alias()`/别名感知 `resolve()`；`spec.py` 新增 `supports_reasoning`；`xai_build.py` `_normalize_reasoning_effort` 别名路由 + "none"→thinking disabled/其余 adaptive；`xai_console_chat.py` CONSOLE_MODELS/_MODEL_FIXED_EFFORT 扩展 `grok-4.20-0309-reasoning-{low,medium,high}` |
-| 13 | `15146556` | 路由 | 📋 待审阅 | 无限路由尝试功能 — Python 路由重试逻辑相关 |
-| 14 | `72340380` | 路由 | 📋 待审阅 | 移除 maxAttempts 硬上限 10 — 与 `15146556` 配套 |
+| 13 | `15146556` | 路由 | ✅ 已移植 (wave2-F) | `app/products/_routing_policy.py` `RoutingAttemptPolicy`/`new_routing_attempt_policy`/`routing_attempt_policy`（-1 无限，≤0→3，配置 1..200，0/越界 ValueError）；10 个产品路由循环改 `count()`+`allows()` 驱动，`has_next()` 替换 `attempt < max_retries`；stored Responses 强制 1 次尝试；配置 `routing.max_routing_attempts=200`/`unlimited_routing_attempts=-1`；tests/test_routing_policy.py 16 项；Python 提交 `626595ed` |
+| 14 | `72340380` | 路由 | ✅ 已移植 (wave2-F) | 同上：验证上限放宽至 200（`MAX_ROUTING_ATTEMPTS`），移除硬上限 10；Python 提交 `626595ed` |
 | 15 | `2aaac4d0` | Clearance | ⏭️ 跳过 (verify-only) | 已满足：`ManualClearanceProvider.build_bundle()`（providers/manual.py:11-25）从不校验 `cf_cookies` 非空 — mode==MANUAL 时无条件构建 bundle（仅模式不匹配返回 None）；无 challenge cookies 的 clearance 在 Python 架构性成立 |
 
 ### 🟢 低优先级（参考）
