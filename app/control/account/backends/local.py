@@ -231,10 +231,10 @@ class LocalAccountRepository:
                     "total": cls._payload_int(total),
                 }
 
-        return {
+        payload: dict[str, Any] = {
             "token": row["token"],
             "pool": row["pool"] or "basic",
-            "provider": row["provider"] if "provider" in row.keys() else "grok_web",
+            "provider": row["provider"] or "grok_web",
             "status": row["status"],
             "state_reason": row["state_reason"],
             "quota": quota,
@@ -243,6 +243,9 @@ class LocalAccountRepository:
             "last_used_at": row["last_use_at"],
             "tags": cls._parse_tags(row["tags"]),
         }
+        if build_billing_raw := row["build_billing"]:
+            payload["build_billing"] = json.loads(build_billing_raw)
+        return payload
 
     def _upsert_sync(
         self,
@@ -663,12 +666,14 @@ class LocalAccountRepository:
             SELECT
                 token,
                 pool,
+                provider,
                 status,
                 state_reason,
                 tags,
                 usage_use_count,
                 usage_fail_count,
                 last_use_at,
+                CASE WHEN json_valid(ext) THEN json_extract(ext, '$.build_billing') END AS build_billing,
                 {quota_select}
             FROM {_TBL}
             WHERE deleted_at IS NULL

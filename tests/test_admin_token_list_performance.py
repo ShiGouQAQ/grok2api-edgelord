@@ -19,16 +19,18 @@ class _FastListRepo:
 
     async def list_token_payloads(self) -> list[dict]:
         self.fast_called = True
-        return [{
-            "token": "tok-1",
-            "pool": "basic",
-            "status": "active",
-            "quota": {},
-            "use_count": 0,
-            "fail_count": 0,
-            "last_used_at": None,
-            "tags": [],
-        }]
+        return [
+            {
+                "token": "tok-1",
+                "pool": "basic",
+                "status": "active",
+                "quota": {},
+                "use_count": 0,
+                "fail_count": 0,
+                "last_used_at": None,
+                "tags": [],
+            }
+        ]
 
     async def list_accounts(self, query):
         self.list_called = True
@@ -47,7 +49,9 @@ class _FastInvalidRepo:
 
     async def list_token_payloads(self) -> list[dict]:
         self.payload_called = True
-        raise AssertionError("delete_invalid_tokens should use the invalid-token fast path")
+        raise AssertionError(
+            "delete_invalid_tokens should use the invalid-token fast path"
+        )
 
     async def delete_accounts(self, tokens: list[str]):
         self.deleted = tokens
@@ -88,17 +92,21 @@ class AdminTokenListPerformanceTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = LocalAccountRepository(Path(tmp) / "accounts.db")
             await repo.initialize()
-            await repo.upsert_accounts([
-                AccountUpsert(token="tok-1", pool="basic", tags=["nsfw"]),
-            ])
-            await repo.patch_accounts([
-                AccountPatch(
-                    token="tok-1",
-                    usage_use_delta=3,
-                    usage_fail_delta=2,
-                    quota_console={"remaining": 4, "total": 5},
-                )
-            ])
+            await repo.upsert_accounts(
+                [
+                    AccountUpsert(token="tok-1", pool="basic", tags=["nsfw"]),
+                ]
+            )
+            await repo.patch_accounts(
+                [
+                    AccountPatch(
+                        token="tok-1",
+                        usage_use_delta=3,
+                        usage_fail_delta=2,
+                        quota_console={"remaining": 4, "total": 5},
+                    )
+                ]
+            )
 
             items = await repo.list_token_payloads()
 
@@ -111,6 +119,58 @@ class AdminTokenListPerformanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0]["quota"]["console"], {"remaining": 4, "total": 5})
         self.assertEqual(items[0]["tags"], ["nsfw"])
         self.assertNotIn("ext", items[0])
+
+    async def test_payload_includes_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalAccountRepository(Path(tmp) / "accounts.db")
+            await repo.initialize()
+            await repo.upsert_accounts(
+                [
+                    AccountUpsert(
+                        token="tok-build", pool="basic", provider="grok_build"
+                    ),
+                ]
+            )
+
+            items = await repo.list_token_payloads()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["provider"], "grok_build")
+
+    async def test_payload_includes_build_billing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalAccountRepository(Path(tmp) / "accounts.db")
+            await repo.initialize()
+            await repo.upsert_accounts(
+                [
+                    AccountUpsert(
+                        token="tok-build",
+                        pool="basic",
+                        provider="grok_build",
+                        ext={"build_billing": {"credits": 10, "used": 3}},
+                    ),
+                ]
+            )
+
+            items = await repo.list_token_payloads()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["build_billing"], {"credits": 10, "used": 3})
+
+    async def test_payload_provider_defaults_grok_web(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = LocalAccountRepository(Path(tmp) / "accounts.db")
+            await repo.initialize()
+            await repo.upsert_accounts(
+                [
+                    AccountUpsert(token="tok-web", pool="basic"),
+                ]
+            )
+
+            items = await repo.list_token_payloads()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["provider"], "grok_web")
 
     async def test_local_repository_tolerates_legacy_blank_quota_json(self):
         with tempfile.TemporaryDirectory() as tmp:
