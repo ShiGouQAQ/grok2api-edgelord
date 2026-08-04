@@ -77,7 +77,7 @@
 |---|------|------|--------|------|------|
 | 9 | `3d5e7de` | 审计 | 🟢 低 | 📋 待审阅 | 完整故障诊断审计 |
 | 21 | `2db3f65` | 账号/管理 | 🟡 中 | ⏭️ 跳过 | Go 多 provider batch workflows + admin preferences（24 files, ~1200 行），Python 无多 provider 架构和 Go admin UI |
-| 22 | `d2eecc4` | 全链路 | 🟡 中 | 📋 待审阅 | gateway Multi-Provider 路由 + 运行时并发管理 — 61 files, ~3600 行, 对话模块拆分为独立文件 |
+| 22 | `d2eecc4` | 全链路 | 🟡 中 | ⏭️ 跳过 (2026-08-04) | gateway Multi-Provider 路由 + 运行时并发管理（61 files, ~3600 行, 对话模块拆分为独立文件）；Python 无 Web/Console/Build provider 分离架构，路由通过 `ModelSpec.is_console_chat()`/`is_build()` 静态分派，账号池统一 `AccountDirectory` 管理，无 provider registry/selector 层可移植 |
 | 23 | `8004840` | 图片 | 🟡 中 | ✅ 已移植 (wave1-G) | `images.py generate()` 非流式路径：重试失败时记录 `last_credential_error`；最终尝试仍可重试失败 → 503 `upstream_unavailable` 审计日志 + 包装错误抛出（Go `writeFailureAudit` + `ErrNoAvailableAccount` 等价） |
 | 10 | `5cee3d2` | Console | 🟡 中 | ⏭️ 跳过 (verify-only) | Console provider 已存在：`console_chat.py` 通过 `spec.is_console_chat()` 路由（chat.py:507-508），headers.py:314 `build_console_headers()`；Go 新增 provider 架构无增量可移植 |
 | 11 | `d626a26` | 配额 | 🟡 中 | ⏭️ 跳过 | Go `account_model_quota_blocks` DB 表 + `SelectionUnavailableError` + `CapacityWait` 路由配置 + `signerurl` 验证; Python 配额通过 `QuotaWindow` 内存管理 + `_classify_upstream_status()` 错误分类，无 per-model quota block DB |
@@ -484,3 +484,47 @@
 | `af2415f1` (feat: introduce webVisibleStreamPhase to manage client-visible output and suppress late reasoning) | ⏭️ 跳过（评估） | web chat.go 流相位管理。Python web chat 流经 `xai_chat.py StreamAdapter` 已按事件类型过滤（`_finished`/`_handle_event`），晚期 reasoning 事件天然被丢弃 → 架构性等价 |
 | `894bf6b5` (feat: updated egress binding UI) | ⏭️ 跳过 | 前端 UI |
 | `b4836edd` (feat: add partial_images and stream fields to API documentation) | ⏭️ 跳过 | 文档 |
+
+---
+
+## 2026-08-04 移植批 12（台账高/中优先级全量迁移，8f979d45..de0dcbe3 批 + 旧批残留）
+
+> 依据任务："检查 port-ledger，进行所有的高、中等级的台账完全迁移"。本批将所有 🔴 高 / 🟡 中 且状态为 📋 待审阅 的条目全部处理完毕（已移植或已决策跳过），**此后台账高/中优先级待审阅清零**（剩余待审阅均为 🟢 低，out of scope）。
+
+### 批 3 高优先级（4/4 已移植）
+
+| 提交 | 状态 | 落点 |
+|---|---|---|
+| `8b5c1ed6` (流式整数工具参数规范化) | ✅ 已移植 | `tool_parser.py`：string 十进制整数规范化（maxExactJSONIntegerText）、`schema_requires_integer`、深度≤64 有界 $ref walker、1MB/4MB 缓冲上限 |
+| `e3af4fce` (Responses 路径整数规范化) | ✅ 已移植 | 同 `8b5c1ed6`，responses 路径共用 tool_parser 规范化 |
+| `d1205d85` (HTTP 上游失败分类增强) | ✅ 已移植 | `errors.py`：429 free/model 配额解耦、永久拒绝措辞收紧（bare permission-denied 不再计）、`body` 关键字参数 |
+| `d00698ac` (Build safety/quota 失败分类) | ✅ 已移植 | `errors.py` 新增 `safety_rejected` 标志（403 metadata+raw body，短路 account/quota/credential 标志）；新增 `app/dataplane/reverse/protocol/rate_limit.py`（RateLimitMetadata + parse + Retry-After 回填，RPS 2s/RPM 60s） |
+
+### 批 3 中优先级（11/11 已处理：6 移植 + 3 verify-only + 2 架构跳过）
+
+| 提交 | 状态 | 说明 |
+|---|---|---|
+| `b4c7baab` (Build 账号检测错误分类) | ✅ 已移植 | `refresh.py` `_is_quota_exhaustion_error()` 桥：credit markers → quota 标志；`_refresh_build_billing` 配额体 per-account failed（不 EXPIRED 不 abort） |
+| `bcc6435f` (Build 检测 + 路由 failover) | ✅ 已移植 | 新 `app/control/account/build_detect.py` + `POST /admin/api/batch/build-detect`：grok-4.5 "hello,test" 探测、401→刷新→二次 401→reauth、网络错误不累加计数；配置 `account.build_detect.max_attempts=999` / `mark_build_chat_denied_as_reauth=false`；路由侧 softNetworkCooldown 归批 2-F |
+| `ef10c4cb` (Build 凭证手动重试) | ✅ 已移植 | `build_refresh.py` `refresh_build_token_manual()`（`:manual-retry` singleflight）+ `build_refresh_short_circuited()`（scheduler 两循环跳过永久标记账号 OAuth） |
+| `34811392` (Build free quota 估算) | ⏭️ 跳过 | Python 无 `estimated_free_token_limit`（查询次数制 quota_build=100/2h），1M 值仅为 max_output_tokens 协议上限，无关 |
+| `75f4f7a7` (每请求轮换 Build 隧道) | ✅ 已移植 | `ProxyLease.fresh_tunnel`（BUILD scope + PROXY_POOL + 非 sticky → 每请求 fresh connect），`_pick_proxy_url(rotate=True)` |
+| `0893557a` (MarkFailureAfterSuccess) | ✅ 已移植 | `feedback()` SUCCESS 分支（failure_count→0 + health 回升）；failure 分支 health 衰减因子表；`mark_failure_after_success` 基线=1 |
+| `f1867395` (取消不冷却节点) | ✅ 已移植 (verify-only) | Python `except Exception` 不捕获 `CancelledError`（BaseException）→ 架构性等价，测试锁定 |
+| `1edc9fbe` (模型别名 reasoning effort) | ✅ 已移植 | `registry.py`/`spec.py` 别名→canonical 解析；effort none→thinking 禁用；SupportsReasoning |
+| `15146556` (无限路由尝试) | ✅ 已移植 | 新 `app/products/_routing_policy.py` `RoutingAttemptPolicy`（allows/has_next，-1→unlimited，≤0→3）；10 产品循环 `for attempt in count()` 转换 |
+| `72340380` (移除 maxAttempts 上限 10) | ✅ 已移植 | 同上，Python 原无 10 硬上限，随 policy 对齐（验证 config 允许 -1、拒 0/>200） |
+| `2aaac4d0` (无 challenge cookie clearance) | ✅ 已移植 (verify-only) | `ManualClearanceProvider.build_bundle()` 不校验 cf_cookies，无条件构建 → 架构性等价，测试锁定 |
+
+### 旧批残留中优先级（已处理）
+
+| 提交 | 状态 | 说明 |
+|---|---|---|
+| `8004840` (image generation 增强) | ✅ 已移植 (wave1-G) | `images.py generate()`：last_credential_error + 503 upstream_unavailable 包装 |
+| `c936ab1` (media audit logging) | ✅ 已移植 (wave1-G) | 新 `app/platform/storage/media_audit.py`（b'image' 预过滤、InputImages>0 DEBUG、normalizers） |
+| `5cee3d2` (Grok Console provider) | ⏭️ 跳过 (verify-only) | Console provider 已存在（`spec.is_console_chat()` 路由 + `build_console_headers()`），无增量 |
+| `d2eecc4` (gateway Multi-Provider) | ⏭️ 跳过 (2026-08-04) | Python 无 Web/Console/Build provider 分离架构，路由静态分派（见上方行 80） |
+
+### 测试
+
+全套 `uv run pytest tests/ -q --timeout=30` → **1467 passed, 1 skipped**（基线 1432+1，+35 本批新增，无回归）。新增测试：`test_routing_policy.py` (16)、`test_build_detect.py` (15)、`test_tool_parser_normalize.py`、`test_proxy_health.py` (13)、`test_rate_limit_parser.py` (15)、`test_media_audit.py`、`test_model_alias.py` + 各既有文件增量。SSO→Build 测试全部 mock `get_proxy_runtime`（沿用 `_no_real_mint_network` autouse，无真实网络）。
