@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.control.account import sso_build
 from app.control.account.sso_build import (
     BuildCredentialSeed,
     convert_sso_to_build,
@@ -113,21 +114,27 @@ def base64url(data: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PKCE-CS path tests
+# convert_sso_to_build orchestration tests (Device Flow first, PKCE-CS fallback)
 # ═══════════════════════════════════════════════════════════════════════════
 
 
 @pytest.mark.asyncio
-async def test_pkce_cs_success() -> None:
-    """PKCE-CS path succeeds → returns BuildCredentialSeed with valid tokens."""
-    with patch(
-        "app.control.account.sso_build._mint_via_pkce_cs",
-        new_callable=AsyncMock,
-    ) as mock_pkce:
-        mock_pkce.return_value = BuildCredentialSeed(
-            access_token="at-pkce",
-            refresh_token="rt-pkce",
-            id_token="id-pkce",
+async def test_device_flow_success_short_circuits() -> None:
+    """Device Flow succeeds first → PKCE-CS never runs."""
+    with (
+        patch(
+            "app.control.account.sso_build._mint_via_device_flow",
+            new_callable=AsyncMock,
+        ) as mock_device,
+        patch(
+            "app.control.account.sso_build._mint_via_pkce_cs",
+            new_callable=AsyncMock,
+        ) as mock_pkce,
+    ):
+        mock_device.return_value = BuildCredentialSeed(
+            access_token="at-device",
+            refresh_token="rt-device",
+            id_token="id-device",
             expires_in=21600,
             name="test@x.ai",
             email="test@x.ai",
@@ -138,59 +145,185 @@ async def test_pkce_cs_success() -> None:
 
         result = await convert_sso_to_build("good-sso-token")
 
-    assert result.access_token == "at-pkce"
-    assert result.refresh_token == "rt-pkce"
+    assert result.access_token == "at-device"
     assert result.email == "test@x.ai"
-    assert result.user_id == "user123"
-    assert result.team_id == "team456"
     assert result.expires_in == 21600
-    mock_pkce.assert_called_once()
+    mock_device.assert_called_once()
+    mock_pkce.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_pkce_cs_fallback_to_device_flow() -> None:
-    """PKCE-CS fails → falls back to Device Flow → returns Device Flow result."""
+async def test_convert_skips_pkce_when_device_succeeds() -> None:
+    """Device Flow success → PKCE-CS fallback not touched."""
     with (
-        patch(
-            "app.control.account.sso_build._mint_via_pkce_cs",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("PKCE-CS: gRPC call failed"),
-        ),
         patch(
             "app.control.account.sso_build._mint_via_device_flow",
             new_callable=AsyncMock,
         ) as mock_device,
+        patch(
+            "app.control.account.sso_build._mint_via_pkce_cs",
+            new_callable=AsyncMock,
+        ) as mock_pkce,
     ):
         mock_device.return_value = BuildCredentialSeed(
-            access_token="at-device",
-            refresh_token="rt-device",
-            expires_in=7200,
+            access_token="at-device", expires_in=7200
         )
 
         result = await convert_sso_to_build("sso-token")
 
     assert result.access_token == "at-device"
-    assert result.expires_in == 7200
+    mock_device.assert_called_once()
+    mock_pkce.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_device_flow_first_pkce_fallback() -> None:
+    """Device Flow fails (transient) → falls back to PKCE-CS → returns PKCE result."""
+    with (
+        patch(
+            "app.control.account.sso_build._mint_via_device_flow",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("Device Flow: network timeout"),
+        ) as mock_device,
+        patch(
+            "app.control.account.sso_build._mint_via_pkce_cs",
+            new_callable=AsyncMock,
+        ) as mock_pkce,
+    ):
+        mock_pkce.return_value = BuildCredentialSeed(
+            access_token="at-pkce",
+            refresh_token="rt-pkce",
+            expires_in=21600,
+        )
+
+        result = await convert_sso_to_build("sso-token")
+
+    assert result.access_token == "at-pkce"
+    assert result.expires_in == 21600
+    mock_device.assert_called_once()
+    mock_pkce.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_both_paths_fail_propagates_last_error() -> None:
+    """Device Flow fails and PKCE-CS fallback also fails → propagate PKCE error."""
+    with (
+        patch(
+            "app.control.account.sso_build._mint_via_device_flow",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("Device Flow timed out"),
+        ) as mock_device,
+        patch(
+            "app.control.account.sso_build._mint_via_pkce_cs",
+            new_callable=AsyncMock,
+            side_effect=TimeoutError("PKCE-CS down"),
+        ),
+        pytest.raises(TimeoutError, match="PKCE-CS down"),
+    ):
+        await convert_sso_to_build("sso-token")
+
     mock_device.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_pkce_cs_failure_no_fallback_when_device_also_fails() -> None:
-    """Both PKCE-CS and Device Flow fail → propagate Device Flow error."""
+async def test_pkce_fallback_hard_failure_propagates() -> None:
+    """Device Flow fails → PKCE-CS fallback raises SSOCredentialRejected → propagates."""
+    from app.control.account.sso_build import SSOCredentialRejected
+
     with (
-        patch(
-            "app.control.account.sso_build._mint_via_pkce_cs",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("PKCE-CS down"),
-        ),
         patch(
             "app.control.account.sso_build._mint_via_device_flow",
             new_callable=AsyncMock,
-            side_effect=TimeoutError("Device Flow timed out"),
+            side_effect=RuntimeError("Device Flow: network timeout"),
+        ) as mock_device,
+        patch(
+            "app.control.account.sso_build._mint_via_pkce_cs",
+            new_callable=AsyncMock,
+            side_effect=SSOCredentialRejected(
+                "PKCE-CS credential rejected: "
+                "Bad credentials [WKE=unauthenticated:bad-credentials]"
+            ),
         ),
+        pytest.raises(SSOCredentialRejected),
     ):
-        with pytest.raises(TimeoutError, match="timed out"):
-            await convert_sso_to_build("sso-token")
+        await convert_sso_to_build("sso-token")
+
+    mock_device.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_device_flow_permission_error_no_pkce_fallback() -> None:
+    """Device Flow PermissionError (invalid SSO) propagates — PKCE-CS not attempted."""
+    with (
+        patch(
+            "app.control.account.sso_build._mint_via_device_flow",
+            new_callable=AsyncMock,
+            side_effect=PermissionError(
+                "SSO token invalid or expired: redirected to sign-in"
+            ),
+        ) as mock_device,
+        patch(
+            "app.control.account.sso_build._mint_via_pkce_cs",
+            new_callable=AsyncMock,
+        ) as mock_pkce,
+        pytest.raises(PermissionError, match="invalid or expired"),
+    ):
+        await convert_sso_to_build("sso-token")
+
+    mock_device.assert_called_once()
+    mock_pkce.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pkce_cs_bad_credentials_classification() -> None:
+    """gRPC hard-failure message → SSOCredentialRejected (not RuntimeError)."""
+    from app.control.account import sso_build
+    from app.control.account.sso_build import SSOCredentialRejected
+
+    mock_session = MagicMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.get = AsyncMock(return_value=MagicMock())
+    grpc_resp = MagicMock()
+    grpc_resp.headers = {
+        "grpc-message": "Bad credentials [WKE=unauthenticated:bad-credentials]"
+    }
+    grpc_resp.content = b"ignored"
+    mock_session.post = AsyncMock(return_value=grpc_resp)
+
+    with (
+        patch("curl_cffi.requests.AsyncSession", return_value=mock_session),
+        patch(
+            "app.control.account.sso_build._acquire_mint_lease",
+            new=AsyncMock(return_value=None),
+            create=True,
+        ),
+        patch(
+            "app.control.account.sso_build._resolve_mint_profile",
+            new=AsyncMock(
+                return_value=ProxyProfile(cf_cookies="", user_agent="", cf_clearance="")
+            ),
+            create=True,
+        ),
+        patch(
+            "app.control.account.sso_build._resolve_cf_clearance_value",
+            new=AsyncMock(return_value=""),
+            create=True,
+        ),
+        patch(
+            "app.dataplane.proxy.adapters.session.build_session_kwargs",
+            return_value={},
+        ),
+        patch(
+            "app.control.account.sso_build._grpc_parse_response",
+            return_value={"grpc_status": 3, "messages": [], "trailers": {}},
+        ),
+        pytest.raises(SSOCredentialRejected) as exc_info,
+    ):
+        await sso_build._mint_via_pkce_cs("sso-token")
+
+    assert exc_info.value.credential_rejected is True
+    assert "bad-credentials" in str(exc_info.value)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -363,9 +496,7 @@ async def test_device_flow_unauthorized_status(
 
 
 @pytest.mark.asyncio
-async def test_device_flow_verify_no_consent(
-    _patch_pkce_as_unavailable: Any, _patch_sleep: Any
-) -> None:
+async def test_device_flow_verify_no_consent(_patch_sleep: Any) -> None:
     """Verify response lacks 'consent' in URL → RuntimeError."""
     device_resp = _make_ctx_resp(
         {
@@ -384,18 +515,15 @@ async def test_device_flow_verify_no_consent(
 
     with (
         patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
-        _patch_pkce_as_unavailable,
         _patch_sleep,
     ):
         mock_cls.return_value = _make_session(responses)
         with pytest.raises(RuntimeError, match="no.*consent"):
-            await convert_sso_to_build("sso-token")
+            await sso_build._mint_via_device_flow("sso-token")
 
 
 @pytest.mark.asyncio
-async def test_device_flow_approve_no_done(
-    _patch_pkce_as_unavailable: Any, _patch_sleep: Any
-) -> None:
+async def test_device_flow_approve_no_done(_patch_sleep: Any) -> None:
     """Approve response lacks 'done' in URL → RuntimeError."""
     device_resp = _make_ctx_resp(
         {
@@ -415,18 +543,15 @@ async def test_device_flow_approve_no_done(
 
     with (
         patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
-        _patch_pkce_as_unavailable,
         _patch_sleep,
     ):
         mock_cls.return_value = _make_session(responses)
         with pytest.raises(RuntimeError, match="no.*done"):
-            await convert_sso_to_build("sso-token")
+            await sso_build._mint_via_device_flow("sso-token")
 
 
 @pytest.mark.asyncio
-async def test_device_flow_approve_fails(
-    _patch_pkce_as_unavailable: Any, _patch_sleep: Any
-) -> None:
+async def test_device_flow_approve_fails(_patch_sleep: Any) -> None:
     """Device Flow approve returns 400 → RuntimeError."""
     device_resp = _make_ctx_resp(
         {
@@ -446,18 +571,15 @@ async def test_device_flow_approve_fails(
 
     with (
         patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
-        _patch_pkce_as_unavailable,
         _patch_sleep,
     ):
         mock_cls.return_value = _make_session(responses)
         with pytest.raises(RuntimeError, match="Device approve failed"):
-            await convert_sso_to_build("sso-token")
+            await sso_build._mint_via_device_flow("sso-token")
 
 
 @pytest.mark.asyncio
-async def test_device_flow_timeout(
-    _patch_pkce_as_unavailable: Any, _patch_sleep: Any
-) -> None:
+async def test_device_flow_timeout(_patch_sleep: Any) -> None:
     """Device Flow polling times out → TimeoutError."""
     device_resp = _make_ctx_resp(
         {
@@ -487,19 +609,16 @@ async def test_device_flow_timeout(
 
     with (
         patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
-        _patch_pkce_as_unavailable,
         _patch_sleep,
         _patch_monotonic_with_advance(start=0.0, delta=5.0),
     ):
         mock_cls.return_value = _make_session(responses)
         with pytest.raises(TimeoutError, match="timed out"):
-            await convert_sso_to_build("sso-token")
+            await sso_build._mint_via_device_flow("sso-token")
 
 
 @pytest.mark.asyncio
-async def test_device_flow_slow_down_backoff(
-    _patch_pkce_as_unavailable: Any, _patch_sleep: Any
-) -> None:
+async def test_device_flow_slow_down_backoff(_patch_sleep: Any) -> None:
     """Device Flow slow_down increases interval by 5s (not 2s) each time."""
     device_resp = _make_ctx_resp(
         {
@@ -527,14 +646,13 @@ async def test_device_flow_slow_down_backoff(
 
     with (
         patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
-        _patch_pkce_as_unavailable,
         patch(
             "app.control.account.sso_build.asyncio.sleep", new_callable=AsyncMock
         ) as mock_sleep,
     ):
         mock_cls.return_value = _make_session(responses)
         with pytest.raises(RuntimeError, match="no more mock"):
-            await convert_sso_to_build("sso-token")
+            await sso_build._mint_via_device_flow("sso-token")
 
     sleep_args = [call[0][0] for call in mock_sleep.call_args_list]
     assert len(sleep_args) >= 6
@@ -628,9 +746,11 @@ async def test_device_flow_empty_token(
     _patch_pkce_as_unavailable: Any, _patch_sleep: Any
 ) -> None:
     """Empty SSO token after normalization → ValueError."""
-    with patch("app.control.account.sso_build.get_config"):
-        with pytest.raises(ValueError, match="Empty SSO token"):
-            await convert_sso_to_build("")
+    with (
+        patch("app.control.account.sso_build.get_config"),
+        pytest.raises(ValueError, match="Empty SSO token"),
+    ):
+        await convert_sso_to_build("")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -657,17 +777,10 @@ class TestDeviceFlowMint:
 
         responses = [pre_resp, device_resp]
 
-        with (
-            patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
-            patch(
-                "app.control.account.sso_build._mint_via_pkce_cs",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("PKCE unavailable"),
-            ),
-        ):
+        with patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls:
             mock_cls.return_value = _make_session(responses)
             with pytest.raises(ValueError, match="Incomplete device flow"):
-                await convert_sso_to_build("sso-token")
+                await sso_build._mint_via_device_flow("sso-token")
 
     @pytest.mark.asyncio
     async def test_poll_server_error_500(self) -> None:
@@ -702,18 +815,13 @@ class TestDeviceFlowMint:
         with (
             patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
             patch(
-                "app.control.account.sso_build._mint_via_pkce_cs",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("PKCE unavailable"),
-            ),
-            patch(
                 "app.control.account.sso_build.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
             mock_cls.return_value = _make_session(responses)
             with pytest.raises(RuntimeError):
-                await convert_sso_to_build("sso-token")
+                await sso_build._mint_via_device_flow("sso-token")
 
     @pytest.mark.asyncio
     async def test_poll_rate_limit_429(self) -> None:
@@ -748,18 +856,13 @@ class TestDeviceFlowMint:
         with (
             patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
             patch(
-                "app.control.account.sso_build._mint_via_pkce_cs",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("PKCE unavailable"),
-            ),
-            patch(
                 "app.control.account.sso_build.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
             mock_cls.return_value = _make_session(responses)
             with pytest.raises(RuntimeError):
-                await convert_sso_to_build("sso-token")
+                await sso_build._mint_via_device_flow("sso-token")
 
     @pytest.mark.asyncio
     async def test_slow_down_multiple_times(self) -> None:
@@ -927,18 +1030,13 @@ class TestDeviceFlowMint:
         with (
             patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
             patch(
-                "app.control.account.sso_build._mint_via_pkce_cs",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("PKCE unavailable"),
-            ),
-            patch(
                 "app.control.account.sso_build.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
             mock_cls.return_value = _make_session(responses)
-            with pytest.raises(RuntimeError, match="no.*consent"):
-                await convert_sso_to_build("sso-token")
+            with pytest.raises(RuntimeError):
+                await sso_build._mint_via_device_flow("sso-token")
 
     @pytest.mark.asyncio
     async def test_approve_final_url_no_done(self) -> None:
@@ -964,18 +1062,13 @@ class TestDeviceFlowMint:
         with (
             patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
             patch(
-                "app.control.account.sso_build._mint_via_pkce_cs",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("PKCE unavailable"),
-            ),
-            patch(
                 "app.control.account.sso_build.asyncio.sleep",
                 new_callable=AsyncMock,
             ),
         ):
             mock_cls.return_value = _make_session(responses)
-            with pytest.raises(RuntimeError, match="no.*done"):
-                await convert_sso_to_build("sso-token")
+            with pytest.raises(RuntimeError):
+                await sso_build._mint_via_device_flow("sso-token")
 
     @pytest.mark.asyncio
     async def test_sso_validation_redirect_to_signup(self) -> None:
@@ -1206,6 +1299,7 @@ def test_all_exports() -> None:
 
     expected = {
         "BuildCredentialSeed",
+        "SSOCredentialRejected",
         "convert_sso_to_build",
         "normalize_sso_token",
         "safe_xai_url",
@@ -1419,11 +1513,440 @@ async def test_pkce_uses_profile_session_kwargs() -> None:
             "app.dataplane.proxy.adapters.session.build_session_kwargs",
             return_value={},
         ) as mock_build,
+        pytest.raises(RuntimeError, match="network stopped"),
     ):
-        with pytest.raises(RuntimeError, match="network stopped"):
-            await sso_build._mint_via_pkce_cs("sso-token")
+        await sso_build._mint_via_pkce_cs("sso-token")
 
     mock_build.assert_called_once()
     # No hardcoded impersonate reaches the session constructor —
     # impersonation now derives from the lease profile via build_session_kwargs.
     assert not any("chrome131" in str(c) for c in mock_session.call_args_list)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PKCE-CS reference-alignment tests (cpa_pkce_mint.py 12-defect audit)
+# ═══════════════════════════════════════════════════════════════════════════
+
+SETTER_URL = "https://accounts.x.ai/set-cookie/abc"
+CONSENT_PAGE_URL = "https://accounts.x.ai/oauth2/consent?response_type=code"
+
+
+@pytest.fixture
+def pkce_env() -> Any:
+    """Enter standard lease/profile patches for PKCE-CS mint tests (auto-exit)."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(
+        patch(
+            "app.control.account.sso_build._acquire_mint_lease",
+            new=AsyncMock(return_value=None),
+            create=True,
+        )
+    )
+    stack.enter_context(
+        patch(
+            "app.control.account.sso_build._resolve_mint_profile",
+            new=AsyncMock(
+                return_value=ProxyProfile(cf_cookies="", user_agent="", cf_clearance="")
+            ),
+            create=True,
+        )
+    )
+    stack.enter_context(
+        patch(
+            "app.dataplane.proxy.adapters.session.build_session_kwargs",
+            return_value={},
+        )
+    )
+    yield
+    stack.close()
+
+
+def _make_curl_resp(
+    status_code: int = 200,
+    headers: dict[str, str] | None = None,
+    text: str = "",
+    url: str = "",
+    json_data: dict[str, Any] | None = None,
+) -> MagicMock:
+    """Create a mock curl_cffi response (plain attributes, no async ctx)."""
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.headers = headers or {}
+    resp.text = text
+    resp.url = url
+    if json_data is not None:
+        resp.json = MagicMock(return_value=json_data)
+    return resp
+
+
+def _pkce_flow_session(
+    *,
+    form_html: str,
+    consent_post_resp: MagicMock,
+    token_json: dict[str, Any],
+) -> tuple[MagicMock, dict[str, Any]]:
+    """Mock session for a full PKCE-CS consent flow.
+
+    GET order: authorize → set-cookie redirect → consent page.
+    POST order: CreateCookieSetterLink → consent form → token exchange.
+    Returns (session, grpc_parse_result) — the caller patches
+    _grpc_parse_response with the second value.
+    """
+    grpc_parse = {
+        "grpc_status": 0,
+        "messages": [[{"type": "string", "value": SETTER_URL}]],
+        "trailers": {},
+    }
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    session.get = AsyncMock(
+        side_effect=[
+            _make_curl_resp(),  # authorize
+            _make_curl_resp(headers={"location": CONSENT_PAGE_URL}),  # set-cookie hop
+            _make_curl_resp(text=form_html, url=CONSENT_PAGE_URL),  # consent page
+        ]
+    )
+    session.post = AsyncMock(
+        side_effect=[
+            _make_curl_resp(),  # CreateCookieSetterLink
+            consent_post_resp,
+            _make_curl_resp(json_data=token_json),
+        ]
+    )
+    return session, grpc_parse
+
+
+class TestPKCEReferenceAlignment:
+    """PKCE-CS alignment with cpa_pkce_mint.py — defect-by-defect coverage."""
+
+    @pytest.mark.asyncio
+    async def test_pkce_sets_cookie_on_all_four_domains(self, pkce_env: Any) -> None:
+        """Defect 1: sso+sso-rw set on all four reference domains."""
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_session.get = AsyncMock(side_effect=RuntimeError("stop after seeding"))
+        with (
+            patch("curl_cffi.requests.AsyncSession", return_value=mock_session),
+            pytest.raises(RuntimeError, match="stop after seeding"),
+        ):
+            await sso_build._mint_via_pkce_cs("sso-token")
+
+        domains: dict[str, set[str]] = {}
+        for call in mock_session.cookies.set.call_args_list:
+            domains.setdefault(call.args[0], set()).add(call.kwargs["domain"])
+        expected = {"accounts.x.ai", ".accounts.x.ai", ".x.ai", "auth.x.ai"}
+        assert set(domains["sso"]) == expected
+        assert set(domains["sso-rw"]) == expected
+
+    @pytest.mark.asyncio
+    async def test_pkce_consent_form_regex_action_first_variant(
+        self, pkce_env: Any
+    ) -> None:
+        """Defect 2: '<form action=... method="POST">' (action first) still submits."""
+        state = "state1234567890abcdef"
+        form_html = (
+            '<form action="https://accounts.x.ai/oauth2/consent/allow" '
+            'method="POST"><input name="csrf" value="tok123"/></form>'
+        )
+        post_resp = _make_curl_resp(
+            headers={
+                "location": f"http://127.0.0.1:56121/callback?code=code-b&state={state}"
+            }
+        )
+        session, grpc_parse = _pkce_flow_session(
+            form_html=form_html,
+            consent_post_resp=post_resp,
+            token_json={
+                "access_token": "at-b",
+                "refresh_token": "rt-b",
+                "id_token": "",
+                "expires_in": 21600,
+            },
+        )
+        with (
+            patch("curl_cffi.requests.AsyncSession", return_value=session),
+            patch(
+                "app.control.account.sso_build._grpc_parse_response",
+                return_value=grpc_parse,
+            ),
+            patch(
+                "app.control.account.sso_build.secrets.token_hex",
+                side_effect=lambda _n: state,
+            ),
+        ):
+            seed = await sso_build._mint_via_pkce_cs("sso-token")
+
+        assert seed.access_token == "at-b"
+        assert seed.refresh_token == "rt-b"
+
+    @pytest.mark.asyncio
+    async def test_pkce_extracts_bare_code_param(self, pkce_env: Any) -> None:
+        """Defect 3: consent POST body with bare 'code=abc123XYZ._-~' yields code."""
+        form_html = (
+            '<form method="POST" action="https://accounts.x.ai/oauth2/consent/allow">'
+            '<input name="csrf" value="t"/></form>'
+        )
+        post_resp = _make_curl_resp(text="ok code=abc123XYZ._-~ done")
+        session, grpc_parse = _pkce_flow_session(
+            form_html=form_html,
+            consent_post_resp=post_resp,
+            token_json={
+                "access_token": "at-c",
+                "refresh_token": "rt-c",
+                "id_token": "",
+                "expires_in": 21600,
+            },
+        )
+        with (
+            patch("curl_cffi.requests.AsyncSession", return_value=session),
+            patch(
+                "app.control.account.sso_build._grpc_parse_response",
+                return_value=grpc_parse,
+            ),
+        ):
+            seed = await sso_build._mint_via_pkce_cs("sso-token")
+
+        assert seed.access_token == "at-c"
+
+    @pytest.mark.asyncio
+    async def test_pkce_consent_access_denied_raises(self, pkce_env: Any) -> None:
+        """Defect 4: consent POST response mentioning access_denied raises."""
+        form_html = (
+            '<form method="POST" action="https://accounts.x.ai/oauth2/consent/allow">'
+            '<input name="csrf" value="t"/></form>'
+        )
+        post_resp = _make_curl_resp(text="access_denied: user denied consent")
+        session, grpc_parse = _pkce_flow_session(
+            form_html=form_html,
+            consent_post_resp=post_resp,
+            token_json={"access_token": "unused", "refresh_token": "unused"},
+        )
+        with (
+            patch("curl_cffi.requests.AsyncSession", return_value=session),
+            patch(
+                "app.control.account.sso_build._grpc_parse_response",
+                return_value=grpc_parse,
+            ),
+            pytest.raises(RuntimeError, match="access_denied"),
+        ):
+            await sso_build._mint_via_pkce_cs("sso-token")
+
+    @pytest.mark.asyncio
+    async def test_pkce_grpc_headers_include_sec_fetch(self, pkce_env: Any) -> None:
+        """Defect 5: CreateCookieSetterLink request carries sec-fetch-site/mode/dest."""
+        form_html = (
+            '<form method="POST" action="https://accounts.x.ai/oauth2/consent/allow">'
+            '<input name="csrf" value="t"/></form>'
+        )
+        post_resp = _make_curl_resp(text="ok code=code-e")
+        session, grpc_parse = _pkce_flow_session(
+            form_html=form_html,
+            consent_post_resp=post_resp,
+            token_json={"access_token": "at-e", "refresh_token": "rt-e"},
+        )
+        with (
+            patch("curl_cffi.requests.AsyncSession", return_value=session),
+            patch(
+                "app.control.account.sso_build._grpc_parse_response",
+                return_value=grpc_parse,
+            ),
+        ):
+            await sso_build._mint_via_pkce_cs("sso-token")
+
+        grpc_call = next(
+            c
+            for c in session.post.call_args_list
+            if c.args[0] == sso_build.CREATE_COOKIE_SETTER_RPC
+        )
+        headers = grpc_call.kwargs["headers"]
+        assert headers["sec-fetch-site"] == "same-origin"
+        assert headers["sec-fetch-mode"] == "cors"
+        assert headers["sec-fetch-dest"] == "empty"
+
+    @pytest.mark.asyncio
+    async def test_pkce_consent_post_headers_complete(self, pkce_env: Any) -> None:
+        """Defect 8: consent form POST carries origin/referer/sec-fetch×3."""
+        form_html = (
+            '<form method="POST" action="https://accounts.x.ai/oauth2/consent/allow">'
+            '<input name="csrf" value="t"/></form>'
+        )
+        post_resp = _make_curl_resp(text="ok code=code-f")
+        session, grpc_parse = _pkce_flow_session(
+            form_html=form_html,
+            consent_post_resp=post_resp,
+            token_json={"access_token": "at-f", "refresh_token": "rt-f"},
+        )
+        with (
+            patch("curl_cffi.requests.AsyncSession", return_value=session),
+            patch(
+                "app.control.account.sso_build._grpc_parse_response",
+                return_value=grpc_parse,
+            ),
+        ):
+            await sso_build._mint_via_pkce_cs("sso-token")
+
+        consent_call = next(
+            c
+            for c in session.post.call_args_list
+            if c.kwargs["headers"].get("content-type")
+            == "application/x-www-form-urlencoded"
+        )
+        headers = consent_call.kwargs["headers"]
+        assert headers["origin"] == sso_build.ACCOUNTS_ORIGIN
+        assert headers["referer"] == CONSENT_PAGE_URL
+        assert headers["sec-fetch-site"] == "same-origin"
+        assert headers["sec-fetch-mode"] == "cors"
+        assert headers["sec-fetch-dest"] == "empty"
+
+    @pytest.mark.asyncio
+    async def test_pkce_token_exchange_requires_refresh_token(
+        self, pkce_env: Any
+    ) -> None:
+        """Defect 10: token response missing refresh_token raises."""
+        form_html = (
+            '<form method="POST" action="https://accounts.x.ai/oauth2/consent/allow">'
+            '<input name="csrf" value="t"/></form>'
+        )
+        post_resp = _make_curl_resp(text="ok code=code-g")
+        session, grpc_parse = _pkce_flow_session(
+            form_html=form_html,
+            consent_post_resp=post_resp,
+            token_json={"access_token": "at-g", "id_token": "", "expires_in": 21600},
+        )
+        with (
+            patch("curl_cffi.requests.AsyncSession", return_value=session),
+            patch(
+                "app.control.account.sso_build._grpc_parse_response",
+                return_value=grpc_parse,
+            ),
+            pytest.raises(RuntimeError, match="access_token/refresh_token"),
+        ):
+            await sso_build._mint_via_pkce_cs("sso-token")
+
+    @pytest.mark.asyncio
+    async def test_pkce_consent_form_no_fields_raises(self, pkce_env: Any) -> None:
+        """Defect 11: consent form with zero <input> fields raises."""
+        form_html = (
+            '<form action="https://accounts.x.ai/oauth2/consent/allow" method="POST">'
+            "</form>"
+        )
+        session, grpc_parse = _pkce_flow_session(
+            form_html=form_html,
+            consent_post_resp=_make_curl_resp(text="unused"),
+            token_json={"access_token": "unused", "refresh_token": "unused"},
+        )
+        with (
+            patch("curl_cffi.requests.AsyncSession", return_value=session),
+            patch(
+                "app.control.account.sso_build._grpc_parse_response",
+                return_value=grpc_parse,
+            ),
+            pytest.raises(RuntimeError, match="no input fields"),
+        ):
+            await sso_build._mint_via_pkce_cs("sso-token")
+
+    @pytest.mark.asyncio
+    async def test_pkce_grpc_status_header_precedes_body(self, pkce_env: Any) -> None:
+        """Defect 6: grpc-status header wins over body trailers."""
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_session.get = AsyncMock(return_value=_make_curl_resp())
+        mock_session.post = AsyncMock(
+            return_value=_make_curl_resp(
+                headers={"grpc-status": "7", "grpc-message": "header boom"}
+            )
+        )
+        with (
+            patch("curl_cffi.requests.AsyncSession", return_value=mock_session),
+            patch(
+                "app.control.account.sso_build._grpc_parse_response",
+                return_value={"grpc_status": 0, "messages": [], "trailers": {}},
+            ),
+            pytest.raises(RuntimeError, match="header boom"),
+        ):
+            await sso_build._mint_via_pkce_cs("sso-token")
+
+    @pytest.mark.asyncio
+    async def test_pkce_cookie_setter_chain_fail_fast(self, pkce_env: Any) -> None:
+        """Defect 7: set-cookie chain not reaching consent/code raises immediately."""
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_session.get = AsyncMock(
+            side_effect=[
+                _make_curl_resp(),  # authorize
+                _make_curl_resp(),  # set-cookie hop: 200, no location, empty body
+            ]
+        )
+        mock_session.post = AsyncMock(return_value=_make_curl_resp())
+        with (
+            patch("curl_cffi.requests.AsyncSession", return_value=mock_session),
+            patch(
+                "app.control.account.sso_build._grpc_parse_response",
+                return_value={
+                    "grpc_status": 0,
+                    "messages": [[{"type": "string", "value": SETTER_URL}]],
+                    "trailers": {},
+                },
+            ),
+            pytest.raises(RuntimeError, match="did not reach consent"),
+        ):
+            await sso_build._mint_via_pkce_cs("sso-token")
+
+        assert mock_session.get.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_pkce_chain_code_with_127_0_0_1_url(self, pkce_env: Any) -> None:
+        """Defect 9: code in a 127.0.0.1 redirect URL (non-canonical port) is picked up."""
+        state = "state1234567890abcdef"
+        mock_session = MagicMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+        mock_session.get = AsyncMock(
+            side_effect=[
+                _make_curl_resp(),  # authorize
+                _make_curl_resp(  # set-cookie hop → 127.0.0.1:9999 callback
+                    headers={
+                        "location": (
+                            f"http://127.0.0.1:9999/callback?code=code-9&state={state}"
+                        )
+                    }
+                ),
+            ]
+        )
+        mock_session.post = AsyncMock(
+            side_effect=[
+                _make_curl_resp(),  # CreateCookieSetterLink
+                _make_curl_resp(  # token exchange
+                    json_data={
+                        "access_token": "at-9",
+                        "refresh_token": "rt-9",
+                        "id_token": "",
+                        "expires_in": 21600,
+                    }
+                ),
+            ]
+        )
+        with (
+            patch("curl_cffi.requests.AsyncSession", return_value=mock_session),
+            patch(
+                "app.control.account.sso_build._grpc_parse_response",
+                return_value={
+                    "grpc_status": 0,
+                    "messages": [[{"type": "string", "value": SETTER_URL}]],
+                    "trailers": {},
+                },
+            ),
+            patch(
+                "app.control.account.sso_build.secrets.token_hex",
+                side_effect=lambda _n: state,
+            ),
+        ):
+            seed = await sso_build._mint_via_pkce_cs("sso-token")
+
+        assert seed.access_token == "at-9"

@@ -3,12 +3,8 @@
 Port of Go web/sso_build.go with PKCE-CS path from GrokRegisterAgent.
 
 Two paths:
-  1. PKCE-CS (preferred): uses CreateCookieSetterLink gRPC-web for session materialization
-  2. Device Flow (fallback): OAuth Device Authorization Grant flow
-
-PKCE-CS path:
-  set sso cookies → GET authorize → CreateCookieSetterLink gRPC-web
-  → follow set-cookie chain → consent form POST → code → token exchange
+  1. Device Flow (primary): OAuth Device Authorization Grant flow (Go upstream-verified)
+  2. PKCE-CS (fallback): uses CreateCookieSetterLink gRPC-web for session materialization
 
 Device Flow path (matching Go upstream sso_build.go):
   1. GET accounts.x.ai/ — SSO pre-validation
@@ -53,6 +49,7 @@ from app.platform.auth.grpc_web_codec import (
 )
 from app.platform.auth.oauth_device import DeviceFlowClient
 from app.platform.config.snapshot import get_config
+from app.platform.errors import UpstreamError
 
 if TYPE_CHECKING:
     from app.control.proxy.models import ProxyLease
@@ -72,6 +69,23 @@ CREATE_COOKIE_SETTER_RPC = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class SSOCredentialRejected(UpstreamError):
+    """SSO credential hard-rejected by upstream during PKCE-CS minting.
+
+    Mirrors Go upstream sso_build.go @8f979d4: invalid SSO → ErrUnauthorized
+    → markSSOCredentialRejected. Propagates instead of falling back to
+    Device Flow — a rejected SSO token would mint an unverified token there.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            status=401,
+            account_scoped=True,
+            credential_rejected=True,
+        )
 
 
 # ─── Data classes ───────────────────────────────────────────────────────────
@@ -303,9 +317,10 @@ async def _mint_via_pkce_cs(
     sso_token: str,
     proxy_url: str | None = None,
 ) -> BuildCredentialSeed:
-    """PKCE-CS path: use CreateCookieSetterLink gRPC-web for session materialization.
+    """PKCE-CS fallback: use CreateCookieSetterLink gRPC-web for session materialization.
 
-    This is the preferred path (tried first). Falls back to Device Flow on failure.
+    Registration-bot reverse-engineered RPC — only reached when Device Flow
+    fails transiently (SSO-invalid errors never fall through to this path).
     """
     from curl_cffi.requests import AsyncSession as CurlAsyncSession
 
@@ -327,7 +342,8 @@ async def _mint_via_pkce_cs(
         # Set SSO cookies + full clearance cookie bundle (not just the
         # cf_clearance value) on all relevant domains.
         # CF clearance is needed to avoid Cloudflare 403 on accounts.x.ai / auth.x.ai.
-        for domain in ("accounts.x.ai", ".x.ai", "auth.x.ai"):
+        # Four domains per reference cpa_pkce_mint.py _set_sso_cookie (adds .accounts.x.ai).
+        for domain in ("accounts.x.ai", ".accounts.x.ai", ".x.ai", "auth.x.ai"):
             session.cookies.set("sso", sso_token, domain=domain, path="/")
             session.cookies.set("sso-rw", sso_token, domain=domain, path="/")
             for part in profile.cf_cookies.split(";"):
@@ -384,6 +400,9 @@ async def _mint_via_pkce_cs(
             "accept": "*/*",
             "origin": ACCOUNTS_ORIGIN,
             "referer": f"{ACCOUNTS_ORIGIN}sign-in?redirect=oauth2-provider",
+            "sec-fetch-site": "same-origin",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-dest": "empty",
         }
 
         grpc_resp = await session.post(
@@ -393,12 +412,16 @@ async def _mint_via_pkce_cs(
             timeout=45,
         )
 
-        # Parse gRPC-web response
+        # Parse gRPC-web response. Header grpc-status wins over body trailers
+        # (reference _parse_grpc_error order: header first, then trailers).
         parsed = _grpc_parse_response(grpc_resp.content)
-        grpc_status = parsed.get("grpc_status")
-        if grpc_status is None:
-            raw_status = grpc_resp.headers.get("grpc-status") or ""
-            grpc_status = int(raw_status) if raw_status.isdigit() else 0
+        raw_status = grpc_resp.headers.get("grpc-status") or ""
+        if raw_status.isdigit():
+            grpc_status = int(raw_status)
+        elif parsed.get("grpc_status") is not None:
+            grpc_status = int(parsed["grpc_status"])
+        else:
+            grpc_status = 0
 
         if grpc_status != 0:
             grpc_msg = urllib.parse.unquote(
@@ -406,6 +429,17 @@ async def _mint_via_pkce_cs(
                 or parsed.get("trailers", {}).get("grpc-message")
                 or "CreateCookieSetterLink failed"
             )
+            lowered = grpc_msg.lower()
+            if any(
+                marker in lowered
+                for marker in (
+                    "bad-credentials",
+                    "bad credentials",
+                    "unauthenticated",
+                    "wke=",
+                )
+            ):
+                raise SSOCredentialRejected(f"PKCE-CS credential rejected: {grpc_msg}")
             raise RuntimeError(f"PKCE-CS gRPC error: {grpc_msg}")
 
         # Extract cookie_setter URL from response messages
@@ -422,7 +456,9 @@ async def _mint_via_pkce_cs(
         code: str | None = None
         current = cookie_setter
         for _ in range(6):
-            if "code=" in current and REDIRECT_URI in current:
+            if "code=" in current and (
+                current.startswith(REDIRECT_URI) or "127.0.0.1" in current
+            ):
                 parsed_qs = urllib.parse.urlparse(current)
                 qs_params = urllib.parse.parse_qs(parsed_qs.query)
                 if qs_params.get("state", [None])[0] == state:
@@ -446,42 +482,71 @@ async def _mint_via_pkce_cs(
                 break
             current = urljoin(current, loc)
 
-        # If cookie setter chain didn't yield code, try consent page
+        # If cookie setter chain didn't yield code, fail fast unless it reached
+        # consent/code — then submit the consent page reached via the chain.
         if not code:
-            consent_resp = await session.get(
-                consent_url, allow_redirects=False, timeout=30
-            )
-            page_html = consent_resp.text or ""
-            current_url = str(consent_resp.url)
-
-            # Check if redirected to a URL with code
-            loc = consent_resp.headers.get("location") or ""
-            if loc and "code=" in loc:
-                parsed_loc = urllib.parse.urlparse(urljoin(current_url, loc))
-                qs_params = urllib.parse.parse_qs(parsed_loc.query)
+            if "consent" not in current and "code=" not in current:
+                raise RuntimeError(
+                    "PKCE-CS: cookie-setter did not reach consent/code: "
+                    f"{current[:180]}"
+                )
+            if "code=" in current:
+                parsed_qs = urllib.parse.urlparse(current)
+                qs_params = urllib.parse.parse_qs(parsed_qs.query)
                 if qs_params.get("state", [None])[0] == state:
                     code = qs_params.get("code", [None])[0]
-            elif "consent" in current_url or "consent" in page_html:
-                # Submit consent form POST
-                fm = re.search(
-                    r'<form\b[^>]*method="POST"[^>]*action="([^"]+)"[^>]*>(.*?)</form>',
-                    page_html,
-                    re.I | re.S,
+            else:
+                consent_resp = await session.get(
+                    current, allow_redirects=False, timeout=30
                 )
-                if fm:
+                page_html = consent_resp.text or ""
+                current_url = str(consent_resp.url)
+
+                # Check if redirected to a URL with code
+                loc = consent_resp.headers.get("location") or ""
+                if loc and "code=" in loc:
+                    parsed_loc = urllib.parse.urlparse(urljoin(current_url, loc))
+                    qs_params = urllib.parse.parse_qs(parsed_loc.query)
+                    if qs_params.get("state", [None])[0] == state:
+                        code = qs_params.get("code", [None])[0]
+                elif "consent" in current_url or "consent" in page_html:
+                    # Submit consent form POST (plain POST == Allow, no action field)
+                    fm = re.search(
+                        r'<form\b[^>]*method="POST"[^>]*action="([^"]+)"[^>]*>'
+                        r"(.*?)</form>",
+                        page_html,
+                        re.IGNORECASE | re.DOTALL,
+                    )
+                    if not fm:
+                        fm = re.search(
+                            r'<form\b[^>]*action="([^"]+)"[^>]*method="POST"[^>]*>'
+                            r"(.*?)</form>",
+                            page_html,
+                            re.IGNORECASE | re.DOTALL,
+                        )
+                    if not fm:
+                        raise RuntimeError("PKCE-CS: consent page has no POST form")
                     action_url, form_inner = fm.group(1), fm.group(2)
                     fields_dict: dict[str, str] = {}
-                    for inp in re.findall(r"<input\b([^>]*)/?>", form_inner, re.I):
-                        nm = re.search(r'name="([^"]*)"', inp, re.I)
-                        vl = re.search(r'value="([^"]*)"', inp, re.I)
+                    for inp in re.findall(r"<input\b([^>]*)/?>", form_inner, re.IGNORECASE):
+                        nm = re.search(r'name="([^"]*)"', inp, re.IGNORECASE)
+                        vl = re.search(r'value="([^"]*)"', inp, re.IGNORECASE)
                         if nm:
                             fields_dict[nm.group(1)] = vl.group(1) if vl else ""
-                    fields_dict["action"] = "allow"
+                    if not fields_dict:
+                        raise RuntimeError("PKCE-CS: consent form has no input fields")
 
                     post_resp = await session.post(
                         urljoin(current_url, action_url),
                         data=fields_dict,
-                        headers={"content-type": "application/x-www-form-urlencoded"},
+                        headers={
+                            "content-type": "application/x-www-form-urlencoded",
+                            "origin": ACCOUNTS_ORIGIN,
+                            "referer": current_url,
+                            "sec-fetch-site": "same-origin",
+                            "sec-fetch-mode": "cors",
+                            "sec-fetch-dest": "empty",
+                        },
                         allow_redirects=False,
                         timeout=30,
                     )
@@ -492,11 +557,19 @@ async def _mint_via_pkce_cs(
                         qs_params = urllib.parse.parse_qs(parsed_loc.query)
                         if qs_params.get("state", [None])[0] == state:
                             code = qs_params.get("code", [None])[0]
-                    elif post_resp.status_code == 200:
+                    else:
                         body_text = post_resp.text or ""
                         code_match = re.search(r'"code"\s*:\s*"([^"]+)"', body_text)
                         if code_match:
                             code = code_match.group(1)
+                        else:
+                            code_match = re.search(
+                                r"code=([A-Za-z0-9._~\-]+)", body_text
+                            )
+                            if code_match and "error" not in code_match.group(0):
+                                code = code_match.group(1)
+                        if not code and "access_denied" in (loc + body_text).lower():
+                            raise RuntimeError("PKCE-CS: access_denied")
 
         if not code:
             raise RuntimeError("PKCE-CS: no authorization code obtained")
@@ -516,8 +589,8 @@ async def _mint_via_pkce_cs(
         )
         token_data = token_resp.json()
 
-        if "access_token" not in token_data:
-            raise RuntimeError("PKCE-CS: no access_token in response")
+        if not token_data.get("access_token") or not token_data.get("refresh_token"):
+            raise RuntimeError("PKCE-CS: no access_token/refresh_token in response")
 
         access_token = token_data["access_token"]
         id_token = token_data.get("id_token") or ""
@@ -781,8 +854,9 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
 async def convert_sso_to_build(sso_token: str) -> BuildCredentialSeed:
     """Convert a grok.com SSO token to Build OAuth credentials.
 
-    Tries PKCE-CS path first (faster, more reliable). Falls back to
-    Device Flow on failure.
+    Device Flow first — the Go upstream-verified path (chenyme sso_build.go).
+    Falls back to PKCE-CS only on transient (non-credential) failure.
+    Invalid-SSO errors (PermissionError) propagate without fallback.
 
     Returns a BuildCredentialSeed with access_token, refresh_token, etc.
     """
@@ -794,24 +868,30 @@ async def convert_sso_to_build(sso_token: str) -> BuildCredentialSeed:
     raw_proxy = str(cfg.get_str("proxy.egress.proxy_url", ""))
     proxy_url = normalize_proxy_url(raw_proxy) if raw_proxy else None
 
-    # Try PKCE-CS first
+    # Device Flow first — Go upstream-verified path
     try:
-        logger.info("SSO→Build: trying PKCE-CS path")
-        return await _mint_via_pkce_cs(token, proxy_url=proxy_url)
-    except Exception as pkce_err:
+        logger.info("SSO→Build: trying Device Flow path")
+        return await _mint_via_device_flow(token)
+    except PermissionError:
+        # SSO invalid/expired — both paths share the same credential, so
+        # falling back would only run the registration-bot path for nothing.
+        raise
+    except Exception as df_err:
         logger.warning(
-            "SSO→Build PKCE-CS failed, falling back to Device Flow: %s", pkce_err
+            "SSO→Build Device Flow failed, falling back to PKCE-CS: %s", df_err
         )
 
-    # Fallback to Device Flow
-    logger.info("SSO→Build: trying Device Flow path")
-    return await _mint_via_device_flow(token)
+    # PKCE-CS fallback (registration-bot path). Last resort: any failure
+    # (incl. SSOCredentialRejected) propagates so the account is marked.
+    logger.info("SSO→Build: trying PKCE-CS path")
+    return await _mint_via_pkce_cs(token, proxy_url=proxy_url)
 
 
 __all__ = [
     "BuildCredentialSeed",
+    "SSOCredentialRejected",
     "convert_sso_to_build",
+    "decode_build_claims",
     "normalize_sso_token",
     "safe_xai_url",
-    "decode_build_claims",
 ]
