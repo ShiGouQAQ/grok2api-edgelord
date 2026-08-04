@@ -19,6 +19,7 @@ def _err(
     credential_rejected: bool = False,
     quota_exhausted: bool = False,
     permanent_account_denial: bool = False,
+    safety_rejected: bool = False,
     body: str = "",
 ) -> UpstreamError:
     return UpstreamError(
@@ -28,6 +29,7 @@ def _err(
         credential_rejected=credential_rejected,
         quota_exhausted=quota_exhausted,
         permanent_account_denial=permanent_account_denial,
+        safety_rejected=safety_rejected,
     )
 
 
@@ -133,6 +135,20 @@ SCENARIOS: list[tuple[int, dict, FeedbackKind, ProxyFeedbackKind]] = [
         {"status": 0},
         FeedbackKind.SERVER_ERROR,
         ProxyFeedbackKind.TRANSPORT_ERROR,
+    ),
+    # 15: 403 + safety_rejected → FORBIDDEN (request-scoped, no account rotation)
+    (
+        15,
+        {"status": 403, "safety_rejected": True},
+        FeedbackKind.FORBIDDEN,
+        ProxyFeedbackKind.FORBIDDEN,
+    ),
+    # 16: 429 + safety_rejected (unusual) → status still drives RATE_LIMITED
+    (
+        16,
+        {"status": 429, "safety_rejected": True},
+        FeedbackKind.RATE_LIMITED,
+        ProxyFeedbackKind.RATE_LIMITED,
     ),
 ]
 

@@ -11,7 +11,7 @@
 
 import pytest
 
-from app.platform.errors import _classify_upstream_status
+from app.platform.errors import UpstreamError, _classify_upstream_status
 
 
 class TestClassifyUpstream401:
@@ -65,24 +65,37 @@ class TestClassifyUpstream403:
         _, kw = _classify_upstream_status(403, "Access Denied", "", "")
         assert kw["permanent_account_denial"] is True
 
-    # --- 免费配额 ---
+    # --- 免费配额（d1205d85 解耦：model 不再隐含 free） ---
 
     def test_free_usage_exhausted_sets_model_quota(self):
-        """'used all the included free usage for model' → model + free quota"""
+        """'used all the included free usage for model' → model quota ONLY (no free)"""
         _, kw = _classify_upstream_status(
             403, "", "", "used all the included free usage for model grok-3"
         )
         assert kw["model_quota_exhausted"] is True
-        assert kw["free_quota_exhausted"] is True
-        assert kw["quota_exhausted"] is True
-        assert kw["account_scoped"] is True
+        assert kw["free_quota_exhausted"] is False
+        assert kw["quota_exhausted"] is False
+        assert kw["account_scoped"] is False
 
     def test_subscription_free_usage_exhausted(self):
-        """'subscription:free-usage-exhausted' → free_quota_exhausted"""
+        """'subscription:free-usage-exhausted' → free_quota_exhausted only (no model)"""
         _, kw = _classify_upstream_status(
             403, "subscription:free-usage-exhausted", "", ""
         )
         assert kw["free_quota_exhausted"] is True
+        assert kw["model_quota_exhausted"] is False
+        assert kw["quota_exhausted"] is True
+
+    def test_both_free_usage_markers_403(self):
+        """两种 free-usage 标记同时出现 → free + model 均置位"""
+        _, kw = _classify_upstream_status(
+            403,
+            "subscription:free-usage-exhausted",
+            "",
+            "used all the included free usage for model grok-3",
+        )
+        assert kw["free_quota_exhausted"] is True
+        assert kw["model_quota_exhausted"] is True
         assert kw["quota_exhausted"] is True
 
     # --- 消费限制 ---
@@ -130,27 +143,116 @@ class TestClassifyUpstream403:
         _, kw = _classify_upstream_status(403, "", "", "billing error")
         assert kw["account_scoped"] is True
 
-    def test_permission_keyword_sets_account_scoped(self):
-        """消息含 'permission' → account_scoped=True"""
+    def test_permission_keyword_does_not_set_account_scoped(self):
+        """裸 'permission' 不再判为 account_scoped（d00698ac：策略类 403 共享该词）"""
         _, kw = _classify_upstream_status(403, "", "", "permission denied")
-        assert kw["account_scoped"] is True
+        assert kw["account_scoped"] is False
 
     def test_usage_exhausted_keyword_sets_account_scoped(self):
         """消息含 'usage-exhausted' → account_scoped=True"""
         _, kw = _classify_upstream_status(403, "", "", "usage-exhausted")
         assert kw["account_scoped"] is True
 
-    # --- 优先级测试：quota 优先于 credential ---
+    # --- 优先级测试：quota 解耦后 credential 不再被 model 标记抑制 ---
 
-    def test_quota_takes_priority_over_credential(self):
-        """同时匹配 free-usage 和 blocked-user 时，quota 优先，credential 不设置"""
+    def test_model_quota_no_longer_suppresses_credential(self):
+        """model 标记 + blocked-user：quota 未置位 → credential 正常判出"""
         _, kw = _classify_upstream_status(
             403, "", "", "used all the included free usage for model X blocked-user"
         )
+        assert kw["model_quota_exhausted"] is True
+        assert kw["free_quota_exhausted"] is False
+        assert kw["quota_exhausted"] is False
+        assert kw["credential_rejected"] is True
+
+    def test_credential_keywords_still_suppressed_by_free_quota(self):
+        """free-usage + blocked-user：quota 置位 → credential 仍被抑制"""
+        _, kw = _classify_upstream_status(
+            403, "subscription:free-usage-exhausted", "", "blocked-user"
+        )
         assert kw["quota_exhausted"] is True
         assert kw["free_quota_exhausted"] is True
-        assert kw["model_quota_exhausted"] is True
         assert kw["credential_rejected"] is False
+
+    # --- 永久拒绝收紧（d1205d85：裸 permission-denied 不再判永久） ---
+
+    def test_bare_permission_denied_not_permanent(self):
+        """403 + 裸 permission-denied → 非永久拒绝、无任何标记"""
+        _, kw = _classify_upstream_status(403, "permission-denied", "", "")
+        assert kw["permanent_account_denial"] is False
+        assert kw["account_scoped"] is False
+        assert kw["quota_exhausted"] is False
+        assert kw["credential_rejected"] is False
+
+    def test_permission_denied_with_policy_message_not_permanent(self):
+        """permission-denied + 策略消息 → 非永久拒绝（d00698ac Go 用例）"""
+        _, kw = _classify_upstream_status(
+            403, "permission-denied", "", "request rejected by policy"
+        )
+        assert kw["permanent_account_denial"] is False
+        assert kw["account_scoped"] is False
+
+    def test_access_denied_sentence_not_permanent(self):
+        """'Access denied because...' 长句 ≠ 精确 'access denied' → 非永久"""
+        _, kw = _classify_upstream_status(
+            403,
+            "operation-denied",
+            "",
+            "Access denied because this operation is unavailable under ZDR",
+        )
+        assert kw["permanent_account_denial"] is False
+
+    def test_access_denied_with_punctuation_exact(self):
+        """'Access denied.' 去标点后精确匹配 → 永久拒绝"""
+        _, kw = _classify_upstream_status(403, "operation-denied", "", "Access denied.")
+        assert kw["permanent_account_denial"] is True
+        assert kw["account_scoped"] is True
+
+    # --- 内容安全拒绝（d00698ac：request-scoped，不设任何账号标记） ---
+
+    def test_safety_usage_guidelines(self):
+        """403 + 'content violates usage guidelines' → safety_rejected，无账号标记"""
+        _, kw = _classify_upstream_status(
+            403, "permission-denied", "", "Content violates usage guidelines"
+        )
+        assert kw["safety_rejected"] is True
+        assert kw["account_scoped"] is False
+        assert kw["permanent_account_denial"] is False
+        assert kw["quota_exhausted"] is False
+        assert kw["free_quota_exhausted"] is False
+        assert kw["model_quota_exhausted"] is False
+        assert kw["credential_rejected"] is False
+
+    def test_safety_check_type_marker(self):
+        """403 + 'safety_check_type_' 标记 → safety_rejected"""
+        _, kw = _classify_upstream_status(403, "", "", "safety_check_type_violence")
+        assert kw["safety_rejected"] is True
+        assert kw["account_scoped"] is False
+
+    def test_safety_marker_in_raw_body(self):
+        """safety 标记只出现在原始 body（嵌套文本）→ 仍判 safety_rejected"""
+        _, kw = _classify_upstream_status(
+            403,
+            "",
+            "",
+            "Blocked by policy",
+            body='{"error":{"message":"Blocked by policy"},"detail":"safety_check_type_sexually_explicit"}',
+        )
+        assert kw["safety_rejected"] is True
+        assert kw["account_scoped"] is False
+
+    def test_combined_safety_go_body(self):
+        """Go d00698ac 用例：完整 body 从 from_http_response 流入分类器"""
+        err = UpstreamError.from_http_response(
+            "test",
+            status=403,
+            body='{"code":"permission-denied","error":"Content violates usage guidelines. SAFETY_CHECK_TYPE_VIOLENCE"}',
+        )
+        assert err.safety_rejected is True
+        assert err.account_scoped is False
+        assert err.permanent_account_denial is False
+        assert err.quota_exhausted is False
+        assert err.credential_rejected is False
 
     # --- 未分类 ---
 
@@ -169,21 +271,35 @@ class TestClassifyUpstream429:
     """测试 429 状态码分类"""
 
     def test_free_usage_exhausted_429(self):
-        """429 + free usage → model + free quota, account_scoped"""
+        """429 + free usage → model quota ONLY（解耦后不再隐含 free）"""
         _, kw = _classify_upstream_status(
             429, "", "", "used all the included free usage for model grok-3"
         )
         assert kw["model_quota_exhausted"] is True
-        assert kw["free_quota_exhausted"] is True
-        assert kw["quota_exhausted"] is True
+        assert kw["free_quota_exhausted"] is False
+        assert kw["quota_exhausted"] is False
         assert kw["account_scoped"] is True
 
     def test_subscription_free_usage_exhausted_429(self):
-        """429 + subscription:free-usage-exhausted → free quota"""
+        """429 + subscription:free-usage-exhausted → free quota only（不设 model）"""
         _, kw = _classify_upstream_status(
             429, "subscription:free-usage-exhausted", "", ""
         )
         assert kw["free_quota_exhausted"] is True
+        assert kw["model_quota_exhausted"] is False
+        assert kw["quota_exhausted"] is True
+        assert kw["account_scoped"] is True
+
+    def test_both_free_usage_markers_429(self):
+        """两种标记同时出现 → free + model 均置位，quota 聚合成立"""
+        _, kw = _classify_upstream_status(
+            429,
+            "subscription:free-usage-exhausted",
+            "",
+            "used all the included free usage for model grok-3",
+        )
+        assert kw["free_quota_exhausted"] is True
+        assert kw["model_quota_exhausted"] is True
         assert kw["quota_exhausted"] is True
 
     def test_spending_limit_429(self):

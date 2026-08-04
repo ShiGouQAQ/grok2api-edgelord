@@ -1,39 +1,74 @@
-"""Tests for should_invalidate_build_forbidden — Build 403 invalidation rules."""
+"""Tests for should_invalidate_build_forbidden — Build 403 invalidation rules.
+
+All existing code-matching cases pass ``account_scoped=True``: the caller
+(classifier) supplies the flag; the function gates on it (d00698ac wiring).
+"""
 
 from app.platform.errors import should_invalidate_build_forbidden
 
 
 def test_invalidate_default_blocked_user():
-    assert should_invalidate_build_forbidden(403, "blocked-user", "")
+    assert should_invalidate_build_forbidden(
+        403, "blocked-user", "", account_scoped=True
+    )
 
 
 def test_invalidate_default_email_rejected():
-    assert should_invalidate_build_forbidden(403, "", "email-domain-rejected")
+    assert should_invalidate_build_forbidden(
+        403, "", "email-domain-rejected", account_scoped=True
+    )
 
 
 def test_invalidate_not_403():
-    assert not should_invalidate_build_forbidden(429, "blocked-user", "")
+    assert not should_invalidate_build_forbidden(
+        429, "blocked-user", "", account_scoped=True
+    )
 
 
 def test_invalidate_default_lowercase():
     # Case-insensitive: "BLOCKED-USER" matches default "blocked-user"
-    assert should_invalidate_build_forbidden(403, "BLOCKED-USER", "")
+    assert should_invalidate_build_forbidden(
+        403, "BLOCKED-USER", "", account_scoped=True
+    )
 
 
 def test_invalidate_account_suspended():
-    assert should_invalidate_build_forbidden(403, "", "account suspended")
+    assert should_invalidate_build_forbidden(
+        403, "", "account suspended", account_scoped=True
+    )
 
 
 def test_invalidate_token_revoked():
-    assert should_invalidate_build_forbidden(403, "", "token revoked")
+    assert should_invalidate_build_forbidden(
+        403, "", "token revoked", account_scoped=True
+    )
 
 
 def test_invalidate_user_is_blocked():
-    assert should_invalidate_build_forbidden(403, "", "user is blocked")
+    assert should_invalidate_build_forbidden(
+        403, "", "user is blocked", account_scoped=True
+    )
 
 
 def test_invalidate_no_match():
-    assert not should_invalidate_build_forbidden(403, "random-code", "random message")
+    assert not should_invalidate_build_forbidden(
+        403, "random-code", "random message", account_scoped=True
+    )
+
+
+def test_invalidate_requires_account_scoped():
+    # Non-account-scoped 403 (e.g. request-level policy denial) must NOT invalidate.
+    assert not should_invalidate_build_forbidden(403, "blocked-user", "")
+
+
+def test_invalidate_safety_rejection_never_invalidates():
+    # Content safety rejection shares permission-denied codes but is request-scoped.
+    assert not should_invalidate_build_forbidden(
+        403, "permission-denied", "", account_scoped=True, safety_rejected=True
+    )
+    assert not should_invalidate_build_forbidden(
+        403, "blocked-user", "", account_scoped=True, safety_rejected=True
+    )
 
 
 def test_invalidate_custom_codes(monkeypatch):
@@ -47,6 +82,11 @@ def test_invalidate_custom_codes(monkeypatch):
     monkeypatch.setattr(_snap, "get_config", fake_get_config)
     from app.platform.errors import should_invalidate_build_forbidden as fn
 
-    assert fn(403, "custom-code-1", "") is True
-    assert fn(403, "", "custom-code-2") is True
-    assert fn(403, "blocked-user", "") is False  # 自定义列表替换默认
+    assert fn(403, "custom-code-1", "", account_scoped=True) is True
+    assert fn(403, "", "custom-code-2", account_scoped=True) is True
+    assert (
+        fn(403, "blocked-user", "", account_scoped=True) is False
+    )  # 自定义列表替换默认
+    assert (
+        fn(403, "custom-code-1", "", account_scoped=True, safety_rejected=True) is False
+    )

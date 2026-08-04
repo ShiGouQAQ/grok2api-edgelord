@@ -89,6 +89,7 @@ class UpstreamError(AppError):
         free_quota_exhausted       — free-tier quota exhausted
         model_quota_exhausted      — per-model free quota exhausted
         credential_rejected        — access token / cookie rejected
+        safety_rejected            — request-level content safety denial (not account-scoped)
         upstream_code              — upstream error code string (e.g. ``access_denied``)
         fingerprint                — dedup key ``status:normalized_code``
     """
@@ -105,6 +106,7 @@ class UpstreamError(AppError):
         free_quota_exhausted: bool = False,
         model_quota_exhausted: bool = False,
         credential_rejected: bool = False,
+        safety_rejected: bool = False,
         upstream_code: str = "",
         fingerprint: str = "",
     ) -> None:
@@ -126,6 +128,7 @@ class UpstreamError(AppError):
         self.free_quota_exhausted = free_quota_exhausted
         self.model_quota_exhausted = model_quota_exhausted
         self.credential_rejected = credential_rejected
+        self.safety_rejected = safety_rejected
         self.upstream_code = upstream_code
         self.fingerprint = fingerprint
 
@@ -142,6 +145,7 @@ class UpstreamError(AppError):
             upstream_code,
             upstream_type,
             upstream_message,
+            body=body,
         )
         upstream_code = upstream_code or ""
         kw["fingerprint"] = fingerprint
@@ -220,6 +224,8 @@ def _classify_upstream_status(
     upstream_code: str,
     upstream_type: str,
     upstream_message: str,
+    *,
+    body: str = "",
 ) -> tuple[str, dict]:
     kw: dict[str, bool | str] = {
         "account_scoped": False,
@@ -228,6 +234,7 @@ def _classify_upstream_status(
         "free_quota_exhausted": False,
         "model_quota_exhausted": False,
         "credential_rejected": False,
+        "safety_rejected": False,
     }
     text = " ".join([upstream_code, upstream_type, upstream_message]).lower()
     if status == 401:
@@ -237,56 +244,72 @@ def _classify_upstream_status(
         kw["account_scoped"] = True
         kw["quota_exhausted"] = True
     elif status == 403:
-        if "access to the chat endpoint is denied" in text:
-            kw["permanent_account_denial"] = True
-        if text.strip(" .!\t\r\n") == "access denied":
-            kw["permanent_account_denial"] = True
-        if "used all the included free usage for model" in text:
-            kw["model_quota_exhausted"] = kw["free_quota_exhausted"] = True
-        if "subscription:free-usage-exhausted" in text:
-            kw["free_quota_exhausted"] = True
-        if "personal-team-blocked:spending-limit" in text:
-            kw["quota_exhausted"] = True
-        kw["quota_exhausted"] = kw["quota_exhausted"] or kw["free_quota_exhausted"]
-        if not kw["quota_exhausted"] and _contains_any(
-            text,
-            "authentication",
-            "unauthorized",
-            "invalid token",
-            "token expired",
-            "invalid-credentials",
-            "bad-credentials",
-            "blocked-user",
-            "email-domain-rejected",
-            "session not found",
-            "session-expired",
-            "failed to look up session id",
-            "account suspended",
-            "token revoked",
+        # Safety denials are request-scoped: inspect both structured metadata
+        # and the raw body so SAFETY_CHECK_TYPE_* markers still match when they
+        # only appear in nested text. Port of d00698ac.
+        if _is_safety_rejection(text) or (
+            body and _is_safety_rejection(str(body).lower())
         ):
-            kw["credential_rejected"] = True
-        kw["account_scoped"] = (
-            kw["permanent_account_denial"]
-            or kw["quota_exhausted"]
-            or kw["credential_rejected"]
-        )
-        if _contains_any(
-            text,
-            "quota",
-            "billing",
-            "subscription",
-            "entitlement",
-            "permission",
-            "token",
-            "usage-exhausted",
-            "insufficient",
-            "spending-limit",
-        ):
-            kw["account_scoped"] = True
+            kw["safety_rejected"] = True
+        else:
+            if "access to the chat endpoint is denied" in text:
+                kw["permanent_account_denial"] = True
+            # Bare permission-denied is not enough: content safety rejections
+            # and other policy 403s share that code (d1205d85). Exact match on
+            # the joined text (locked by legacy callers passing the code) and
+            # on the message alone (Go semantics: code may be e.g. operation-denied).
+            if (
+                text.strip(" .!\t\r\n") == "access denied"
+                or upstream_message.lower().strip(" .!\t\r\n") == "access denied"
+            ):
+                kw["permanent_account_denial"] = True
+            # free-usage and per-model free usage are distinct so their
+            # recovery scopes stay independent (d1205d85).
+            if "used all the included free usage for model" in text:
+                kw["model_quota_exhausted"] = True
+            if "subscription:free-usage-exhausted" in text:
+                kw["free_quota_exhausted"] = True
+            if "personal-team-blocked:spending-limit" in text:
+                kw["quota_exhausted"] = True
+            kw["quota_exhausted"] = kw["quota_exhausted"] or kw["free_quota_exhausted"]
+            if not kw["quota_exhausted"] and _contains_any(
+                text,
+                "authentication",
+                "unauthorized",
+                "invalid token",
+                "token expired",
+                "invalid-credentials",
+                "bad-credentials",
+                "blocked-user",
+                "email-domain-rejected",
+                "session not found",
+                "session-expired",
+                "failed to look up session id",
+                "account suspended",
+                "token revoked",
+            ):
+                kw["credential_rejected"] = True
+            kw["account_scoped"] = (
+                kw["permanent_account_denial"]
+                or kw["quota_exhausted"]
+                or kw["credential_rejected"]
+            )
+            if _contains_any(
+                text,
+                "quota",
+                "billing",
+                "subscription",
+                "entitlement",
+                "token",
+                "usage-exhausted",
+                "insufficient",
+                "spending-limit",
+            ):
+                kw["account_scoped"] = True
     elif status == 429:
         kw["account_scoped"] = True
         if "used all the included free usage for model" in text:
-            kw["model_quota_exhausted"] = kw["free_quota_exhausted"] = True
+            kw["model_quota_exhausted"] = True
         if "subscription:free-usage-exhausted" in text:
             kw["free_quota_exhausted"] = True
         if "personal-team-blocked:spending-limit" in text:
@@ -296,6 +319,12 @@ def _classify_upstream_status(
         upstream_code or upstream_type or upstream_message or "unknown"
     )
     return f"{status}:{fingerprint_part}", kw
+
+
+def _is_safety_rejection(text: str) -> bool:
+    """Return whether *text* marks a request-level content safety denial."""
+    lower = text.lower()
+    return "content violates usage guidelines" in lower or "safety_check_type_" in lower
 
 
 def _contains_any(text: str, *signals: str) -> bool:
@@ -314,15 +343,26 @@ _DEFAULT_403_INVALIDATION_CODES: frozenset[str] = frozenset(
 
 
 def should_invalidate_build_forbidden(
-    status: int, upstream_code: str, upstream_message: str
+    status: int,
+    upstream_code: str,
+    upstream_message: str,
+    *,
+    safety_rejected: bool = False,
+    account_scoped: bool = False,
 ) -> bool:
     """Check if a 403 error should trigger account invalidation.
 
-    Port of 09388e5: configurable Grok Build 403 invalidation rules.
+    Port of 09388e5 + d00698ac: configurable Grok Build 403 invalidation rules.
+    Safety rejections are request-scoped and must never invalidate; only
+    account-scoped failures (quota / credential / permanent denial) qualify.
     Matches upstream_code and upstream_message against configurable error codes
     (features.build_403_invalidation_codes) or the built-in default list.
     """
     if status != 403:
+        return False
+    if safety_rejected:
+        return False
+    if not account_scoped:
         return False
     from app.platform.config.snapshot import get_config
 
