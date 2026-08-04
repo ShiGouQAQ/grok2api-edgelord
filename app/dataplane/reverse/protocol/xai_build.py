@@ -26,6 +26,8 @@ from typing import Any
 
 import orjson
 
+from app.control.model.registry import resolve_alias
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -47,15 +49,19 @@ def _normalize_reasoning_effort(
     """Normalize reasoning effort for Build API (Go normalizeBuildReasoningEffortPayload).
 
     "max" is never accepted — map to "high". "xhigh" is kept only for models
-    that support it (multi-agent), otherwise mapped to "high".
+    that support it (multi-agent), otherwise mapped to "high". The model name
+    is resolved through the registry alias map first so aliases inherit their
+    canonical model's capabilities (Go 1edc9fbe).
     """
     if effort is None:
         return None
     normalized = effort.lower()
     if normalized == "max":
         return "high"
-    if normalized == "xhigh" and model not in _XHIGH_SUPPORTED_MODELS:
-        return "high"
+    if normalized == "xhigh":
+        canonical = resolve_alias(model) if model else None
+        if canonical not in _XHIGH_SUPPORTED_MODELS:
+            return "high"
     return normalized
 
 
@@ -112,8 +118,12 @@ def build_build_responses_payload(
     }
 
     effort = _normalize_reasoning_effort(reasoning_effort, model)
-    if effort is not None:
+    if effort == "none":
+        # Go rewriteAliasedModel: "none" disables reasoning entirely.
+        payload["thinking"] = {"type": "disabled"}
+    elif effort is not None:
         payload["reasoning"] = {"effort": effort}
+        payload["thinking"] = {"type": "adaptive"}
 
     if tools:
         payload["tools"] = tools

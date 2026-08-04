@@ -338,7 +338,7 @@
 | 9 | `75f4f7a7` | Build 代理 | 📋 待审阅 | 每请求轮换 Build proxy-pool 隧道 — Python `proxy_pool` 模式相关 |
 | 10 | `0893557a` | 代理健康 | 📋 待审阅 | MarkFailureAfterSuccess + 健康更新逻辑 — Python 代理反馈状态机相关 |
 | 11 | `f1867395` | 代理节点 | 📋 待审阅 | 取消请求不冷却代理节点 — Python mihomo 黑名单机制相关 |
-| 12 | `1edc9fbe` | 模型别名 | 📋 待审阅 | 模型别名支持 reasoning effort — Python 模型注册表相关 |
+| 12 | `1edc9fbe` | 模型别名 | ✅ 已移植 | current (wave1-E) | `registry.py` ALIASES 映射 + `resolve_alias()`/别名感知 `resolve()`；`spec.py` 新增 `supports_reasoning`；`xai_build.py` `_normalize_reasoning_effort` 别名路由 + "none"→thinking disabled/其余 adaptive；`xai_console_chat.py` CONSOLE_MODELS/_MODEL_FIXED_EFFORT 扩展 `grok-4.20-0309-reasoning-{low,medium,high}` |
 | 13 | `15146556` | 路由 | 📋 待审阅 | 无限路由尝试功能 — Python 路由重试逻辑相关 |
 | 14 | `72340380` | 路由 | 📋 待审阅 | 移除 maxAttempts 硬上限 10 — 与 `15146556` 配套 |
 | 15 | `2aaac4d0` | Clearance | 📋 待审阅 | 允许无 challenge cookies 的 clearance — Python CF clearance 生命周期相关 |
