@@ -63,8 +63,8 @@ video_format = "grok_url"
 
 # Build provider configuration
 [build]
-# Build client version (recommended: 0.2.111)
-client_version = "0.2.111"
+# Build client version (recommended: 0.2.119)
+client_version = "0.2.119"
 # Build client identifier
 client_identifier = "grok-shell"
 # Build token auth header value

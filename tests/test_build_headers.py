@@ -14,11 +14,11 @@ def test_build_build_headers_required():
     )
     assert headers["Authorization"] == "Bearer test-token"
     assert headers["x-xai-token-auth"] == "xai-grok-cli"
-    assert headers["x-grok-client-version"] == "0.2.111"
+    assert headers["x-grok-client-version"] == "0.2.119"
     assert headers["x-grok-client-identifier"] == "grok-shell"
     assert headers["x-grok-client-mode"] == "headless"
     assert headers["Content-Type"] == "application/json"
-    assert headers["User-Agent"] == "grok-shell/0.2.111 (linux; x86_64)"
+    assert headers["User-Agent"] == "grok-shell/0.2.119 (linux; x86_64)"
 
     # Default: is_stream=True → streaming Accept/Encoding
     assert headers["Accept"] == "text/event-stream"

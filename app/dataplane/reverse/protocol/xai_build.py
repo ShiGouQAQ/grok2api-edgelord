@@ -31,7 +31,9 @@ import orjson
 # Constants
 # ---------------------------------------------------------------------------
 
-_BUILD_EFFORT_NORMALIZE: frozenset[str] = frozenset({"max", "xhigh"})
+# Models that actually accept "xhigh" effort (Go modeldomain.ReasoningEffortXHigh).
+# Unknown models default to defensive xhigh→high; only these keep the value.
+_XHIGH_SUPPORTED_MODELS: frozenset[str] = frozenset({"grok-4.20-multi-agent-0309"})
 
 
 # ---------------------------------------------------------------------------
@@ -39,15 +41,20 @@ _BUILD_EFFORT_NORMALIZE: frozenset[str] = frozenset({"max", "xhigh"})
 # ---------------------------------------------------------------------------
 
 
-def _normalize_reasoning_effort(effort: str | None) -> str | None:
-    """Normalize reasoning effort for Build API.
+def _normalize_reasoning_effort(
+    effort: str | None, model: str | None = None
+) -> str | None:
+    """Normalize reasoning effort for Build API (Go normalizeBuildReasoningEffortPayload).
 
-    Build models don't support "max" or "xhigh" — map them to "high".
+    "max" is never accepted — map to "high". "xhigh" is kept only for models
+    that support it (multi-agent), otherwise mapped to "high".
     """
     if effort is None:
         return None
     normalized = effort.lower()
-    if normalized in _BUILD_EFFORT_NORMALIZE:
+    if normalized == "max":
+        return "high"
+    if normalized == "xhigh" and model not in _XHIGH_SUPPORTED_MODELS:
         return "high"
     return normalized
 
@@ -104,7 +111,7 @@ def build_build_responses_payload(
         "include": ["reasoning.encrypted_content"],
     }
 
-    effort = _normalize_reasoning_effort(reasoning_effort)
+    effort = _normalize_reasoning_effort(reasoning_effort, model)
     if effort is not None:
         payload["reasoning"] = {"effort": effort}
 

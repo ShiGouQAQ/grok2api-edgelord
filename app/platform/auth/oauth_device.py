@@ -81,7 +81,7 @@ class DeviceFlowClient:
         "api:access conversations:read conversations:write "
         "workspaces:read workspaces:write"
     )
-    CLIENT_VERSION = "0.2.111"
+    CLIENT_VERSION = "0.2.119"
 
     def __init__(
         self,

@@ -381,8 +381,8 @@ def build_build_headers(
     access_token: str,
     agent_id: str,
     *,
-    client_version: str = "0.2.111",
-    client_identifier: str = "grok-shell",
+    client_version: str | None = None,
+    client_identifier: str | None = None,
     session_id: str | None = None,
     model: str | None = None,
     turn_idx: str | None = None,
@@ -398,17 +398,24 @@ def build_build_headers(
                         x-grok-agent-id, traceparent, session_id)
     - is_trace=False  → control-plane headers (x-userid, x-email)
     """
+    cfg = get_config()
+    client_version = client_version or cfg.get_str("build.client_version", "0.2.119")
+    client_identifier = client_identifier or cfg.get_str(
+        "build.client_identifier", "grok-shell"
+    )
+    token_auth = cfg.get_str("build.token_auth", "xai-grok-cli")
+    user_agent = cfg.get_str("build.user_agent", "")
     tok = _sanitize(access_token, field="access_token", strip_spaces=True)
     aid = _sanitize(agent_id, field="agent_id", strip_spaces=True)
 
     headers: dict[str, str] = {
         "Authorization": f"Bearer {tok}",
-        "x-xai-token-auth": "xai-grok-cli",
+        "x-xai-token-auth": token_auth,
         "x-grok-client-version": client_version,
         "x-grok-client-identifier": client_identifier,
         "x-grok-client-mode": "headless",
         "Content-Type": "application/json",
-        "User-Agent": f"grok-shell/{client_version} (linux; x86_64)",
+        "User-Agent": user_agent or f"grok-shell/{client_version} (linux; x86_64)",
         "Accept": "text/event-stream" if is_stream else "application/json",
         "Accept-Encoding": "identity" if is_stream else "gzip",
     }

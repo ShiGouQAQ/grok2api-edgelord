@@ -421,3 +421,60 @@
 
 测试：全套 passed（新增 reauthRequired 状态机/保留账号测试）。
 
+
+---
+
+## 2026-08-04 移植批 11（8f979d45..de0dcbe3：Build 0.2.119 协议加固 + Egress Quality Guard）
+
+上游同步点：`upstream/source` = `de0dcbe3`（PR #843 合并），上次分析点 `8f979d45`。12 个新提交（PR #837 egress quality guard ×11 + PR #843 3721babd ×1）。A3 审计同时发现 **4 个 batch-2 漏网提交**（dd6624c..d2a8b4f7 范围内 ledger 未覆盖），一并登记。
+
+### PR #843: Build 0.2.119 协议加固（`3721babd`）— ✅ 已移植
+
+| 提交 | 状态 | 说明 |
+|---|---|---|
+| `3721babd` (harden Grok Build 0.2.119 protocol compatibility) | **已移植** | 见下方移植详情 |
+
+**移植详情**（本批核心）：
+- `RecommendedBuildClientVersion` 0.2.111 → **0.2.119**：`config.defaults.toml [build] client_version`、`headers.py build_build_headers()` 默认值（改读 config `build.client_version`/`build.token_auth`/`build.user_agent`，不再硬编码）、`oauth_device.py CLIENT_VERSION`
+- `normalizeBuildReasoningEffortPayload` **模型感知 xhigh**：`xai_build.py _normalize_reasoning_effort(effort, model)` 新增 `_XHIGH_SUPPORTED_MODELS = {"grok-4.20-multi-agent-0309"}`（对应 Go `modeldomain.SupportsReasoningEffort`）；max 恒→high，xhigh 仅支持模型保留，未知模型防御性 high
+- **client_metadata 剥离**：Python 架构性已处理（payload 重建 + pydantic `extra="ignore"`，`client_metadata` 永不过界）→ 无需移植，测试锁定
+- **store:false + include reasoning.encrypted_content 默认**：`build_build_responses_payload` 已硬编码 → 已有，测试锁定
+- **SSE BOM 剥离 + doom_loop_check 过滤**：`_classify_build_line` `.strip()` 已剥 BOM（U+FEFF isspace=True），`BuildStreamAdapter.feed` 丢弃未知事件 → 架构性已处理
+- **清理死代码**：`xai_console_chat.py` 重复的 `_BUILD_EFFORT_NORMALIZE`（`_EFFORT_MAP` 已覆盖）；`xai_build.py` 旧 `_BUILD_EFFORT_NORMALIZE`
+- 测试：`tests/test_build_normalize.py` 新增表驱动（effort 9 例 + store/include + client_metadata），`test_build_headers.py` 断言更新 0.2.119
+
+**未移植（Go 特有）**：`normalizeResponseStream` toolCompatibility nil-safe 分支、`patchReasoningTextTypes`、`normalizeResponseFormat` 迁移 —— Python Build 路径 payload 由参数重建（非 raw body 透传），无等价场景；`responses_response.py normalize_response_stream` 是 no-op 桩未被调用，保持现状。
+
+### PR #837: Egress Quality Guard（`137589c3`..`69e5fdd8` 8 功能提交 + 2 merge）— ⏭️ 跳过（核心阻塞）
+
+| 提交 | 状态 | 说明 |
+|---|---|---|
+| `137589c3` (feat: add egress recovery and quality guard) | ⏭️ 跳过 | 被动检测依赖 audit 持久化，Python 无（见下方） |
+| `fe762c58` (fix: match quality guard to panel TPS) | ⏭️ 跳过 | 同上 |
+| `fb31e5ca` (fix(quality-guard): quarantine immediately on passive hard TPS) | ⏭️ 跳过 | 同上 |
+| `08af9a85` (feat: manage quality guard egress nodes) | ⏭️ 跳过 | 需 egress node CRUD 持久化，Python 节点为 config 派生临时对象 |
+| `982e9ba7` (feat: harden quality guard proxy rotation) | ⏭️ 跳过 | session_rotator 需 1024Proxy + Mihomo exit-IP 校验，Python MihomoClient 无此能力 |
+| `334dbe0f` (fix: recover quality probes without bound accounts) | ⏭️ 跳过 | 依赖 selector 账号绑定模型 |
+| `4fecb950` (feat: show account counts in quality guard nodes) | ⏭️ 跳过 | 前端页面 |
+| `69e5fdd8` (feat: integrate egress quality guard with managed identity and Compose) | ⏭️ 跳过 | bootstrap + clientkey 身份系统，Python 无 client-key 模型 |
+| `ecfd2333` / `1d62978a` (merge) | — | merge 提交 |
+
+**阻塞根因**（wave-1 A2 agent 评估）：
+1. **被动检测数据源不存在**：Go `GET /api/internal/v1/quality-guard/request-audits` 依赖 audit 子系统按请求记录 `outputTokens/firstTokenMs/egressNodeId`。Python 零 audit 持久化（`grep -ril audit app/` 空；ledger `f30195d` 已记录此缺口）——被动模式不可移植，需先建 telemetry 子系统（独立项目）。
+2. **无 egress node CRUD/隔离原语**：Go 节点是 DB 持久行（id/enabled/exitIp/账号绑定）；Python `EgressNode`（`app/control/proxy/models.py:66`）为 config 派生的内存临时对象（`node_id="pool-N"`），无 enabled 标志、无持久化、无账号绑定。隔离动作（disable node）无处可落；`EgressNodeState`/`healthy_nodes()` 机制存在但从未被写入（死字段，可作未来 hook）。
+3. **无 forced-node 探测能力**：Go `ProbeEgressQuality` 强制指定节点走网关测 TPS；Python reverse pipeline（`ProxyDirectory.acquire()`）无节点 pinning。
+4. **mihomo 模式节点不可映射**：节点在 Mihomo 内部，grok2api 仅切换 group；sidecar 的数字 node_id 无对应物。
+
+**可落地部分（后续可选路线图，不在本批）**：
+- sidecar `tools/egress-quality-guard/quality_guard.py`（1126 行，**已是 Python**，stdlib-only）可直接采用——但它消费 Go 的 6 个 internal API，Python 端需先实现 bootstrap + internal router + admin status/config
+- 池模式隔离最小集：让 `ProxyDirectory.feedback()` 在 NODE_BANNED 时写 `EgressNode.state=UNHEALTHY`（复用现成 `healthy_nodes()` 过滤）
+- 建议顺序：建 request-audit telemetry → internal API → sidecar 接入 → 池模式隔离 → passive 模式
+
+### A3 审计：batch-2 漏网提交（dd6624c..d2a8b4f7，ledger 原判全覆盖实漏 4 个）
+
+| 提交 | 状态 | 说明 |
+|---|---|---|
+| `a234e3b4` (fix(web,session): prefer block signals before identity and Statsig retry) | ⏭️ 跳过（评估） | 封号 body 优先于 Statsig invalidation 重试。Python 侧 `x-statsig-id` 处理在 `headers.py _statsig_id`（无 Statsig 重试逻辑），web sessionidentity 是 Go 特有模块；Python 无等价重试吞首包路径 → 无风险场景 |
+| `af2415f1` (feat: introduce webVisibleStreamPhase to manage client-visible output and suppress late reasoning) | ⏭️ 跳过（评估） | web chat.go 流相位管理。Python web chat 流经 `xai_chat.py StreamAdapter` 已按事件类型过滤（`_finished`/`_handle_event`），晚期 reasoning 事件天然被丢弃 → 架构性等价 |
+| `894bf6b5` (feat: updated egress binding UI) | ⏭️ 跳过 | 前端 UI |
+| `b4836edd` (feat: add partial_images and stream fields to API documentation) | ⏭️ 跳过 | 文档 |

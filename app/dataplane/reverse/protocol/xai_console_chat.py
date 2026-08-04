@@ -107,9 +107,6 @@ _EFFORT_MAP: dict[str, str] = {
     "max": "high",
 }
 
-# Build 模型不支持 "max"/"xhigh" effort，需规范化为 "high"
-_BUILD_EFFORT_NORMALIZE: frozenset[str] = frozenset({"max", "xhigh"})
-
 
 # ---------------------------------------------------------------------------
 # Payload builder
