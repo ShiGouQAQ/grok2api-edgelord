@@ -78,7 +78,7 @@
 | 9 | `3d5e7de` | 审计 | 🟢 低 | 📋 待审阅 | 完整故障诊断审计 |
 | 21 | `2db3f65` | 账号/管理 | 🟡 中 | ⏭️ 跳过 | Go 多 provider batch workflows + admin preferences（24 files, ~1200 行），Python 无多 provider 架构和 Go admin UI |
 | 22 | `d2eecc4` | 全链路 | 🟡 中 | 📋 待审阅 | gateway Multi-Provider 路由 + 运行时并发管理 — 61 files, ~3600 行, 对话模块拆分为独立文件 |
-| 23 | `8004840` | 图片 | 🟡 中 | 📋 待审阅 | image generation 增强 + error handling 改进 |
+| 23 | `8004840` | 图片 | 🟡 中 | ✅ 已移植 (wave1-G) | `images.py generate()` 非流式路径：重试失败时记录 `last_credential_error`；最终尝试仍可重试失败 → 503 `upstream_unavailable` 审计日志 + 包装错误抛出（Go `writeFailureAudit` + `ErrNoAvailableAccount` 等价） |
 | 10 | `5cee3d2` | Console | 🟡 中 | 📋 待审阅 | 新增 Grok Console provider（Python 版已有） |
 | 11 | `d626a26` | 配额 | 🟡 中 | ⏭️ 跳过 | Go `account_model_quota_blocks` DB 表 + `SelectionUnavailableError` + `CapacityWait` 路由配置 + `signerurl` 验证; Python 配额通过 `QuotaWindow` 内存管理 + `_classify_upstream_status()` 错误分类，无 per-model quota block DB |
 | 12 | `90c3320` | 同步 | 🟢 低 | ⏭️ 跳过 | Go `syncAllAccounts` 迭代 `ProviderBuild` + `ProviderWeb` 双 provider; Python 单 provider 模型 (`AccountDirectory.sync()`)，无多 provider 同步 |
@@ -222,7 +222,7 @@
 | 62 | `c792e47` | Egress | 🟡 中 | ⏭️ 跳过 | Python 无 egress 操作模块（assignment/subscription/sync） |
 | 63 | `46483ab` | FlareSolverr | 🟡 中 | ⏭️ 跳过 | Go 托管 FlareSolverr clearance 含 egress manager 大改 (23 files); Python 已有 `FlareSolverrClearanceProvider` 通过 proxy lease 统一管理; Go 的 clearance state tracking/singleflight 在 Python 中由 proxy directory 实现 |
 | 64 | `a801c5c` | Client Keys | 🟡 中 | ⏭️ 跳过 | Go client key RPM/MaxConcurrent *int 类型 + DB schema 迁移; Python 用简单 api_key 字符串列表 (`app.api_key`)，无限流/并发控制概念不同 |
-| 65 | `c936ab1` | Media | 🟡 中 | 📋 待审阅 | 增强 media audit logging 和 text/image 内容摘要 |
+| 65 | `c936ab1` | Media | 🟡 中 | ✅ 已移植 (wave1-G) | 新增 `app/platform/storage/media_audit.py`：`summarize_response_media()` b'image' 预过滤（JSON 解码前）+ 忠实 Go walk（root input/messages、chat+anthropic blocks、tool_result 嵌套、data-URI/base64 字节估算）；`log_response_media_summary()` 仅 InputImages>0 时 DEBUG 记录（只记计数不记载荷）；`is_function_call_output_content_array`/`normalize_function_call_output_input`/`normalize_input_image_part`（auto/low/high、original→high+warning、url→image_url 别名） |
 | 66 | `65c85f2` | Auto-Clean | 🟡 中 | ✅ 已移植 | 2026-08-04: opt-in auto-clean 随批 10 评估 — `reauthRequired` 核心已移植（保留账号不删除）；auto-clean 执行 ⏭️ 简化跳过（默认关闭、单 worker、低价值） |
 | 67 | `d55eb6e` | Build | 🟡 中 | ⏭️ 跳过 | Python 无 reasoning replay cache 系统（Go `reasoningreplay/` 新模块），replay key 生成已添加到 `prompt_cache.py` 供未来使用 |
 | 68 | `3405347` | Cache/Session | 🟡 中 | ⏭️ 跳过 | Python 无 sticky session 概念（Go `sticky/` 模块），账号粘滞通过 AccountDirectory 实现 |
@@ -322,10 +322,10 @@
 
 | # | 提交 | 范围 | 状态 | 描述 |
 |---|------|------|------|------|
-| 1 | `8b5c1ed6` | 工具调用 | 📋 待审阅 | 安全规范化流式整数工具参数 — Python 流式 tool call 处理相关，防 float/int 解析异常 |
-| 2 | `e3af4fce` | Responses | 📋 待审阅 | 同 `8b5c1ed6`，Responses API 路径的整数工具参数规范化 |
-| 3 | `d1205d85` | 错误分类 | 📋 待审阅 | 增强 HTTP 上游失败分类 — 对应 Python `_classify_upstream_status()`，可能需新增分类规则 |
-| 4 | `d00698ac` | Gateway | 📋 待审阅 | 分类 Build safety 和 quota 失败 — Python 已有 `model_quota_exhausted`/`free_quota_exhausted` 分类，核对新增规则 |
+| 1 | `8b5c1ed6` | 工具调用 | ✅ 已移植 (wave1-B) | `tool_parser.py`：纯字符串十进制整数规范化（无 float64 数学，词法比较 `9007199254740991`，256 字符上限，`-0`→`0`）；`schema_requires_integer()`（type:"integer"、数组排除 "number"）；深度≤64 有界 `$ref` walker（visited-refs 环守卫，allOf/anyOf/oneOf/prefixItems/items/additionalProperties/properties）；流式路径缓冲 `function_call_arguments` delta，`.done` 归一化后发射修正 delta+done；缓冲炸弹防护 每调用 1MB/全局 4MB 上限 + passthrough 模式 |
+| 2 | `e3af4fce` | Responses | ✅ 已移植 (wave1-B) | 同 `8b5c1ed6`，Responses 路径 `responses_input.py`/`responses_response.py`：`rewrite_function_call` 存储 Responses 工具输出同样规范化（`UseNumber` 深度≤64，流式 delta 缓冲+修正发射，functionSchemas 按别名键控） |
+| 3 | `d1205d85` | 错误分类 | ✅ 已移植 (wave1-A) | `errors.py _classify_upstream_status()`：permanent-denial 措辞收紧（裸 "permission-denied" 不再计入，精确 "access denied" 双位置匹配）；429 free/model 配额标志解耦（free→free_quota_exhausted、model→model_quota_exhausted，不再 OR 合并）；`"permission"` 从 account-scoped 关键词剔除 |
+| 4 | `d00698ac` | Gateway | ✅ 已移植 (wave1-A) | `errors.py` 新增 `safety_rejected` 标志（403 metadata+raw body 匹配 "content violates usage guidelines"/"safety_check_type_"，request-scoped 无账号副作用，短路 account/quota/credential 标志）；`should_invalidate_build_forbidden()` 修复孤儿调用 — 同时要求 `safety_rejected=False` 且 `account_scoped=True`；新增 `app/dataplane/reverse/protocol/rate_limit.py`：`parse_rate_limit_metadata`（RPS/RPM 正则、resets in Xd Xh Xm Xs）+ `rate_limit_from_response`（Retry-After 回填，RPS 2s/RPM 60s 默认） |
 
 ### 🟡 中优先级（评估后移植）
 
