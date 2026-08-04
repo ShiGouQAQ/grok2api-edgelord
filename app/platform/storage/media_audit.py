@@ -13,7 +13,8 @@ entirely when the body does not even contain the token ``image``.
 """
 
 import json
-from typing import Protocol
+from collections.abc import Mapping, Sequence
+from typing import Protocol, cast
 
 from app.platform.logging.logger import logger
 
@@ -317,7 +318,7 @@ def decoded_base64_bytes(value: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def is_function_call_output_content_array(blocks: list) -> bool:
+def is_function_call_output_content_array(blocks: Sequence[object]) -> bool:
     """Distinguish Responses content arrays from plain structured JSON arrays.
 
     If any block type starts with ``input_``, the whole array is validated
@@ -334,7 +335,9 @@ def is_function_call_output_content_array(blocks: list) -> bool:
     return False
 
 
-def normalize_function_call_output_input(item: dict, param: str = "input") -> dict:
+def normalize_function_call_output_input(
+    item: Mapping[str, object], param: str = "input"
+) -> dict[str, object]:
     """Normalize a Responses ``function_call_output`` input item.
 
     Output is treated as a content array only when
@@ -352,7 +355,9 @@ def normalize_function_call_output_input(item: dict, param: str = "input") -> di
     return {"type": "function_call_output", "call_id": call_id, "output": output}
 
 
-def normalize_input_image_part(item: dict, param: str = "input_image") -> dict:
+def normalize_input_image_part(
+    item: Mapping[str, object], param: str = "input_image"
+) -> dict[str, object]:
     """Normalize a Responses ``input_image`` content part.
 
     Accepts ``auto``/``low``/``high``; maps ``original`` → ``high`` with a
@@ -379,7 +384,7 @@ def normalize_input_image_part(item: dict, param: str = "input_image") -> dict:
     else:
         raise ValueError(f"{param}.detail 只支持 auto、low、high 或 original")
 
-    converted: dict = {"type": "input_image", "detail": detail}
+    converted: dict[str, object] = {"type": "input_image", "detail": detail}
     if item.get("image_url") is not None:
         converted["image_url"] = item["image_url"]
     elif item.get("url") is not None:
@@ -389,33 +394,36 @@ def normalize_input_image_part(item: dict, param: str = "input_image") -> dict:
     return converted
 
 
-def _normalize_function_call_output_blocks(blocks: list, param: str) -> list:
-    normalized: list = []
+def _normalize_function_call_output_blocks(
+    blocks: Sequence[object], param: str
+) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
     for index, raw in enumerate(blocks):
         block_param = f"{param}[{index}]"
         if not isinstance(raw, dict):
             raise ValueError(f"{block_param} 必须是对象")
-        block_type = str(raw.get("type") or "").strip()
+        block = cast(Mapping[str, object], raw)
+        block_type = str(block.get("type") or "").strip()
         if not block_type:
             raise ValueError(f"{block_param}.type 不能为空")
         if block_type == "input_text":
-            text = raw.get("text")
+            text = block.get("text")
             if not isinstance(text, str):
                 raise ValueError(f"{block_param}.text 必须是字符串")
             normalized.append({"type": "input_text", "text": text})
         elif block_type == "input_image":
             _, has_image_url = _non_empty_content_block_string(
-                raw, "image_url", block_param
+                block, "image_url", block_param
             )
             _, has_file_id = _non_empty_content_block_string(
-                raw, "file_id", block_param
+                block, "file_id", block_param
             )
             if not has_image_url and not has_file_id:
                 raise ValueError(f"{block_param}.image_url 或 .file_id 至少需要一个")
-            normalized.append(normalize_input_image_part(raw, block_param))
+            normalized.append(normalize_input_image_part(block, block_param))
         elif block_type == "input_file":
             normalized.append(
-                _normalize_function_call_output_file_block(raw, block_param)
+                _normalize_function_call_output_file_block(block, block_param)
             )
         else:
             raise ValueError(
@@ -424,7 +432,9 @@ def _normalize_function_call_output_blocks(blocks: list, param: str) -> list:
     return normalized
 
 
-def _normalize_function_call_output_file_block(block: dict, param: str) -> dict:
+def _normalize_function_call_output_file_block(
+    block: Mapping[str, object], param: str
+) -> dict[str, object]:
     has_source = False
     for key in ("file_data", "file_id", "file_url", "filename"):
         _, exists = _non_empty_content_block_string(block, key, param)
@@ -432,7 +442,7 @@ def _normalize_function_call_output_file_block(block: dict, param: str) -> dict:
             has_source = True
     if not has_source:
         raise ValueError(f"{param} 至少需要 file_data、file_id 或 file_url 之一")
-    converted: dict = {"type": "input_file"}
+    converted: dict[str, object] = {"type": "input_file"}
     for key in ("file_data", "file_id", "filename", "file_url"):
         if block.get(key) is not None:
             converted[key] = block[key]
@@ -440,7 +450,7 @@ def _normalize_function_call_output_file_block(block: dict, param: str) -> dict:
 
 
 def _non_empty_content_block_string(
-    block: dict, key: str, param: str
+    block: Mapping[str, object], key: str, param: str
 ) -> tuple[str, bool]:
     raw = block.get(key)
     if raw is None:

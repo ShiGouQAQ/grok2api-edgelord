@@ -70,7 +70,7 @@ def parse_rate_limit_metadata(body: str) -> RateLimitMetadata | None:
 
 def rate_limit_from_response(
     status: int,
-    headers: dict,
+    headers: dict[str, str],
     body: str,
 ) -> RateLimitMetadata | None:
     """Derive rate-limit metadata from a 429 status, headers, and body.
@@ -113,7 +113,7 @@ def _rate_limit_resets_in_seconds(text: str) -> float | None:
     return total if total > 0 else None
 
 
-def _header_retry_after_seconds(headers: dict) -> float | None:
+def _header_retry_after_seconds(headers: dict[str, str]) -> float | None:
     from email.utils import parsedate_to_datetime
     from datetime import datetime, timezone
 
