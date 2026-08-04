@@ -8,6 +8,7 @@ responses.py — only the input/output format conversion differs.
 """
 
 import asyncio
+from itertools import count
 import os
 import time
 from typing import Any, AsyncGenerator
@@ -46,6 +47,8 @@ from app.products.openai.chat import (
     _configured_retry_codes,
     _should_retry_upstream,
 )
+from app.products._routing_policy import routing_attempt_policy
+
 from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai._tool_sieve import ToolSieve
 
@@ -432,7 +435,7 @@ async def create(
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
-    max_retries = selection_max_retries()
+    policy = routing_attempt_policy(selection_max_retries())
     retry_codes = _configured_retry_codes(cfg)
     timeout_s = cfg.get_float("chat.timeout", 120.0)
     msg_id = _make_msg_id()
@@ -475,7 +478,9 @@ async def create(
     async def _run_stream() -> AsyncGenerator[str, None]:
         prompt_tokens = estimate_prompt_tokens(internal_message)
         excluded: list[str] = []
-        for attempt in range(max_retries + 1):
+        for attempt in count():
+            if not policy.allows(attempt):
+                break
             acct, selected_mode_id = await reserve_account(
                 directory,
                 spec,
@@ -755,7 +760,7 @@ async def create(
                         logger.info(
                             "messages stream tool_calls: attempt={}/{} model={}",
                             attempt + 1,
-                            max_retries + 1,
+                            policy.total_attempts,
                             model,
                         )
                     else:
@@ -881,7 +886,7 @@ async def create(
                         logger.info(
                             "messages stream completed: attempt={}/{} model={} text_len={} think_len={} images={}",
                             attempt + 1,
-                            max_retries + 1,
+                            policy.total_attempts,
                             model,
                             len(full_text),
                             len(full_think),
@@ -892,13 +897,13 @@ async def create(
                     fail_exc = exc
                     if (
                         _should_retry_upstream(exc, retry_codes)
-                        and attempt < max_retries
+                        and policy.has_next(attempt)
                     ):
                         _retry = True
                         logger.warning(
                             "messages stream retry: attempt={}/{} status={} token={}...",
                             attempt + 1,
-                            max_retries,
+                            policy.retry_budget,
                             exc.status,
                             token[:8],
                         )
@@ -940,7 +945,9 @@ async def create(
     token = ""
     adapter = StreamAdapter()
 
-    for attempt in range(max_retries + 1):
+    for attempt in count():
+        if not policy.allows(attempt):
+            break
         acct, selected_mode_id = await reserve_account(
             directory,
             spec,
@@ -981,12 +988,12 @@ async def create(
 
             except UpstreamError as exc:
                 fail_exc = exc
-                if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                if _should_retry_upstream(exc, retry_codes) and policy.has_next(attempt):
                     _retry = True
                     logger.warning(
                         "messages retry: attempt={}/{} status={} token={}...",
                         attempt + 1,
-                        max_retries,
+                        policy.retry_budget,
                         exc.status,
                         token[:8],
                     )

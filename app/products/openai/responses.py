@@ -5,24 +5,30 @@ Streaming emits standard Responses API SSE events.
 """
 
 import asyncio
+from itertools import count
 from typing import Any, AsyncGenerator
 
 import orjson
 
-from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
 from app.platform.errors import RateLimitError, UpstreamError
+from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_s
 from app.platform.tokens import (
     estimate_prompt_tokens,
     estimate_tokens,
     estimate_tool_call_tokens,
 )
+from app.control.account.enums import FeedbackKind
 from app.control.model.enums import ModeId
 from app.control.model.registry import resolve as resolve_model
-from app.control.account.enums import FeedbackKind
 from app.dataplane.reverse.protocol.xai_chat import classify_line, StreamAdapter
+
 from app.products._account_selection import reserve_account, selection_max_retries
+from app.products._routing_policy import (
+    new_routing_attempt_policy,
+    routing_attempt_policy,
+)
 
 from .chat import (
     _stream_chat,
@@ -265,6 +271,7 @@ async def create(
     top_p: float,
     tools: list[dict] | None = None,
     tool_choice: Any = None,
+    previous_response_id: str | None = None,
 ) -> dict | AsyncGenerator[str, None]:
 
     cfg = get_config()
@@ -298,7 +305,12 @@ async def create(
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
-    max_retries = selection_max_retries()
+    # Stored-response chains (previous_response_id) must never swap accounts:
+    # a single attempt, regardless of the configured policy (Go: ownership != nil).
+    if previous_response_id:
+        policy = new_routing_attempt_policy(1)
+    else:
+        policy = routing_attempt_policy(selection_max_retries())
     retry_codes = _configured_retry_codes(cfg)
     response_id = make_resp_id("resp")
     reasoning_id = make_resp_id("rs")
@@ -350,7 +362,9 @@ async def create(
     # -------------------------------------------------------------------------
     async def _run_stream() -> AsyncGenerator[str, None]:
         excluded: list[str] = []
-        for attempt in range(max_retries + 1):
+        for attempt in count():
+            if not policy.allows(attempt):
+                break
             acct, selected_mode_id = await reserve_account(
                 directory,
                 spec,
@@ -634,7 +648,7 @@ async def create(
                         logger.info(
                             "responses stream tool_calls: attempt={}/{} model={}",
                             attempt + 1,
-                            max_retries + 1,
+                            policy.total_attempts,
                             model,
                         )
                     else:
@@ -777,7 +791,7 @@ async def create(
                         logger.info(
                             "responses stream completed: attempt={}/{} model={} text_len={} reasoning_len={} image_count={}",
                             attempt + 1,
-                            max_retries + 1,
+                            policy.total_attempts,
                             model,
                             len(full_text),
                             len(full_think),
@@ -786,15 +800,14 @@ async def create(
 
                 except UpstreamError as exc:
                     fail_exc = exc
-                    if (
-                        _should_retry_upstream(exc, retry_codes)
-                        and attempt < max_retries
+                    if _should_retry_upstream(exc, retry_codes) and policy.has_next(
+                        attempt
                     ):
                         _retry = True
                         logger.warning(
                             "responses stream retry scheduled: attempt={}/{} status={} token={}...",
                             attempt + 1,
-                            max_retries,
+                            policy.retry_budget,
                             exc.status,
                             token[:8],
                         )
@@ -802,7 +815,7 @@ async def create(
                         logger.warning(
                             "responses stream upstream failed: attempt={}/{} model={} status={} body={}",
                             attempt + 1,
-                            max_retries + 1,
+                            policy.total_attempts,
                             model,
                             exc.status,
                             _upstream_body_excerpt(exc),
@@ -843,7 +856,9 @@ async def create(
     excluded: list[str] = []
     token = ""
     adapter = StreamAdapter()
-    for attempt in range(max_retries + 1):
+    for attempt in count():
+        if not policy.allows(attempt):
+            break
         acct, selected_mode_id = await reserve_account(
             directory,
             spec,
@@ -884,12 +899,14 @@ async def create(
 
             except UpstreamError as exc:
                 fail_exc = exc
-                if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                if _should_retry_upstream(exc, retry_codes) and policy.has_next(
+                    attempt
+                ):
                     _retry = True
                     logger.warning(
                         "responses retry scheduled: attempt={}/{} status={} token={}...",
                         attempt + 1,
-                        max_retries,
+                        policy.retry_budget,
                         exc.status,
                         token[:8],
                     )
@@ -897,7 +914,7 @@ async def create(
                     logger.warning(
                         "responses upstream failed: attempt={}/{} model={} status={} body={}",
                         attempt + 1,
-                        max_retries + 1,
+                        policy.total_attempts,
                         model,
                         exc.status,
                         _upstream_body_excerpt(exc),

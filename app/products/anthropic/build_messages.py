@@ -4,6 +4,7 @@
 """
 
 import asyncio
+from itertools import count
 from typing import Any, AsyncGenerator
 
 import orjson
@@ -22,6 +23,8 @@ from app.dataplane.reverse.protocol.xai_build import (
     build_build_responses_payload,
     BuildStreamAdapter,
 )
+from app.products._routing_policy import routing_attempt_policy
+
 from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai.chat import _configured_retry_codes, _should_retry_upstream
 from app.products.openai.build_chat import stream_build_chat
@@ -85,7 +88,7 @@ async def create(
     cfg = get_config()
     spec = resolve_model(model)
     timeout_s = cfg.get_float("chat.timeout", 120.0)
-    max_retries = selection_max_retries()
+    policy = routing_attempt_policy(selection_max_retries())
     retry_codes = _configured_retry_codes(cfg)
     effort = "low" if emit_think else "none"
     _agent_id = agent_id or "grok2api-default-agent"
@@ -101,7 +104,9 @@ async def create(
 
         async def _run_stream() -> AsyncGenerator[str, None]:
             excluded: list[str] = []
-            for attempt in range(max_retries + 1):
+            for attempt in count():
+                if not policy.allows(attempt):
+                    break
                 acct, selected_mode_id = await reserve_account(
                     directory,
                     spec,
@@ -232,20 +237,20 @@ async def create(
                             model,
                             len(full_text),
                             attempt + 1,
-                            max_retries + 1,
+                            policy.total_attempts,
                         )
 
                     except UpstreamError as exc:
                         fail_exc = exc
                         if (
                             _should_retry_upstream(exc, retry_codes)
-                            and attempt < max_retries
+                            and policy.has_next(attempt)
                         ):
                             _retry = True
                             logger.warning(
                                 "build messages retry: attempt={}/{} status={}",
                                 attempt + 1,
-                                max_retries,
+                                policy.retry_budget,
                                 exc.status,
                             )
                         else:
@@ -280,7 +285,9 @@ async def create(
 
     # ── Non-streaming ─────────────────────────────────────────────────────────
     excluded: list[str] = []
-    for attempt in range(max_retries + 1):
+    for attempt in count():
+        if not policy.allows(attempt):
+            break
         acct, selected_mode_id = await reserve_account(
             directory,
             spec,
@@ -353,11 +360,11 @@ async def create(
 
             except UpstreamError as exc:
                 fail_exc = exc
-                if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                if _should_retry_upstream(exc, retry_codes) and policy.has_next(attempt):
                     logger.warning(
                         "build messages non-stream retry: attempt={}/{} status={}",
                         attempt + 1,
-                        max_retries,
+                        policy.retry_budget,
                         exc.status,
                     )
                     excluded.append(token)

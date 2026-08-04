@@ -1,6 +1,7 @@
 """Chat completion service — orchestrates account selection, reverse, streaming."""
 
 import asyncio
+from itertools import count
 import base64
 import re
 from typing import Any, AsyncGenerator
@@ -56,6 +57,8 @@ from ._format import (
     build_usage,
 )
 from ._tool_sieve import ToolSieve
+from app.products._routing_policy import routing_attempt_policy
+
 from app.products._account_selection import reserve_account, selection_max_retries
 
 
@@ -558,7 +561,7 @@ async def completions(
         raise RateLimitError("Account directory not initialised")
     directory = _acct_dir
 
-    max_retries = selection_max_retries()
+    policy = routing_attempt_policy(selection_max_retries())
     retry_codes = _configured_retry_codes(cfg)
     response_id = make_response_id()
     timeout_s = cfg.get_float("chat.timeout", 120.0)
@@ -576,7 +579,9 @@ async def completions(
 
         async def _run_stream() -> AsyncGenerator[str, None]:
             excluded: list[str] = []
-            for attempt in range(max_retries + 1):
+            for attempt in count():
+                if not policy.allows(attempt):
+                    break
                 acct, selected_mode_id = await reserve_account(
                     directory,
                     spec,
@@ -647,7 +652,7 @@ async def completions(
                                             logger.info(
                                                 "chat stream tool_calls: attempt={}/{} model={} call_count={}",
                                                 attempt + 1,
-                                                max_retries + 1,
+                                                policy.total_attempts,
                                                 model,
                                                 len(parsed_calls),
                                             )
@@ -736,7 +741,7 @@ async def completions(
                             logger.info(
                                 "chat stream completed: attempt={}/{} model={} image_count={}",
                                 attempt + 1,
-                                max_retries + 1,
+                                policy.total_attempts,
                                 model,
                                 len(adapter.image_urls),
                             )
@@ -745,13 +750,13 @@ async def completions(
                         fail_exc = exc
                         if (
                             _should_retry_upstream(exc, retry_codes)
-                            and attempt < max_retries
+                            and policy.has_next(attempt)
                         ):
                             _retry = True
                             logger.warning(
                                 "chat stream retry scheduled: attempt={}/{} status={} token={}...",
                                 attempt + 1,
-                                max_retries,
+                                policy.retry_budget,
                                 exc.status,
                                 token[:8],
                             )
@@ -759,7 +764,7 @@ async def completions(
                             logger.warning(
                                 "chat stream upstream failed: attempt={}/{} model={} status={} body={}",
                                 attempt + 1,
-                                max_retries + 1,
+                                policy.total_attempts,
                                 model,
                                 exc.status,
                                 _upstream_body_excerpt(exc),
@@ -797,7 +802,9 @@ async def completions(
     excluded: list[str] = []
     token = ""
     adapter = StreamAdapter()
-    for attempt in range(max_retries + 1):
+    for attempt in count():
+        if not policy.allows(attempt):
+            break
         acct, selected_mode_id = await reserve_account(
             directory,
             spec,
@@ -840,12 +847,12 @@ async def completions(
 
             except UpstreamError as exc:
                 fail_exc = exc
-                if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                if _should_retry_upstream(exc, retry_codes) and policy.has_next(attempt):
                     _retry = True
                     logger.warning(
                         "chat retry scheduled: attempt={}/{} status={} token={}...",
                         attempt + 1,
-                        max_retries,
+                        policy.retry_budget,
                         exc.status,
                         token[:8],
                     )
@@ -853,7 +860,7 @@ async def completions(
                     logger.warning(
                         "chat upstream failed: attempt={}/{} model={} status={} body={}",
                         attempt + 1,
-                        max_retries + 1,
+                        policy.total_attempts,
                         model,
                         exc.status,
                         _upstream_body_excerpt(exc),
@@ -910,7 +917,7 @@ async def completions(
             logger.info(
                 "chat request tool_calls: attempt={}/{} model={} call_count={}",
                 attempt + 1,
-                max_retries + 1,
+                policy.total_attempts,
                 model,
                 len(parse_result.calls),
             )
@@ -931,7 +938,7 @@ async def completions(
     logger.info(
         "chat request completed: attempt={}/{} model={} text_len={} reasoning_len={} image_count={}",
         attempt + 1,
-        max_retries + 1,
+        policy.total_attempts,
         model,
         len(full_text),
         len(thinking_text or ""),

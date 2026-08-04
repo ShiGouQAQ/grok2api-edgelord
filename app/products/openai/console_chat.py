@@ -11,6 +11,7 @@
 """
 
 import asyncio
+from itertools import count
 from typing import Any, AsyncGenerator
 
 import orjson
@@ -41,6 +42,8 @@ from app.dataplane.reverse.protocol.tool_prompt import (
     inject_into_message,
 )
 from app.dataplane.reverse.protocol.tool_parser import parse_tool_calls
+from app.products._routing_policy import routing_attempt_policy
+
 from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai.chat import _configured_retry_codes, _should_retry_upstream
 from ._format import (
@@ -135,7 +138,7 @@ async def completions(
     spec = resolve_model(model)
     effort = _reasoning_effort_from_emit_think(emit_think)
     timeout_s = cfg.get_float("chat.timeout", 120.0)
-    max_retries = selection_max_retries()
+    policy = routing_attempt_policy(selection_max_retries())
     retry_codes = _configured_retry_codes(cfg)
     response_id = make_response_id()
 
@@ -169,7 +172,9 @@ async def completions(
 
         async def _run_stream() -> AsyncGenerator[str, None]:
             excluded: list[str] = []
-            for attempt in range(max_retries + 1):
+            for attempt in count():
+                if not policy.allows(attempt):
+                    break
                 acct, selected_mode_id = await reserve_account(
                     directory,
                     spec,
@@ -274,7 +279,7 @@ async def completions(
                             logger.info(
                                 "console chat stream tool_calls: attempt={}/{} model={} call_count={}",
                                 attempt + 1,
-                                max_retries + 1,
+                                policy.total_attempts,
                                 model,
                                 len(flushed_calls) if flushed_calls else 0,
                             )
@@ -301,7 +306,7 @@ async def completions(
                         logger.info(
                             "console chat stream completed: attempt={}/{} model={} tokens={}",
                             attempt + 1,
-                            max_retries + 1,
+                            policy.total_attempts,
                             model,
                             (usage_data or {}).get("total_tokens", "?"),
                         )
@@ -310,13 +315,13 @@ async def completions(
                         fail_exc = exc
                         if (
                             _should_retry_upstream(exc, retry_codes)
-                            and attempt < max_retries
+                            and policy.has_next(attempt)
                         ):
                             _retry = True
                             logger.warning(
                                 "console chat retry: attempt={}/{} status={} body={} token={}...",
                                 attempt + 1,
-                                max_retries,
+                                policy.retry_budget,
                                 exc.status,
                                 _body_excerpt(exc),
                                 token[:8],
@@ -327,7 +332,7 @@ async def completions(
                                 model,
                                 exc.status,
                                 attempt + 1,
-                                max_retries + 1,
+                                policy.total_attempts,
                                 _body_excerpt(exc),
                             )
                             raise
@@ -361,7 +366,9 @@ async def completions(
 
     # ── Non-streaming path ────────────────────────────────────────────────────
     excluded: list[str] = []
-    for attempt in range(max_retries + 1):
+    for attempt in count():
+        if not policy.allows(attempt):
+            break
         acct, selected_mode_id = await reserve_account(
             directory,
             spec,
@@ -446,11 +453,11 @@ async def completions(
 
             except UpstreamError as exc:
                 fail_exc = exc
-                if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+                if _should_retry_upstream(exc, retry_codes) and policy.has_next(attempt):
                     logger.warning(
                         "console chat non-stream retry: attempt={}/{} status={} body={}",
                         attempt + 1,
-                        max_retries,
+                        policy.retry_budget,
                         exc.status,
                         _body_excerpt(exc),
                     )

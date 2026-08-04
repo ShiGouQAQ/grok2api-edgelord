@@ -1,6 +1,7 @@
 """Image services — generation (/v1/images/generations) and editing (/v1/images/edits)."""
 
 import asyncio
+from itertools import count
 import base64
 import binascii
 import hashlib
@@ -65,6 +66,8 @@ from .chat import (
     _quota_sync,
     _should_retry_upstream,
 )
+from app.products._routing_policy import routing_attempt_policy
+
 from app.products._account_selection import selection_max_retries
 
 _X_USER_ID_RE = re.compile(r"(?:^|;\s*)x-userid=([^;]+)")
@@ -443,12 +446,14 @@ async def generate(
         return _sse_stream()
 
     # Non-streaming: collect all final images with retry on credential/upstream failure.
-    max_retries = selection_max_retries()
+    policy = routing_attempt_policy(selection_max_retries())
     retry_codes = _configured_retry_codes(get_config())
     excluded: list[str] = []
     last_credential_error: AppError | None = None
 
-    for attempt in range(max_retries + 1):
+    for attempt in count():
+        if not policy.allows(attempt):
+            break
         acct = await _acct_dir.reserve_any(
             spec.pool_candidates(),
             now_s_override=now_s(),
@@ -522,12 +527,12 @@ async def generate(
             fail_exc = exc
             if _should_retry_upstream(exc, retry_codes):
                 last_credential_error = exc
-                if attempt < max_retries:
+                if policy.has_next(attempt):
                     retry = True
                     logger.warning(
                         "image generation retry scheduled: attempt={}/{} token={}...",
                         attempt + 1,
-                        max_retries,
+                        policy.retry_budget,
                         token[:8],
                     )
                 # Final attempt: fall through to the post-loop 503 audit.
@@ -1120,11 +1125,13 @@ async def _run_lite_request(
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
 
-    max_retries = selection_max_retries()
+    policy = routing_attempt_policy(selection_max_retries())
     retry_codes = _configured_retry_codes(get_config())
     excluded: list[str] = []
 
-    for attempt in range(max_retries + 1):
+    for attempt in count():
+        if not policy.allows(attempt):
+            break
         acct = await _acct_dir.reserve(
             pool_candidates=spec.pool_candidates(),
             mode_id=int(spec.mode_id),
@@ -1174,12 +1181,12 @@ async def _run_lite_request(
             raise UpstreamError("Image generation returned no images")
         except UpstreamError as exc:
             fail_exc = exc
-            if _should_retry_upstream(exc, retry_codes) and attempt < max_retries:
+            if _should_retry_upstream(exc, retry_codes) and policy.has_next(attempt):
                 retry = True
                 logger.warning(
                     "lite image retry scheduled: attempt={}/{} status={} token={}...",
                     attempt + 1,
-                    max_retries,
+                    policy.retry_budget,
                     exc.status,
                     token[:8],
                 )

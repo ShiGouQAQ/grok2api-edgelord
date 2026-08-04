@@ -157,6 +157,14 @@ max_retries = 1
 on_codes = "429,401,503"
 
 
+# ==================== 路由策略 ====================
+[routing]
+# [App 层] 账号轮换最大尝试次数（-1 = 无限，1..200 合法，0 非法）
+max_routing_attempts = 200
+# 无限路由尝试哨兵值（-1），配置 max_routing_attempts = -1 即无限
+unlimited_routing_attempts = -1
+
+
 [account.refresh]
 # 总开关：true=配额刷新模式（主动探测，选号评分）；false=自动重试模式（随机选号，零探测）
 enabled = true
@@ -180,6 +188,12 @@ vacuum = false   # 默认禁用，避免大库 VACUUM 锁全库（5-30s）；需
 # 连续失败达阈值后由 leader 巡检任务标 EXPIRED，不再永远占用刷新周期。
 reauth_stuck_threshold = 3          # 连续 reauth 失败次数阈值（>= 即标 EXPIRED）
 reauth_stuck_interval_sec = 3600    # 巡检间隔（秒）
+
+
+[account.build_detect]
+# 管理端 Build 账号可用性检测（Go bcc6435f/b4c7baab 移植）
+max_attempts = 999                    # 探测最大尝试次数（0 非法，校验拒绝）
+mark_build_chat_denied_as_reauth = false  # chat 403 blocked-user 是否标 reauth（默认模型级阻断）
 
 
 [account.selection]
