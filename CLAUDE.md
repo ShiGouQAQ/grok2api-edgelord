@@ -94,6 +94,9 @@ app/
 
 1. **Async everywhere** — All I/O is async (aiohttp, asyncio.TaskGroup)
 2. **Config via TOML** — `config.defaults.toml` + user overrides in `data/config.toml`
+   - **读取配置键前先核对 schema**：`config.defaults.toml` 是权威键集合。曾经踩坑：读 `proxy.clearance.cf_clearance`/`proxy.cf_clearance`（schema 只有 `proxy.clearance.cf_cookies`）导致 cf_clearance 恒空 → SSO→Build mint 403（2026-08-04 修复）。
+   - **clearance 派生统一走 `resolve_clearance_config()`**（`app/control/proxy/config.py`）：`cf_clearance` 从 `cf_cookies` 提取，禁止直接 `get_config().get_str("proxy.clearance.cf_clearance", ...)`。
+   - **media 格式键在 `[features]`**：`features.image_format`/`features.video_format`/`features.imagine_public_image_proxy`（2026-08-04 从 `[build]` 迁回，与 jiujiu532 上游一致）。
 3. **Account pools** — Three tiers: `basic` (free), `super` (paid), `heavy` (premium)
 4. **Proxy modes** — `direct`, `single_proxy`, `proxy_pool`, `mihomo`
 5. **Clearance modes** — `none`, `manual`, `turnstile`, `flaresolverr`

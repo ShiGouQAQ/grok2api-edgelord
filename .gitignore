@@ -59,6 +59,7 @@ htmlcov/
 .claude/
 .cursor/
 .opencode/
+.omo/
 *.tar.gz
 token.json
 
