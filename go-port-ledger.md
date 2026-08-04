@@ -209,7 +209,7 @@
 
 | # | 提交 | 范围 | 优先级 | 状态 | 描述 |
 |---|------|------|--------|------|------|
-| 58 | `09388e5` | Build/Gateway | 🟡 中 | ✅ 已移植 | `config.defaults.toml`: 新增 `chat.build_403_invalidation_codes` 配置; `errors.py`: 新增 `should_invalidate_build_forbidden()` 匹配可配置封禁码 (默认: blocked-user, email-domain-rejected, account-suspended, token-revoked) |
+| 58 | `09388e5` | Build/Gateway | 🟡 中 | ✅ 已移植 | `config.defaults.toml`: 新增 `features.build_403_invalidation_codes` 配置（2026-08-04 修正：原记录 `chat.` 前缀错误，schema 键为 `features.`）; `errors.py`: 新增 `should_invalidate_build_forbidden()` 匹配可配置封禁码 (默认: blocked-user, email-domain-rejected, account-suspended, token-revoked) |
 | 59 | `6224ed9` | Egress | 🟡 中 | ⏭️ 跳过 | Python 无 egress 回退配置，代理模型不同 |
 | 60 | `57d3f80` | Egress | 🟡 中 | ⏭️ 跳过 | Python 无 egress 节点 CRUD/操作模块 |
 | 61 | `42e1fe7` | Egress | 🟡 中 | ⏭️ 跳过 | Python 无 egress 批量删除功能 |
@@ -303,3 +303,82 @@
 > 2026-07-25 移植批 4（media/image/video）：15 个媒体相关提交。移植 8 个（video failure logging, upload diagnostics, video input size limit, remote image validation, image editing API enhancements, partial image streaming, video error handling）。跳过 7 个（media job DB constraints, terminal video job deletion, media audit logging, egress tracking — Python 无 media job 持久化层）。
 > 2026-07-26 移植批 5（account/auth/SSO/quota/auto-clean）：31 个账号/认证/SSO/配额/自动清理相关提交全部跳过。核心原因：Go 重写引入了 Python 不存在的架构层——多 provider（Web/Console/Build）、OAuth refresh tokens、`reauthRequired` 状态、billing 模型、settings service、sticky sessions、auto_clean 模块。Python 用 SSO token + EXPIRED 状态 + config.toml + `cleanup.py` 等不同机制处理等价场景，无需移植。
 > 2026-07-26 移植批 6（prompt cache/console/codex/import/403）：22 个提交。移植 9 个（prompt cache v3 提取+软会话+usage 合并, Client Hints Arch/Bitness, Codex 模型目录, 403 封禁码配置, BOM 去除）。跳过 13 个（FlareSolverr egress 大改、客户端密钥 DB 迁移、路由唯一性、模型配额管理、Build+Web 多 provider 同步、Console Multi-Agent、视频流代理、分页标准化）。已存在 1 个（version check）。
+
+---
+
+## 待评估（新批：d2a8b4f7..8f979d45，v3.0.10 → v3.0.11）
+
+> 同步于 2026-08-04 | 54 个非合并提交，均未在上方出现
+
+### 🔴 高优先级 Bug 修复（建议移植）
+
+| # | 提交 | 范围 | 状态 | 描述 |
+|---|------|------|------|------|
+| 1 | `8b5c1ed6` | 工具调用 | 📋 待审阅 | 安全规范化流式整数工具参数 — Python 流式 tool call 处理相关，防 float/int 解析异常 |
+| 2 | `e3af4fce` | Responses | 📋 待审阅 | 同 `8b5c1ed6`，Responses API 路径的整数工具参数规范化 |
+| 3 | `d1205d85` | 错误分类 | 📋 待审阅 | 增强 HTTP 上游失败分类 — 对应 Python `_classify_upstream_status()`，可能需新增分类规则 |
+| 4 | `d00698ac` | Gateway | 📋 待审阅 | 分类 Build safety 和 quota 失败 — Python 已有 `model_quota_exhausted`/`free_quota_exhausted` 分类，核对新增规则 |
+
+### 🟡 中优先级（评估后移植）
+
+| # | 提交 | 范围 | 状态 | 描述 |
+|---|------|------|------|------|
+| 5 | `b4c7baab` | Build 账号 | 📋 待审阅 | 增强 Build 账号检测的错误分类 — Python 二级探测 `_refresh_one()` 已有等价逻辑，核对 |
+| 6 | `bcc6435f` | Build 账号 | 📋 待审阅 | 改进 Build 账号检测和路由 failover |
+| 7 | `ef10c4cb` | Build 凭证 | 📋 待审阅 | 允许手动重试无效 Build 凭证 — Python SSO→Build 导入路径相关 |
+| 8 | `34811392` | Build 配额 | 📋 待审阅 | 更新 Build free quota 估算 — Python console 配额窗口 (BASIC_CONSOLE_LIMIT) 相关 |
+| 9 | `75f4f7a7` | Build 代理 | 📋 待审阅 | 每请求轮换 Build proxy-pool 隧道 — Python `proxy_pool` 模式相关 |
+| 10 | `0893557a` | 代理健康 | 📋 待审阅 | MarkFailureAfterSuccess + 健康更新逻辑 — Python 代理反馈状态机相关 |
+| 11 | `f1867395` | 代理节点 | 📋 待审阅 | 取消请求不冷却代理节点 — Python mihomo 黑名单机制相关 |
+| 12 | `1edc9fbe` | 模型别名 | 📋 待审阅 | 模型别名支持 reasoning effort — Python 模型注册表相关 |
+| 13 | `15146556` | 路由 | 📋 待审阅 | 无限路由尝试功能 — Python 路由重试逻辑相关 |
+| 14 | `72340380` | 路由 | 📋 待审阅 | 移除 maxAttempts 硬上限 10 — 与 `15146556` 配套 |
+| 15 | `2aaac4d0` | Clearance | 📋 待审阅 | 允许无 challenge cookies 的 clearance — Python CF clearance 生命周期相关 |
+
+### 🟢 低优先级（参考）
+
+| # | 提交 | 范围 | 状态 | 描述 |
+|---|------|------|------|------|
+| 16 | `35f4f115` | Web 媒体 | 📋 待审阅 | 文件名清理和安全日志 — 上传路径安全加固 |
+| 17 | `f4f439a4` | 账号管理 | 📋 待审阅 | 批量更新账号并发 — Go admin 批处理，Python admin batch 参考 |
+
+### ⏭️ 跳过（Go 特有/UI/egress/版本/测试）
+
+| # | 提交 | 原因 |
+|---|------|------|
+| — | `89b47825`, `fc65a8d2`, `6011cf87`, `630f6d0f`, `981f4cfe`, `3d7159a3`, `ebbea88c`, `f030909c`, `3d6a699a`, `830c3b07`, `0de70e0f` | egress 节点管理/探测 — Python 无 egress 节点 CRUD/操作模块（同旧批结论） |
+| — | `2f030c09`, `80d099b2`, `e87525a6`, `b97dac94` | Go React 前端 UI — Python admin UI 独立，不移植 |
+| — | `c3182ac6`, `37268f0b`, `e4552ee9`, `347f5b75` | Go linked-account 管理/清理 — Python 无多 provider linked accounts 概念 |
+| — | `f2676e8a`, `022ffc1c` | Go client key routing scopes — Python 用简单 api_key 列表，无限流/scope 控制 |
+| — | `2a336686` | Go BatchUpdate provider 校验 — Python 无多 provider 架构 |
+| — | `d21cc395`, `ed0b5da0`, `25cf4699`, `f4ac412f`, `cd6369d0` | Go OAuth 凭证刷新/DB 凭证导出 — Python 用 SSO cookie，无 OAuth tokens 和加密凭证 DB |
+| — | `db66caba` | response billing 指标 — Python 无 billing 模型 |
+| — | `6ec604c1`, `f6c74e9e`, `2a1d6cfe`, `413bebee` | web 媒体上传/fsync/诊断 — Python 媒体路径不同（无 media job 持久化层） |
+| — | `326d9aed`, `c3c07553`, `1325476b` | Go 特有测试 |
+| — | `aabf8f9f`, `c27f0545` | 版本号 bump（v3.0.10/v3.0.11），不涉及逻辑 |
+
+---
+
+## 统计（更新后）
+
+| 类别 | 旧批 | 新批 | 合计 |
+|------|------|------|------|
+| 已移植 | 44 | 0 | 44 |
+| 已存在 | 1 | 0 | 1 |
+| 待审阅（高优先级） | 0 | 4 | 4 |
+| 待审阅（中优先级） | 28 | 11 | 39 |
+| 待审阅（低优先级） | 15 | 2 | 17 |
+| 跳过 | 147 | 37 | 184 |
+| **总计（唯一非合并提交）** | **235** | **54** | **289** |
+
+> 上游 `upstream/source` 总非合并提交：411（含已追踪 289 个 + 更早期未追踪提交）
+
+> 2026-08-04 移植批 7（v3.0.10→v3.0.11）：54 个提交。待审阅 17 个（4 高：整数工具参数规范化 ×2、HTTP 失败分类增强 ×2；11 中：Build 账号检测/配额/代理轮换、代理健康、路由尝试上限、clearance 无 cookie；2 低：媒体文件名清理、批量并发）。跳过 37 个（egress 管理/探测 11、Go UI 4、linked-account 4、client keys 2、Go 凭证/OAuth 5、billing 1、媒体 4、Go 测试 3、版本号 2）。
+
+> 2026-08-04 本地修复批 8（配置键不匹配，非移植）：审计全库 get_config() 键读取 vs config.defaults.toml schema，修复 4 处：
+> - **M1 根因**（SSO→Build mint 403）：`sso_build.py` PKCE-CS/Device Flow 直接读 `proxy.clearance.cf_clearance`/`proxy.cf_clearance`（schema 无此键）→ 恒空 → 不播种 cf_clearance → accounts.x.ai 预校验 403。修复：新增 `_resolve_cf_clearance_value()` 复用 `resolve_clearance_config().cf_clearance`。
+> - **M2**：`errors.py` `should_invalidate_build_forbidden` 读 `chat.build_403_invalidation_codes` → 改 `features.build_403_invalidation_codes`。
+> - **M3**：`config.py` `resolve_clearance_config` 的 `cf_clearance` 字段从 `cf_cookies` 派生（`extract_cookie_value`），legacy 平键兜底。
+> - **M6**：`config.defaults.toml` 的 `image_format`/`imagine_public_image_proxy`/`video_format` 从 `[build]` 移回 `[features]`（与 jiujiu532 上游一致）。
+> - M4/M5（`storage.data_dir`、`browser.custom_fingerprint.enabled`）审计后 KEEP。
+> 测试：全套 1179 passed。TDD：每处修复先 RED 后 GREEN（tests/test_clearance_config.py、test_build_errors.py、test_config.py、test_sso_build.py 新增 16 测试）。
