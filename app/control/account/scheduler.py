@@ -1,11 +1,12 @@
 """Background scheduler for periodic account quota refresh.
 
-Runs one independent loop per pool type (basic / super / heavy), each with
-its own configurable interval read from:
+Runs one independent loop per pool type (basic / super / heavy / build),
+each with its own configurable interval read from:
 
     account.refresh.basic_interval_sec  (default 86400 — 24 h)
     account.refresh.super_interval_sec  (default  7200 —  2 h)
     account.refresh.heavy_interval_sec  (default  7200 —  2 h)
+    account.refresh.build_interval_sec  (default 21600 —  6 h)
 """
 
 import asyncio
@@ -21,6 +22,7 @@ _POOL_CONFIG: dict[str, tuple[str, int]] = {
     "basic": ("account.refresh.basic_interval_sec", 86_400),
     "super": ("account.refresh.super_interval_sec", 7_200),
     "heavy": ("account.refresh.heavy_interval_sec", 7_200),
+    "build": ("account.refresh.build_interval_sec", 21_600),
 }
 
 
@@ -71,10 +73,11 @@ class AccountRefreshScheduler:
         )
         intervals = {p: _interval(p) for p in _POOL_CONFIG}
         logger.info(
-            "account refresh scheduler started: basic_interval_s={} super_interval_s={} heavy_interval_s={}",
+            "account refresh scheduler started: basic_interval_s={} super_interval_s={} heavy_interval_s={} build_interval_s={}",
             intervals["basic"],
             intervals["super"],
             intervals["heavy"],
+            intervals["build"],
         )
 
     def stop(self) -> None:

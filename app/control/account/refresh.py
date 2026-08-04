@@ -270,6 +270,13 @@ class AccountRefreshService:
         if record.is_deleted():
             return RefreshResult()
 
+        # Build OAuth tokens are not sso cookies — rate-limits always 401s.
+        # Probe the billing API instead (port of Go QuotaBilling).
+        if record.pool == "build" or record.provider == "grok_build":
+            return await self._refresh_build_billing(
+                record, apply_fallback=apply_fallback
+            )
+
         try:
             windows = await self._fetch_all_quotas(
                 record.token, record.pool, bootstrap=bootstrap
@@ -386,6 +393,63 @@ class AccountRefreshService:
             failed=0 if refreshed else 1,
             recovered=1 if (was_cooling and refreshed) else 0,
         )
+
+    async def _refresh_build_billing(
+        self,
+        record: AccountRecord,
+        *,
+        apply_fallback: bool,
+    ) -> RefreshResult:
+        """Probe Build OAuth billing (api.x.ai/billing/usage) and persist it."""
+        from dataclasses import asdict
+
+        from app.dataplane.reverse.protocol.xai_billing import fetch_build_billing
+
+        ext = record.ext or {}
+        token = ext.get("build_access_token") or record.token
+
+        try:
+            billing = await fetch_build_billing(token)
+        except UpstreamError as exc:
+            if not getattr(exc, "credential_rejected", False):
+                raise
+            if not await self._expire_invalid_credentials(record, exc):
+                # Structured flag is authoritative even when the body
+                # heuristics miss — force the EXPIRED state directly.
+                from .commands import AccountPatch
+
+                ts = now_ms()
+                await self._repo.patch_accounts(
+                    [
+                        AccountPatch(
+                            token=record.token,
+                            status=AccountStatus.EXPIRED,
+                            last_fail_at=ts,
+                            last_fail_reason="invalid_credentials",
+                            state_reason="invalid_credentials",
+                            ext_merge={
+                                **ext,
+                                "expired_at": ts,
+                                "expired_reason": "invalid_credentials",
+                            },
+                        )
+                    ]
+                )
+            return RefreshResult(checked=1, expired=1)
+        except Exception:
+            return RefreshResult(checked=1, failed=1)
+
+        from .commands import AccountPatch
+
+        await self._repo.patch_accounts(
+            [
+                AccountPatch(
+                    token=record.token,
+                    ext_merge={**ext, "build_billing": asdict(billing)},
+                )
+            ]
+        )
+        return RefreshResult(checked=1, refreshed=1)
 
     async def _apply_fallback(self, record: AccountRecord) -> RefreshResult:
         """Conservative fallback when API is unreachable (scheduled/import path only)."""
