@@ -6,25 +6,41 @@ Preprocesses upstream input items (messages, function_calls, reasoning, etc.).
 
 from typing import Any
 
+from app.dataplane.reverse.protocol.tool_parser import (
+    normalize_function_arguments,
+    schema_contains_reachable_integer,
+)
 
-def normalize_input_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+
+def normalize_input_items(
+    items: list[dict[str, Any]],
+    schemas: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """normalize_input_items preprocesses input items for the Build API.
 
     Handles: message, function_call, function_call_output, reasoning,
     tool_search_call/output, custom_tool_call/output, apply_patch_call/output,
     agent_message, shell_call, mcp_*, compaction_trigger, additional_tools.
+
+    Args:
+        items: Input items to normalize.
+        schemas: Optional map of tool name → JSON schema. When a
+                 function_call's name is present and its schema requires
+                 integers, its arguments JSON is normalized (12.0 → 12).
     """
     result: list[dict[str, Any]] = []
 
     for item in items:
-        normalized = _normalize_input_item(item)
+        normalized = _normalize_input_item(item, schemas)
         if normalized is not None:
             result.append(normalized)
 
     return result
 
 
-def _normalize_input_item(item: dict[str, Any]) -> dict[str, Any] | None:
+def _normalize_input_item(
+    item: dict[str, Any], schemas: dict[str, Any] | None
+) -> dict[str, Any] | None:
     """_normalize_input_item normalizes a single input item."""
     if not isinstance(item, dict):
         return item
@@ -35,9 +51,9 @@ def _normalize_input_item(item: dict[str, Any]) -> dict[str, Any] | None:
     if item_type == "message":
         return item
 
-    # Function call: pass through
+    # Function call: normalize arguments when the tool schema requires integers
     if item_type == "function_call":
-        return item
+        return _normalize_function_call_arguments(item, schemas)
 
     # Function call output: pass through
     if item_type == "function_call_output":
@@ -95,4 +111,23 @@ def _normalize_input_item(item: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     # Unknown: pass through
+    return item
+
+
+def _normalize_function_call_arguments(
+    item: dict[str, Any], schemas: dict[str, Any] | None
+) -> dict[str, Any]:
+    """_normalize_function_call_arguments rewrites integral float spellings
+    in a function_call's arguments when the tool schema requires integers."""
+    if not schemas:
+        return item
+    schema = schemas.get(item.get("name", ""))
+    if not isinstance(schema, dict) or not schema_contains_reachable_integer(schema):
+        return item
+    arguments = item.get("arguments")
+    if not isinstance(arguments, str):
+        return item
+    normalized, _ = normalize_function_arguments(arguments, schema)
+    if normalized != arguments:
+        item["arguments"] = normalized
     return item
