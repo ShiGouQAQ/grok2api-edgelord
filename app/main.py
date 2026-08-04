@@ -257,9 +257,11 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.debug("console quota reset loop error: error={}", exc)
 
-    console_reset_task = asyncio.create_task(
-        _console_reset_loop(), name="console-quota-reset"
-    ) if is_leader else None
+    console_reset_task = (
+        asyncio.create_task(_console_reset_loop(), name="console-quota-reset")
+        if is_leader
+        else None
+    )
 
     # 7. Console 429 EXPIRED 账号自动恢复任务（每10分钟巡检一次）
     # 恢复条件：状态 EXPIRED + 原因 console_429_threshold_exceeded
@@ -276,9 +278,40 @@ async def lifespan(app: FastAPI):
             except Exception as exc:
                 logger.debug("console expired recovery loop error: error={}", exc)
 
-    console_recovery_task = asyncio.create_task(
-        _console_recovery_loop(), name="console-expired-recovery"
-    ) if is_leader else None
+    console_recovery_task = (
+        asyncio.create_task(_console_recovery_loop(), name="console-expired-recovery")
+        if is_leader
+        else None
+    )
+
+    # 8. REAUTH_REQUIRED 卡死账号有界重试巡检（leader-only，周期可配置）
+    # 连续 reauth 失败达阈值的账号标 EXPIRED（死 SSO 账号不再永远占用刷新）；
+    # 阈值/间隔见 [account.recovery] 配置。
+    async def _reauth_recovery_loop() -> None:
+        while True:
+            interval = max(
+                60,
+                _config.get_int("account.recovery.reauth_stuck_interval_sec", 3600),
+            )
+            await asyncio.sleep(interval)
+            try:
+                from app.control.account.recovery import recover_stuck_reauth_accounts
+
+                threshold = max(
+                    1,
+                    _config.get_int("account.recovery.reauth_stuck_threshold", 3),
+                )
+                await recover_stuck_reauth_accounts(repo, threshold=threshold)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — watchdog loop must survive repo errors (sibling loop pattern)
+                logger.debug("reauth recovery loop error: error={}", exc)
+
+    reauth_recovery_task = (
+        asyncio.create_task(_reauth_recovery_loop(), name="reauth-stuck-recovery")
+        if is_leader
+        else None
+    )
 
     def _deleted_cleanup_settings() -> dict[str, object]:
         return {
@@ -291,10 +324,14 @@ async def lifespan(app: FastAPI):
             "vacuum": _config.get_bool("account.cleanup.vacuum", True),
         }
 
-    deleted_cleanup_task = asyncio.create_task(
-        run_daily_deleted_account_cleanup(repo, _deleted_cleanup_settings),
-        name="deleted-account-cleanup",
-    ) if is_leader else None
+    deleted_cleanup_task = (
+        asyncio.create_task(
+            run_daily_deleted_account_cleanup(repo, _deleted_cleanup_settings),
+            name="deleted-account-cleanup",
+        )
+        if is_leader
+        else None
+    )
 
     logger.info("application startup completed")
     yield
@@ -313,6 +350,12 @@ async def lifespan(app: FastAPI):
         console_recovery_task.cancel()
         try:
             await console_recovery_task
+        except asyncio.CancelledError:
+            pass
+    if reauth_recovery_task is not None:
+        reauth_recovery_task.cancel()
+        try:
+            await reauth_recovery_task
         except asyncio.CancelledError:
             pass
     if deleted_cleanup_task is not None:

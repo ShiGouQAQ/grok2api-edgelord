@@ -82,6 +82,25 @@ class AccountRefreshService:
         self._lock = asyncio.Lock()
         self._od_lock = asyncio.Lock()
         self._od_last = 0.0
+        # Per-token locks serializing the quota read-modify-write in
+        # refresh_call_async -> _apply_single_mode (concurrent decrements).
+        self._token_locks: dict[str, asyncio.Lock] = {}
+
+    def _token_lock(self, token: str) -> asyncio.Lock:
+        """Return the per-token lock serializing this account's quota updates.
+
+        Get-or-create is atomic under asyncio (no ``await`` between the read
+        and the insert, so tasks cannot interleave), so concurrent callers
+        always share one lock per token.
+        # ponytail: locks live for the process lifetime, bounded by the number
+        # of distinct tokens (account count); weakref + refcount if account
+        # churn ever matters.
+        """
+        lock = self._token_locks.get(token)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._token_locks[token] = lock
+        return lock
 
     # ------------------------------------------------------------------
     # Usage API fetch (delegates to dataplane reverse protocol)
@@ -171,27 +190,31 @@ class AccountRefreshService:
 
     async def refresh_call_async(self, token: str, mode_id: int) -> None:
         """Fire-and-forget single-mode quota sync after a successful call."""
-        record = (await self._repo.get_accounts([token]) or [None])[0]
-        if record is None or record.is_deleted():
-            return
-
-        # mode_id=5 (CONSOLE) 是本地管理的配额，不需要请求 xai usage API
-        # 直接做本地扣减并更新 usage_use_count
-        if mode_id == 5:
-            await self._apply_single_mode(
-                record, mode_id, window=None, is_use=True, use_at_ms=now_ms()
-            )
-            return
-
-        try:
-            window = await self._fetch_mode_quota(token, record.pool, mode_id)
-        except UpstreamError as exc:
-            if await self._expire_invalid_credentials(record, exc):
+        # Per-token lock: _apply_single_mode decrements `remaining` from the
+        # record snapshot read below — without serialization two concurrent
+        # calls both read 20 and both write 19 (lost update).
+        async with self._token_lock(token):
+            record = (await self._repo.get_accounts([token]) or [None])[0]
+            if record is None or record.is_deleted():
                 return
-            raise
-        await self._apply_single_mode(
-            record, mode_id, window, is_use=True, use_at_ms=now_ms()
-        )
+
+            # mode_id=5 (CONSOLE) 是本地管理的配额，不需要请求 xai usage API
+            # 直接做本地扣减并更新 usage_use_count
+            if mode_id == 5:
+                await self._apply_single_mode(
+                    record, mode_id, window=None, is_use=True, use_at_ms=now_ms()
+                )
+                return
+
+            try:
+                window = await self._fetch_mode_quota(token, record.pool, mode_id)
+            except UpstreamError as exc:
+                if await self._expire_invalid_credentials(record, exc):
+                    return
+                raise
+            await self._apply_single_mode(
+                record, mode_id, window, is_use=True, use_at_ms=now_ms()
+            )
 
     async def refresh_scheduled(self, pool: str | None = None) -> RefreshResult:
         """Periodic refresh — fetch real quotas for all (or one pool's) accounts.
@@ -752,12 +775,17 @@ class AccountRefreshService:
             getattr(exc, "credential_rejected", False)
             or is_invalid_credentials_error(exc)
         ) and record.provider in ("grok_web", "grok_console"):
-            return await mark_account_reauth_required(
+            from .recovery import bump_reauth_fail_count
+
+            marked = await mark_account_reauth_required(
                 self._repo,
                 record.token,
                 str(exc) or "sso credential rejected",
                 source="usage refresh",
             )
+            if marked:
+                await bump_reauth_fail_count(self._repo, record)
+            return marked
         return await mark_account_invalid_credentials(
             self._repo,
             record.token,

@@ -34,10 +34,6 @@ import orjson
 
 from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
-from app.dataplane.reverse.protocol.xai_usage import (
-    is_invalid_credentials_body,
-    is_content_violation_body,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +391,18 @@ def _parse_body_code(body: str) -> str:
 
 
 def _status_feedback(status: int, body: str = "", exc: UpstreamError | None = None):
+    """Map an upstream console response to ProxyFeedback (account-level semantics).
+
+    Account-level 403s (blocked user, invalid credentials, permanent denial)
+    must stay FORBIDDEN — they are account problems, not Cloudflare issues, and
+    must NOT invalidate the clearance bundle. Only body-marked CF challenge /
+    node-banned responses rotate or invalidate.
+    """
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
+    from app.dataplane.reverse.protocol.xai_usage import (
+        is_content_violation_body,
+        is_invalid_credentials_body,
+    )
     from app.dataplane.reverse.transport._proxy_feedback import (
         _is_cf_challenge,
         _is_node_banned,
@@ -411,7 +418,7 @@ def _status_feedback(status: int, body: str = "", exc: UpstreamError | None = No
             elif _is_cf_challenge(body):
                 kind = ProxyFeedbackKind.CHALLENGE
             else:
-                kind = ProxyFeedbackKind.CHALLENGE
+                kind = ProxyFeedbackKind.FORBIDDEN
         elif status == 429 or exc.quota_exhausted:
             kind = ProxyFeedbackKind.RATE_LIMITED
         elif status >= 500:
@@ -429,8 +436,10 @@ def _status_feedback(status: int, body: str = "", exc: UpstreamError | None = No
             kind = ProxyFeedbackKind.FORBIDDEN
         elif body and is_content_violation_body(body):
             kind = ProxyFeedbackKind.FORBIDDEN
-        else:
+        elif body and _is_cf_challenge(body):
             kind = ProxyFeedbackKind.CHALLENGE
+        else:
+            kind = ProxyFeedbackKind.FORBIDDEN
     elif status == 429:
         kind = ProxyFeedbackKind.RATE_LIMITED
     elif status >= 500:

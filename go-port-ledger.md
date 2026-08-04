@@ -11,14 +11,16 @@
 
 **去重要求**：每个提交 hash 在整个台账中只出现一次。已移植/已跳过的提交不应出现在"待评估"中。
 
+> **注意（2026-08-04，审计 L1）**：下方 2026-07-15 两行（`c450dee`/`0fe097e`）的"提交 Hash"列填的是**本仓库 Python 移植提交**（存在于 `main` 历史），**非 Go 上游 hash** —— 这两个 hash 不在 `upstream/source` 历史中，仅为本地移植记录占位，勿按 Go 上游 hash 检索。
+
 ---
 
 ## 台账
 
 | 日期 | 提交 Hash | 提交描述 | 状态 | Python 版本/提交 | 备注 |
 |------|-----------|----------|------|-------------------|------|
-| 2026-07-15 | `c450dee` | feat(errors): Go→Python 结构化错误分类移植 | ✅ 已移植 | `c450dee` | Go `failure.go` → Python `errors.py` UpstreamError |
-| 2026-07-15 | `0fe097e` | test: add coverage for structured UpstreamError classification | ✅ 已移植 | `0fe097e` | 425 tests ported from Go `failure_test.go` patterns |
+| 2026-07-15 | `c450dee`（本地移植提交，非 Go 上游） | feat(errors): Go→Python 结构化错误分类移植 | ✅ 已移植 | `c450dee` | Go `failure.go` → Python `errors.py` UpstreamError |
+| 2026-07-15 | `0fe097e`（本地移植提交，非 Go 上游） | test: add coverage for structured UpstreamError classification | ✅ 已移植 | `0fe097e` | 425 tests ported from Go `failure_test.go` patterns |
 | 2026-07-15 | `e376c22` | fix: prevent json_schema's own type field from overwriting response_format type | ✅ 已移植 | current | Ported `normalize_response_format()` to `chat.py` with type-skip fix; added `response_format` to `ChatCompletionRequest` schema |
 | 2026-07-15 | `982e27b` | fix: Messages API 兼容 messages 内联 system role (Claude Code) + error type 透传 | ✅ 已移植 | current | Ported inline system extraction to `_parse_anthropic_messages()` with `_extract_system_text()` helper; error type passthrough in `router.py` |
 | 2026-07-15 | `ca97848` | fix: upstream error 后流标记终止 | ✅ 已移植 | current | StreamAdapter._finished in xai_chat.py |
@@ -133,7 +135,9 @@
 | 待审阅（中优先级） | 7 |
 | 待审阅（低优先级） | 11 |
 | 跳过 | 11 |
-| **总计（旧批唯一非合并提交）** | **43** |
+| **总计（旧批唯一非合并提交）** | ~~43~~ **12**（43 为内部统计之和，见下方修正） |
+
+> ⚠️ **修正（2026-08-04，审计 L3）**：本批（`a16837c..dd6624c`）上游实际**非合并提交为 12 个**（`git rev-list --count --no-merges a16837c..dd6624c` 实测）。原"43"是台账内部各类别计数之和（14 已移植 + 7 中 + 11 低 + 11 跳过），非上游提交真实数量，不应用于上游进度统计。
 
 ---
 
@@ -142,14 +146,16 @@
 > 同步于 2026-07-25 | 207 个非合并提交，其中 35 个已在上方台账/待评估/跳过中，新增 172 个
 
 > 注意：仅列 dd6624c 之后且未在上方出现的提交。重复提交（如 `ef16e55`/`106a7e7` 同一 fix 两次出现）仅列一次。
+>
+> 🔁 修正（2026-08-04，审计 L2）：以下 9 行与上方台账重复（`db28846`、`68bd35e`、`79f225a`、`4a18b61`、`5ad1636`、`215ccb9`、`edd94df`、`00b5f90`、`fb1babd`），状态已改标 🔁 重复（台账已登记），不计入待审阅。
 
 ### 🐛 Bug 修复（建议移植）
 
 | # | 提交 | 范围 | 优先级 | 状态 | 描述 |
 |---|------|------|--------|------|------|
-| 1 | `db28846` | Messages API | 🔴 高 | 📋 待审阅 | 修复 CodeQL 溢出：取消不可信容量运算，钳制 deferred-text 残差检查，web_search_call 去重前 cap — 安全修复 |
+| 1 | `db28846` | Messages API | 🔴 高 | 🔁 重复（台账已登记） | 修复 CodeQL 溢出：取消不可信容量运算，钳制 deferred-text 残差检查，web_search_call 去重前 cap — 安全修复 |
 | 2 | `505c0b3` | 代理池 | 🔴 高 | ⏭️ 跳过 | Python PROXY_POOL 用游标轮转，无逐节点冷却机制，单节点故障不全局影响 |
-| 3 | `68bd35e` | Anthropic | 🔴 高 | 📋 待审阅 | 修正 Anthropic cached input token 计费 — 影响 token 统计准确性 |
+| 3 | `68bd35e` | Anthropic | 🔴 高 | 🔁 重复（台账已登记） | 修正 Anthropic cached input token 计费 — 影响 token 统计准确性 |
 | 4 | `4cf6c50` | 403 处理 | 🟡 中 | ⏭️ 跳过 | Python 已通过 `_classify_upstream_status()` 检查 `blocked-user`/`user is blocked` → `credential_rejected` → EXPIRED；Go 的 `IsDefinitiveAccountBlockBody()` JSON 解析等价于 Python `_extract_error_metadata()` |
 | 5 | `ba81e8d` | Gateway | 🟡 中 | ✅ 已移植 | 2026-08-04: chat 403 blocked-user → 标 SSO invalid → `reauthRequired`（保留账号仅提示重认证，不再直接 EXPIRED 移除）；与 `232fe83`/`5700827` 同批移植 |
 | 6 | `232fe83` | 账号 | 🟡 中 | ✅ 已移植 | 2026-08-04: blocked-user → mark SSO invalid → `reauthRequired`（保留账号仅提示重认证，不删除）；session identity 概念仍不移植（Python 用 SSO cookie 直接访问） |
@@ -186,12 +192,12 @@
 | 37 | `d875056` | Build | 🟡 中 | ⏭️ 跳过 | 同 `0779b24`，Python 无 Build 账号等级分层 |
 | 38 | `67925ae` | XAI | 🟡 中 | ⏭️ 跳过 | Go Build provider 的 XAI 回退限制（`CanUseBuildAPIFallback` 检查 billing），Python 无 Build provider 和 XAI 回退机制 |
 | 39 | `73826a0` | Egress | 🟡 中 | ⏭️ 跳过 | Python 反馈系统无 scope 级冷却逻辑 |
-| 40 | `79f225a` | Web | 🟡 中 | 📋 待审阅 | 区分 hosted search tool usage |
-| 41 | `4a18b61` | Web | 🟡 中 | 📋 待审阅 | 清理和限制 search metadata — 安全加固 |
-| 42 | `5ad1636` | Messages | 🟡 中 | 📋 待审阅 | 限制 hosted search stream state — 防止状态膨胀 |
-| 43 | `215ccb9` | Web | 🟡 中 | 📋 待审阅 | 完成 Claude hosted search mapping |
-| 44 | `edd94df` | Messages | 🟡 中 | 📋 待审阅 | 加固 hosted web search 生命周期 |
-| 45 | `00b5f90` | Messages | 🟡 中 | 📋 待审阅 | 加固 Claude web search mapping |
+| 40 | `79f225a` | Web | 🟡 中 | 🔁 重复（台账已登记） | 区分 hosted search tool usage |
+| 41 | `4a18b61` | Web | 🟡 中 | 🔁 重复（台账已登记） | 清理和限制 search metadata — 安全加固 |
+| 42 | `5ad1636` | Messages | 🟡 中 | 🔁 重复（台账已登记） | 限制 hosted search stream state — 防止状态膨胀 |
+| 43 | `215ccb9` | Web | 🟡 中 | 🔁 重复（台账已登记） | 完成 Claude hosted search mapping |
+| 44 | `edd94df` | Messages | 🟡 中 | 🔁 重复（台账已登记） | 加固 hosted web search 生命周期 |
+| 45 | `00b5f90` | Messages | 🟡 中 | 🔁 重复（台账已登记） | 加固 Claude web search mapping |
 | 46 | `106a7e7` | Web | 🟡 中 | ⏭️ 跳过 | Python 无 nil pointer panic 问题（aiohttp 响应始终有效） |
 | 47 | `c496550` | Video | 🟡 中 | ✅ 已移植 | 记录 video upstream failures |
 | 48 | `ac6562b` | Image | 🟡 中 | ✅ 已移植 | 暴露 upload response diagnostics |
@@ -241,7 +247,7 @@
 | 87 | `a5f87e0` | SSO | 🟡 中 | ⏭️ 跳过 | Go 多 provider account identity 同步（`provider_links.go`），Python 无 provider links 和多 provider 架构 |
 | 88 | `4a56afb` | SSO/Web | 🟡 中 | ⏭️ 跳过 | Go 多 provider account identity 同步 + web account settings，Python 无此架构 |
 | 89 | `05f2e2f` | Console/Web | 🟡 中 | ⏭️ 跳过 | Go Console/Web 多 provider SSO 集成，Python 用统一 SSO token 模型，无 provider 概念 |
-| 90 | `fb1babd` | Messages | 🟡 中 | 📋 待审阅 | 将 Build web_search_call 映射到 Anthropic server tool blocks |
+| 90 | `fb1babd` | Messages | 🟡 中 | 🔁 重复（台账已登记） | 将 Build web_search_call 映射到 Anthropic server tool blocks |
 | 91 | `69869c7` | Image | 🟡 中 | ✅ 已移植 | 增强 remote image handling with validation 和 fetching logic |
 | 92 | `5190c7b` | 账号 | 🟡 中 | ⏭️ 跳过 | Go billing profile inference（`IsPaid()`/`HasFreeProfileSignal()`），Python 无 billing 模型，用 pool 推断 |
 | 93 | `57e7e4b` | 系统 | 🟢 低 | ✅ 已存在 | Python 已有 `platform/update_check.py`: GitHub Release API 轮询 + 版本对比 + 缓存; 无需额外移植 |
@@ -373,7 +379,7 @@
 | 跳过 | 143 | 37 | 180 |
 | **总计（唯一非合并提交）** | **235** | **54** | **289** |
 
-> 上游 `upstream/source` 总非合并提交：411（含已追踪 289 个 + 更早期未追踪提交）
+> 上游 `upstream/source` 总非合并提交：**678**（`git rev-list --count --no-merges upstream/source` 实测，2026-08-04 修正；原"411"为旧统计口径）。自 `a16837c` 起的非合并提交：**282**（`git rev-list --count --no-merges a16837c..upstream/source` 实测）。
 
 > 2026-08-04 移植批 7（v3.0.10→v3.0.11）：54 个提交。待审阅 17 个（4 高：整数工具参数规范化 ×2、HTTP 失败分类增强 ×2；11 中：Build 账号检测/配额/代理轮换、代理健康、路由尝试上限、clearance 无 cookie；2 低：媒体文件名清理、批量并发）。跳过 37 个（egress 管理/探测 11、Go UI 4、linked-account 4、client keys 2、Go 凭证/OAuth 5、billing 1、媒体 4、Go 测试 3、版本号 2）。
 

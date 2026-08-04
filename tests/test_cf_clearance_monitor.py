@@ -338,7 +338,7 @@ def test_get_stats_empty_db():
         db_path = tmp.name
     try:
         directory = _make_directory(db_path)
-        stats = directory.get_stats()
+        stats = asyncio.run(directory.get_stats())
         assert stats["stats"]["total_checks"] == 0
         assert stats["stats"]["solver_success"] == 0
         assert stats["stats"]["solver_failures"] == 0
@@ -363,7 +363,7 @@ def test_get_stats_mixed_success_failure():
                 {"event_type": "clearance_refresh", "success": False},
             ],
         )
-        stats = directory.get_stats()
+        stats = asyncio.run(directory.get_stats())
         assert stats["stats"]["total_checks"] == 5
         assert stats["stats"]["solver_success"] == 3
         assert stats["stats"]["solver_failures"] == 2
@@ -383,7 +383,7 @@ def test_get_stats_only_success():
                 {"event_type": "clearance_refresh", "success": True},
             ],
         )
-        stats = directory.get_stats()
+        stats = asyncio.run(directory.get_stats())
         assert stats["stats"]["solver_success"] == 2
         assert stats["stats"]["solver_failures"] == 0
         assert stats["stats"]["total_checks"] == 2
@@ -403,7 +403,7 @@ def test_get_stats_only_failure():
                 {"event_type": "clearance_refresh", "success": False},
             ],
         )
-        stats = directory.get_stats()
+        stats = asyncio.run(directory.get_stats())
         assert stats["stats"]["solver_success"] == 0
         assert stats["stats"]["solver_failures"] == 2
         assert stats["stats"]["total_checks"] == 2
@@ -425,7 +425,7 @@ def test_get_stats_filters_non_clearance_events():
                 {"event_type": "precheck_skip", "success": True},
             ],
         )
-        stats = directory.get_stats()
+        stats = asyncio.run(directory.get_stats())
         assert stats["stats"]["total_checks"] == 2
         assert stats["stats"]["solver_success"] == 1
         assert stats["stats"]["solver_failures"] == 1
@@ -454,7 +454,7 @@ def test_get_stats_db_error_graceful():
     directory._clearance_mode = MagicMock()
     directory._clearance_mode.__ne__ = lambda self, other: True
 
-    stats = directory.get_stats()
+    stats = asyncio.run(directory.get_stats())
     assert stats["stats"]["total_checks"] == 0
     assert stats["stats"]["solver_success"] == 0
     assert stats["stats"]["solver_failures"] == 0
@@ -477,7 +477,7 @@ def test_get_stats_reads_from_db_not_memory():
                 {"event_type": "clearance_refresh", "success": False},
             ],
         )
-        stats = directory.get_stats()
+        stats = asyncio.run(directory.get_stats())
         assert stats["stats"]["solver_success"] == 2
         assert stats["stats"]["solver_failures"] == 1
         assert stats["stats"]["total_checks"] == 3

@@ -13,7 +13,7 @@ async def get_cf_clearance_status():
     from app.control.proxy import get_proxy_directory
 
     directory = await get_proxy_directory()
-    return {"success": True, "data": directory.get_stats()}
+    return {"success": True, "data": await directory.get_stats()}
 
 
 @router.post("/cf-clearance/refresh")
@@ -83,7 +83,7 @@ async def get_cf_clearance_stats():
 
     try:
         directory = await get_proxy_directory()
-        stats = directory.get_stats()
+        stats = await directory.get_stats()
         return {"success": True, "data": stats}
     except Exception as e:
         logger.error(f"获取 CF Clearance 统计信息失败: {e}")

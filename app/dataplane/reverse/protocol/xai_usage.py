@@ -237,6 +237,10 @@ def _proxy_feedback_kind_for_error(
 ):
     """Map quota-fetch failures to proxy feedback without burning healthy clearance."""
     from app.control.proxy.models import ProxyFeedbackKind
+    from app.dataplane.reverse.transport._proxy_feedback import (
+        _is_cf_challenge,
+        _is_node_banned,
+    )
 
     # Invalid or blocked accounts are account problems, not proxy problems.
     if is_invalid_credentials_error(exc):
@@ -245,8 +249,17 @@ def _proxy_feedback_kind_for_error(
     if status == 429:
         return ProxyFeedbackKind.RATE_LIMITED
     if status == 403:
-        # 区分 CF 403 和上游 403（需要调用方传入 body 检查）
-        return ProxyFeedbackKind.CHALLENGE
+        # CF 403 → CHALLENGE（可解）或 NODE_BANNED（需换节点）；
+        # 账号级 403（如 permanent_account_denial / plain 403）走 canonical
+        # 分类器 → FORBIDDEN，避免误触发 CF 求解 + 节点轮换。
+        body = str((getattr(exc, "details", {}) or {}).get("body", "") or "")
+        if _is_node_banned(body):
+            return ProxyFeedbackKind.NODE_BANNED
+        if _is_cf_challenge(body):
+            return ProxyFeedbackKind.CHALLENGE
+        if isinstance(exc, UpstreamError):
+            return exc.to_proxy_feedback_kind()
+        return ProxyFeedbackKind.FORBIDDEN
     if status == 401:
         return ProxyFeedbackKind.UNAUTHORIZED
     if status and status >= 500:

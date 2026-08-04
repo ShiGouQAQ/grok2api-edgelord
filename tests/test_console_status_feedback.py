@@ -17,13 +17,13 @@ class TestStatusFeedback:
     """测试 _status_feedback 函数"""
 
     # ============================================================
-    # 403 状态码 → 应该返回 CHALLENGE
+    # 403 状态码 → 无 CF 标记应返回 FORBIDDEN（账号问题，非 CF）
     # ============================================================
 
-    def test_403_returns_challenge(self):
-        """测试 403 状态码返回 CHALLENGE"""
+    def test_403_returns_forbidden(self):
+        """测试 403 状态码返回 FORBIDDEN"""
         result = _status_feedback(403)
-        assert result.kind == ProxyFeedbackKind.CHALLENGE
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
         assert result.status_code == 403
 
     # ============================================================
@@ -154,7 +154,7 @@ class TestStatusFeedback:
         assert hasattr(result, "kind")
         assert hasattr(result, "status_code")
         assert result.status_code == 403
-        assert result.kind == ProxyFeedbackKind.CHALLENGE
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
 
     def test_returns_proxy_feedback_for_429(self):
         """测试 429 返回的 ProxyFeedback 对象"""
@@ -187,7 +187,7 @@ class TestStatusFeedbackEdgeCases:
     def test_all_four_classification_types(self):
         """测试四种分类类型都能正确返回"""
         test_cases = [
-            (403, ProxyFeedbackKind.CHALLENGE),
+            (403, ProxyFeedbackKind.FORBIDDEN),
             (429, ProxyFeedbackKind.RATE_LIMITED),
             (500, ProxyFeedbackKind.UPSTREAM_5XX),
             (502, ProxyFeedbackKind.UPSTREAM_5XX),
@@ -280,18 +280,18 @@ class TestStatusFeedbackBodyCheck:
         assert result.status_code == 403
 
     # ============================================================
-    # CF 挑战 403 → CHALLENGE（无 body 或非账号级）
+    # CF 挑战 403 → CHALLENGE；非账号级无标记 403 → FORBIDDEN
     # ============================================================
 
-    def test_403_empty_body_returns_challenge(self):
-        """空 body 的 403 应返回 CHALLENGE"""
+    def test_403_empty_body_returns_forbidden(self):
+        """空 body 的 403 应返回 FORBIDDEN（非 CF 挑战）"""
         result = _status_feedback(403, "")
-        assert result.kind == ProxyFeedbackKind.CHALLENGE
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
 
-    def test_403_no_body_returns_challenge(self):
-        """不传 body 的 403 应返回 CHALLENGE（向后兼容）"""
+    def test_403_no_body_returns_forbidden(self):
+        """不传 body 的 403 应返回 FORBIDDEN（非 CF 挑战）"""
         result = _status_feedback(403)
-        assert result.kind == ProxyFeedbackKind.CHALLENGE
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
 
     def test_403_cf_challenge_returns_challenge(self):
         """CF 挑战页应返回 CHALLENGE"""
@@ -301,11 +301,11 @@ class TestStatusFeedbackBodyCheck:
         result = _status_feedback(403, body)
         assert result.kind == ProxyFeedbackKind.CHALLENGE
 
-    def test_403_random_body_returns_challenge(self):
-        """无关 body 的 403 应返回 CHALLENGE"""
+    def test_403_random_body_returns_forbidden(self):
+        """无关 body 的 403 应返回 FORBIDDEN（非 CF 挑战）"""
         body = '{"error":"some other error"}'
         result = _status_feedback(403, body)
-        assert result.kind == ProxyFeedbackKind.CHALLENGE
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
 
     # ============================================================
     # 非 403 状态码不受 body 影响
@@ -428,24 +428,24 @@ class TestStatusFeedbackWithUpstreamError:
         assert result.kind == ProxyFeedbackKind.CHALLENGE
         assert result.reason == ""
 
-    def test_403_no_markers_returns_challenge(self):
-        """403 + empty body + no flags → CHALLENGE (fallback)"""
+    def test_403_no_markers_returns_forbidden(self):
+        """403 + empty body + no flags → FORBIDDEN (fallback, not CHALLENGE)"""
         from app.platform.errors import UpstreamError
 
         exc = UpstreamError("test", status=403)
         result = _status_feedback(403, "", exc=exc)
-        assert result.kind == ProxyFeedbackKind.CHALLENGE
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
         assert result.reason == ""
 
-    def test_403_permanent_denial_returns_challenge(self):
-        """403 + permanent_account_denial → CHALLENGE (fallback, not credential)"""
+    def test_403_permanent_denial_returns_forbidden(self):
+        """403 + permanent_account_denial → FORBIDDEN (account issue, not CF)"""
         from app.platform.errors import UpstreamError
 
         exc = UpstreamError(
             "test", status=403, permanent_account_denial=True, upstream_code="perm_deny"
         )
         result = _status_feedback(403, "", exc=exc)
-        assert result.kind == ProxyFeedbackKind.CHALLENGE
+        assert result.kind == ProxyFeedbackKind.FORBIDDEN
         assert result.reason == "perm_deny"
 
     def test_429_returns_rate_limited(self):

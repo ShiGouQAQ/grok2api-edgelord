@@ -179,23 +179,6 @@ class UpstreamError(AppError):
             return ProxyFeedbackKind.UPSTREAM_5XX
         return ProxyFeedbackKind.TRANSPORT_ERROR
 
-    def to_result_category(self) -> "ResultCategory":
-        from app.dataplane.reverse.types import ResultCategory
-
-        if self.credential_rejected or self.status == 401:
-            return ResultCategory.AUTH_FAILURE
-        if self.quota_exhausted or self.status == 429:
-            return ResultCategory.RATE_LIMITED
-        if self.permanent_account_denial:
-            return ResultCategory.AUTH_FAILURE
-        if self.status == 403:
-            return ResultCategory.FORBIDDEN
-        if self.status == 404:
-            return ResultCategory.NOT_FOUND
-        if self.status >= 500:
-            return ResultCategory.UPSTREAM_5XX
-        return ResultCategory.UNKNOWN
-
 
 def _normalize_failure_code(value: str) -> str:
     cleaned: list[str] = []

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from app.platform.logging.logger import logger
 from app.platform.config.snapshot import get_config
+from app.platform.paths import data_path
 from app.platform.runtime.clock import now_ms
 from app.platform.runtime.ids import next_hex
 from .config import resolve_clearance_config
@@ -124,7 +125,9 @@ class ProxyDirectory:
 
     def _get_history_database_path(self) -> str:
         """获取历史记录数据库路径"""
-        data_dir = get_config("storage.data_dir", "data")
+        # storage.data_dir 配置优先（schema 默认 "data"）；置空时回落 canonical
+        # paths.data_dir()（DATA_DIR env / 仓库根 data/），与 accounts.db 路径解析一致。
+        data_dir = get_config("storage.data_dir", "") or str(data_path())
         return str(Path(data_dir) / "cf_clearance.db")
 
     # ------------------------------------------------------------------
@@ -253,8 +256,11 @@ class ProxyDirectory:
         if result.kind in (
             ProxyFeedbackKind.CHALLENGE,
             ProxyFeedbackKind.UNAUTHORIZED,
+            ProxyFeedbackKind.NODE_BANNED,
         ):
-            # Invalidate associated clearance bundle.
+            # Invalidate associated clearance bundle. NODE_BANNED also
+            # invalidates: the bundle was minted through a banned IP, so a
+            # future re-solve must run on a different node.
             key = (lease.proxy_url or "direct", lease.clearance_host)
             async with self._lock:
                 from .models import ClearanceBundleState
@@ -276,6 +282,7 @@ class ProxyDirectory:
                 ProxyFeedbackKind.CHALLENGE,
                 ProxyFeedbackKind.UNAUTHORIZED,
                 ProxyFeedbackKind.FORBIDDEN,
+                ProxyFeedbackKind.NODE_BANNED,
                 ProxyFeedbackKind.TRANSPORT_ERROR,
             )
         ):
@@ -286,6 +293,22 @@ class ProxyDirectory:
                     lease.proxy_url,
                     result.kind,
                     self._pool_cursor,
+                )
+
+        # NODE_BANNED means the current egress IP is blacklisted by CF — a
+        # re-solve on the same node is pointless. Ask Mihomo to switch the
+        # upstream node and blacklist the current one (when Mihomo is the
+        # egress manager).
+        if (
+            result.kind == ProxyFeedbackKind.NODE_BANNED
+            and self._egress_mode == EgressMode.MIHOMO
+            and self._mihomo._enabled()
+        ):
+            switched = await self._mihomo.switch_and_blacklist_current()
+            if not switched:
+                logger.warning(
+                    "mihomo node switch failed on NODE_BANNED feedback: proxy={}",
+                    lease.proxy_url,
                 )
 
     # ------------------------------------------------------------------
@@ -597,37 +620,44 @@ class ProxyDirectory:
     # Stats and history
     # ------------------------------------------------------------------
 
-    def get_stats(self) -> dict:
+    async def get_stats(self) -> dict:
         """获取统计信息（从 SQLite 实时聚合）"""
         db_path = self._get_history_database_path()
-        stats = {
-            "total_checks": 0,
-            "cache_hits": 0,
-            "cache_misses": 0,
-            "solver_success": 0,
-            "solver_failures": 0,
-            "precheck_skips": 0,
-        }
-        conn = None
-        try:
-            conn = sqlite3.connect(db_path, check_same_thread=False)
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT success, COUNT(*) FROM cf_clearance_history "
-                "WHERE event_type='clearance_refresh' GROUP BY success"
-            )
-            for success, count in cursor.fetchall():
-                if success:
-                    stats["solver_success"] = count
-                else:
-                    stats["solver_failures"] = count
-            stats["total_checks"] = stats["solver_success"] + stats["solver_failures"]
-        except Exception:
-            pass
-        finally:
-            if conn:
-                conn.close()
-        total = stats["total_checks"]
+
+        def _sync() -> dict:
+            stats = {
+                "total_checks": 0,
+                "cache_hits": 0,
+                "cache_misses": 0,
+                "solver_success": 0,
+                "solver_failures": 0,
+                "precheck_skips": 0,
+            }
+            conn = None
+            try:
+                conn = sqlite3.connect(db_path, check_same_thread=False)
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT success, COUNT(*) FROM cf_clearance_history "
+                    "WHERE event_type='clearance_refresh' GROUP BY success"
+                )
+                for success, count in cursor.fetchall():
+                    if success:
+                        stats["solver_success"] = count
+                    else:
+                        stats["solver_failures"] = count
+                stats["total_checks"] = (
+                    stats["solver_success"] + stats["solver_failures"]
+                )
+            except Exception:
+                pass
+            finally:
+                if conn:
+                    conn.close()
+            return stats
+
+        db_stats = await asyncio.to_thread(_sync)
+        total = db_stats["total_checks"]
         last_check_time = (
             max(self._last_check_time.values()) if self._last_check_time else None
         )
@@ -637,7 +667,7 @@ class ProxyDirectory:
                 self._is_cache_valid(origin) for origin in self._last_check_time
             ),
             "last_check_time": last_check_time,
-            "stats": stats,
+            "stats": db_stats,
             "hit_rate": self._stats["cache_hits"] / max(total, 1),
         }
 
@@ -797,25 +827,29 @@ class ProxyDirectory:
     ) -> None:
         """记录事件到数据库"""
         db_path = self._get_history_database_path()
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """INSERT INTO cf_clearance_history
-                   (timestamp, event_type, success, duration, details, error_message)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    time.time(),
-                    event_type,
-                    success,
-                    duration,
-                    json.dumps(details) if details else None,
-                    error_message,
-                ),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+
+        def _sync() -> None:
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """INSERT INTO cf_clearance_history
+                       (timestamp, event_type, success, duration, details, error_message)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        time.time(),
+                        event_type,
+                        success,
+                        duration,
+                        json.dumps(details) if details else None,
+                        error_message,
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+        await asyncio.to_thread(_sync)
 
     async def get_history(
         self,
@@ -827,77 +861,85 @@ class ProxyDirectory:
     ) -> dict:
         """查询历史记录"""
         db_path = self._get_history_database_path()
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        try:
-            cursor = conn.cursor()
 
-            conditions = []
-            params = []
+        def _sync() -> dict:
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            try:
+                cursor = conn.cursor()
 
-            if event_type:
-                conditions.append("event_type = ?")
-                params.append(event_type)
+                conditions = []
+                params = []
 
-            if start_time:
-                conditions.append("timestamp >= ?")
-                params.append(start_time)
+                if event_type:
+                    conditions.append("event_type = ?")
+                    params.append(event_type)
 
-            if end_time:
-                conditions.append("timestamp <= ?")
-                params.append(end_time)
+                if start_time:
+                    conditions.append("timestamp >= ?")
+                    params.append(start_time)
 
-            where_clause = " AND ".join(conditions) if conditions else "1=1"
+                if end_time:
+                    conditions.append("timestamp <= ?")
+                    params.append(end_time)
 
-            cursor.execute(
-                f"SELECT COUNT(*) FROM cf_clearance_history WHERE {where_clause}",
-                params,
-            )
-            total = cursor.fetchone()[0]
+                where_clause = " AND ".join(conditions) if conditions else "1=1"
 
-            offset = (page - 1) * page_size
-            cursor.execute(
-                f"""SELECT id, timestamp, event_type, success, duration, details, error_message, created_at
-                    FROM cf_clearance_history
-                    WHERE {where_clause}
-                    ORDER BY timestamp DESC
-                    LIMIT ? OFFSET ?""",
-                params + [page_size, offset],
-            )
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM cf_clearance_history WHERE {where_clause}",
+                    params,
+                )
+                total = cursor.fetchone()[0]
 
-            items = []
-            for row in cursor.fetchall():
-                items.append(
-                    {
-                        "id": row[0],
-                        "timestamp": row[1],
-                        "event_type": row[2],
-                        "success": bool(row[3]),
-                        "duration": row[4],
-                        "details": json.loads(row[5]) if row[5] else None,
-                        "error_message": row[6],
-                        "created_at": row[7],
-                    }
+                offset = (page - 1) * page_size
+                cursor.execute(
+                    f"""SELECT id, timestamp, event_type, success, duration, details, error_message, created_at
+                        FROM cf_clearance_history
+                        WHERE {where_clause}
+                        ORDER BY timestamp DESC
+                        LIMIT ? OFFSET ?""",
+                    params + [page_size, offset],
                 )
 
-            return {
-                "total": total,
-                "page": page,
-                "page_size": page_size,
-                "items": items,
-            }
-        finally:
-            conn.close()
+                items = []
+                for row in cursor.fetchall():
+                    items.append(
+                        {
+                            "id": row[0],
+                            "timestamp": row[1],
+                            "event_type": row[2],
+                            "success": bool(row[3]),
+                            "duration": row[4],
+                            "details": json.loads(row[5]) if row[5] else None,
+                            "error_message": row[6],
+                            "created_at": row[7],
+                        }
+                    )
+
+                return {
+                    "total": total,
+                    "page": page,
+                    "page_size": page_size,
+                    "items": items,
+                }
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_sync)
 
     async def clear_history(self) -> None:
         """清空历史记录"""
         db_path = self._get_history_database_path()
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        try:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM cf_clearance_history")
-            conn.commit()
-        finally:
-            conn.close()
+
+        def _sync() -> None:
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            try:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM cf_clearance_history")
+                conn.commit()
+            finally:
+                conn.close()
+
+        await asyncio.to_thread(_sync)
 
     # ------------------------------------------------------------------
     # Properties

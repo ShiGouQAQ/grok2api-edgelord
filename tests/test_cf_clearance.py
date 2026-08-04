@@ -1,5 +1,6 @@
 """CF Clearance功能测试"""
 
+import asyncio
 import pytest
 import time
 from unittest.mock import AsyncMock, patch, MagicMock
@@ -81,7 +82,7 @@ def test_get_stats(directory):
         conn.commit()
         conn.close()
 
-        stats = directory.get_stats()
+        stats = asyncio.run(directory.get_stats())
         assert stats["enabled"] is True
         assert stats["stats"]["total_checks"] == 10
         assert stats["stats"]["solver_success"] == 7

@@ -366,6 +366,11 @@ async def test_stream_cf_challenge_sends_challenge():
         b"<!DOCTYPE html><html><title>Just a moment...</title></html>"
     )
 
+    async def mock_atext():
+        return "<!DOCTYPE html><html><title>Just a moment...</title></html>"
+
+    mock_response.atext = mock_atext
+
     mock_session = AsyncMock()
     mock_session.post.return_value = mock_response
     mock_session.__aenter__ = AsyncMock(return_value=mock_session)
@@ -399,7 +404,7 @@ async def test_stream_cf_challenge_sends_challenge():
 
 
 @pytest.mark.asyncio
-async def test_stream_empty_body_403_sends_challenge():
+async def test_stream_empty_body_403_sends_forbidden():
     mock_proxy = AsyncMock()
     mock_lease = MagicMock()
     mock_proxy.acquire.return_value = mock_lease
@@ -407,6 +412,11 @@ async def test_stream_empty_body_403_sends_challenge():
     mock_response = MagicMock()
     mock_response.status_code = 403
     mock_response.content = b""
+
+    async def mock_atext():
+        return ""
+
+    mock_response.atext = mock_atext
 
     mock_session = AsyncMock()
     mock_session.post.return_value = mock_response
@@ -437,7 +447,7 @@ async def test_stream_empty_body_403_sends_challenge():
                 pass
 
         mock_proxy.feedback.assert_called_once()
-        assert mock_proxy.feedback.call_args[0][1].kind == ProxyFeedbackKind.CHALLENGE
+        assert mock_proxy.feedback.call_args[0][1].kind == ProxyFeedbackKind.FORBIDDEN
 
 
 @pytest.mark.asyncio

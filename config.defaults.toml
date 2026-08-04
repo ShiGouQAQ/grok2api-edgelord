@@ -75,6 +75,12 @@ user_agent = ""
 prefer_free_build = false
 
 
+# ==================== 本地存储 ====================
+[storage]
+# 数据根目录（cf_clearance.db 等本地状态文件；相对路径基于进程工作目录，置空则用 DATA_DIR env）
+data_dir = "data"
+
+
 # ==================== 本地缓存 ====================
 [cache.local]
 # 图片缓存上限（MB），0 = 不限制；超限后按最旧文件优先清理，并回落到上限的 60%
@@ -135,6 +141,12 @@ cf_solver_checkbox_delay = 8
 cf_solver_checkbox_attempts = 15
 
 
+# ==================== 浏览器指纹 ====================
+[browser.custom_fingerprint]
+# 自定义 TLS/HTTP2 指纹（ja3/akamai/extra_fp）；仅 chromium 系 impersonate 时生效
+enabled = true
+
+
 # ==================== 重试策略 ====================
 [retry]
 # [Transport 层] 触发重建代理 Session 的 HTTP 状态码
@@ -151,6 +163,7 @@ enabled = true
 basic_interval_sec = 86400   # basic 号池周期（秒）：quota 模式用于后台刷新，random 模式用于 429 冷却；默认 86400s
 super_interval_sec = 7200    # super 号池周期（秒）：quota 模式用于后台刷新，random 模式用于 429 冷却；默认 7200s
 heavy_interval_sec = 7200    # heavy 号池周期（秒）：quota 模式用于后台刷新，random 模式用于 429 冷却；默认 7200s
+build_interval_sec = 21600   # build 号池周期（秒）：quota 模式用于后台刷新，random 模式用于 429 冷却；默认 21600s
 usage_concurrency = 15       # 刷新并发数：与 SQL pool_size(5)+max_overflow(10) 对齐，避免连接池耗尽（L6 修复）
 on_demand_min_interval_sec = 300
 
@@ -160,6 +173,13 @@ deleted_retention_days = 7
 run_at = "03:30"
 batch_size = 5000
 vacuum = false   # 默认禁用，避免大库 VACUUM 锁全库（5-30s）；需要时从前台手动开启
+
+
+[account.recovery]
+# REAUTH_REQUIRED 卡死账号有界重试（M7）：SSO 凭证真死的账号刷新永不成功，
+# 连续失败达阈值后由 leader 巡检任务标 EXPIRED，不再永远占用刷新周期。
+reauth_stuck_threshold = 3          # 连续 reauth 失败次数阈值（>= 即标 EXPIRED）
+reauth_stuck_interval_sec = 3600    # 巡检间隔（秒）
 
 
 [account.selection]
