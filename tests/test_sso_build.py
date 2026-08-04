@@ -1211,3 +1211,42 @@ def test_all_exports() -> None:
         "decode_build_claims",
     }
     assert set(sso_build.__all__) == expected
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CF clearance resolution (M1 bug: mint paths read non-existent config keys)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class _StubCfg:
+    """Minimal config stub exposing get_str(key, default) like the snapshot."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+
+    def get_str(self, key: str, default: str = "") -> str:
+        value = self.data.get(key, default)
+        return str(value) if value is not None else default
+
+
+def test_resolve_cf_clearance_from_cookies() -> None:
+    """Schema key proxy.clearance.cf_cookies derives the cf_clearance value."""
+    from app.control.account.sso_build import _resolve_cf_clearance_value
+
+    cfg = _StubCfg({"proxy.clearance.cf_cookies": "cf_clearance=abc123; foo=1"})
+    assert _resolve_cf_clearance_value(cfg) == "abc123"
+
+
+def test_resolve_cf_clearance_legacy_fallback() -> None:
+    """Legacy flat key proxy.cf_clearance still resolves."""
+    from app.control.account.sso_build import _resolve_cf_clearance_value
+
+    cfg = _StubCfg({"proxy.cf_clearance": "legacy"})
+    assert _resolve_cf_clearance_value(cfg) == "legacy"
+
+
+def test_resolve_cf_clearance_empty() -> None:
+    """No configured clearance resolves to empty string."""
+    from app.control.account.sso_build import _resolve_cf_clearance_value
+
+    assert _resolve_cf_clearance_value(_StubCfg({})) == ""

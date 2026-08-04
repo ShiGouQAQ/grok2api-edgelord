@@ -133,6 +133,19 @@ def normalize_sso_token(token: str) -> str:
     return value.replace("\r", "").replace("\n", "").replace("\x00", "")
 
 
+def _resolve_cf_clearance_value(cfg: Any | None = None) -> str:
+    """Resolve the cf_clearance cookie value for SSO→Build mint.
+
+    Derives from proxy.clearance.cf_cookies (schema key) via
+    resolve_clearance_config(), falling back to legacy flat keys.
+    Replaces the broken direct reads of the non-existent
+    proxy.clearance.cf_clearance / proxy.cf_clearance keys.
+    """
+    from app.control.proxy.config import resolve_clearance_config
+
+    return resolve_clearance_config(cfg).cf_clearance or ""
+
+
 # ─── URL safety ─────────────────────────────────────────────────────────────
 
 
@@ -252,11 +265,7 @@ async def _mint_via_pkce_cs(
 
     async with CurlAsyncSession(**kwargs) as session:
         # Resolve CF clearance once to avoid multiple get_config() calls
-        _cf_clearance = str(
-            get_config().get_str("proxy.clearance.cf_clearance", "")
-            or get_config().get_str("proxy.cf_clearance", "")
-            or ""
-        )
+        _cf_clearance = _resolve_cf_clearance_value()
 
         # Set SSO cookies + CF clearance on all relevant domains.
         # CF clearance is needed to avoid Cloudflare 403 on accounts.x.ai / auth.x.ai.
@@ -518,11 +527,7 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
         # Without cf_clearance, Cloudflare returns 403 on accounts.x.ai pre-validation.
         cookie_jar.update_cookies({"sso": sso_token}, _URL("https://auth.x.ai"))
         cookie_jar.update_cookies({"sso": sso_token}, _URL("https://accounts.x.ai"))
-        _cf_clearance = str(
-            get_config().get_str("proxy.clearance.cf_clearance", "")
-            or get_config().get_str("proxy.cf_clearance", "")
-            or ""
-        )
+        _cf_clearance = _resolve_cf_clearance_value(cfg)
         if _cf_clearance:
             cookie_jar.update_cookies(
                 {"cf_clearance": _cf_clearance}, _URL("https://accounts.x.ai")

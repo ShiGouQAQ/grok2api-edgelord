@@ -337,13 +337,13 @@ def should_invalidate_build_forbidden(
 
     Port of 09388e5: configurable Grok Build 403 invalidation rules.
     Matches upstream_code and upstream_message against configurable error codes
-    (chat.build_403_invalidation_codes) or the built-in default list.
+    (features.build_403_invalidation_codes) or the built-in default list.
     """
     if status != 403:
         return False
     from app.platform.config.snapshot import get_config
 
-    custom = get_config("chat.build_403_invalidation_codes", "")
+    custom = get_config("features.build_403_invalidation_codes", "")
     if isinstance(custom, str) and custom.strip():
         codes = {c.strip().lower() for c in custom.split(",") if c.strip()}
     else:

@@ -45,6 +45,21 @@ enable_nsfw = true
 show_search_sources = false
 # 全局附加指令
 custom_instruction = ""
+# 图片返回格式
+#   grok_url  — 直接返回 Grok CDN URL
+#   local_url — 下载后存本地，返回本地代理 URL
+#   grok_md   — Markdown 内嵌 Grok CDN URL
+#   local_md  — Markdown 内嵌本地代理 URL
+#   base64    — Markdown 内嵌 Base64 Data URI
+image_format = "grok_url"
+# Imagine WebSocket 返回的 imagine-public 图片默认直返；开启后下载到本地并返回本地代理 URL
+imagine_public_image_proxy = false
+# 视频返回格式
+#   grok_url  — 直接返回 Grok CDN URL
+#   local_url — 下载后存本地，返回本地代理 URL
+#   grok_html — HTML <video> 标签，src 为 Grok CDN URL
+#   local_html — HTML <video> 标签，src 为本地代理 URL
+video_format = "grok_url"
 
 # Build provider configuration
 [build]
@@ -58,23 +73,6 @@ token_auth = "xai-grok-cli"
 user_agent = ""
 # 403 fallback: prefer Free tier accounts for Build
 prefer_free_build = false
-
-# 图片返回格式
-#   grok_url  — 直接返回 Grok CDN URL
-#   local_url — 下载后存本地，返回本地代理 URL
-#   grok_md   — Markdown 内嵌 Grok CDN URL
-#   local_md  — Markdown 内嵌本地代理 URL
-#   base64    — Markdown 内嵌 Base64 Data URI
-image_format = "grok_url"
-# Imagine WebSocket 返回的 imagine-public 图片默认直返；开启后下载到本地并返回本地代理 URL
-imagine_public_image_proxy = false
-
-# 视频返回格式
-#   grok_url  — 直接返回 Grok CDN URL
-#   local_url — 下载后存本地，返回本地代理 URL
-#   grok_html — HTML <video> 标签，src 为 Grok CDN URL
-#   local_html — HTML <video> 标签，src 为本地代理 URL
-video_format = "grok_url"
 
 
 # ==================== 本地缓存 ====================

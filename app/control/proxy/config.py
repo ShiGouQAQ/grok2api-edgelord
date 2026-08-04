@@ -29,21 +29,29 @@ def first_config_str(cfg: Any, *keys: str) -> str:
 
 def resolve_clearance_config(cfg: Any | None = None) -> ClearanceConfig:
     cfg = cfg or get_config()
+    cf_cookies = first_config_str(
+        cfg,
+        "proxy.cf_cookies",
+        "proxy.clearance.cf_cookies",
+    )
+    # The schema only has proxy.clearance.cf_cookies; the flat keys never
+    # exist. Derive cf_clearance from the cookie string, falling back to the
+    # legacy flat keys when no cookie string is configured. Deferred import:
+    # profile.py (dataplane) imports this module at module level.
+    from app.dataplane.proxy.adapters.profile import extract_cookie_value
+
     return ClearanceConfig(
-        cf_cookies=first_config_str(
-            cfg,
-            "proxy.cf_cookies",
-            "proxy.clearance.cf_cookies",
-        ),
+        cf_cookies=cf_cookies,
         user_agent=first_config_str(
             cfg,
             "proxy.user_agent",
             "proxy.clearance.user_agent",
         ),
-        cf_clearance=first_config_str(
-            cfg,
-            "proxy.cf_clearance",
-            "proxy.clearance.cf_clearance",
+        cf_clearance=(
+            extract_cookie_value(cf_cookies, "cf_clearance")
+            or first_config_str(
+                cfg, "proxy.cf_clearance", "proxy.clearance.cf_clearance"
+            )
         ),
         browser=first_config_str(
             cfg,
