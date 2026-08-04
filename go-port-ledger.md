@@ -335,9 +335,9 @@
 | 6 | `bcc6435f` | Build 账号 | 📋 待审阅 | 改进 Build 账号检测和路由 failover |
 | 7 | `ef10c4cb` | Build 凭证 | 📋 待审阅 | 允许手动重试无效 Build 凭证 — Python SSO→Build 导入路径相关 |
 | 8 | `34811392` | Build 配额 | 📋 待审阅 | 更新 Build free quota 估算 — Python console 配额窗口 (BASIC_CONSOLE_LIMIT) 相关 |
-| 9 | `75f4f7a7` | Build 代理 | 📋 待审阅 | 每请求轮换 Build proxy-pool 隧道 — Python `proxy_pool` 模式相关 |
-| 10 | `0893557a` | 代理健康 | 📋 待审阅 | MarkFailureAfterSuccess + 健康更新逻辑 — Python 代理反馈状态机相关 |
-| 11 | `f1867395` | 代理节点 | 📋 待审阅 | 取消请求不冷却代理节点 — Python mihomo 黑名单机制相关 |
+| 9 | `75f4f7a7` | Build 代理 | ✅ 已移植 (wave1-D) | `ProxyScope.BUILD` + `ProxyLease.fresh_tunnel`；`acquire()` proxy_pool+BUILD+非 sticky（`{account}` 占位符）每请求轮换 cursor；`build_session_kwargs` 消费 `fresh_tunnel` → curl `FRESH_CONNECT`+`FORBID_REUSE`（Go `request.Close=true`） |
+| 10 | `0893557a` | 代理健康 | ✅ 已移植 (wave1-D) | `EgressNode.failure_count` + 节点健康状态机：`feedback()` SUCCESS 分支修复健康/清零计数，失败分支按 kind 衰减 health → state（HEALTHY/DEGRADED/UNHEALTHY），`healthy_nodes()` 生效；`mark_failure_after_success()` 从基线 1 重新计数；节点未命中时记录 `proxy node failure write failed`（Go `stream_failure_health_write_failed`） |
+| 11 | `f1867395` | 代理节点 | ✅ 已移植 (wave1-D) | 验证仅 + 回归测试：Python `CancelledError` 是 BaseException，transport wrapper `except Exception` 已天然不捕获 → 取消请求不产生反馈/不冷却节点/不动 cursor/不进黑名单（test_proxy_health.py `TestCancelNoCooldown` 驱动真实 `post_stream` 验证） |
 | 12 | `1edc9fbe` | 模型别名 | ✅ 已移植 | current (wave1-E) | `registry.py` ALIASES 映射 + `resolve_alias()`/别名感知 `resolve()`；`spec.py` 新增 `supports_reasoning`；`xai_build.py` `_normalize_reasoning_effort` 别名路由 + "none"→thinking disabled/其余 adaptive；`xai_console_chat.py` CONSOLE_MODELS/_MODEL_FIXED_EFFORT 扩展 `grok-4.20-0309-reasoning-{low,medium,high}` |
 | 13 | `15146556` | 路由 | 📋 待审阅 | 无限路由尝试功能 — Python 路由重试逻辑相关 |
 | 14 | `72340380` | 路由 | 📋 待审阅 | 移除 maxAttempts 硬上限 10 — 与 `15146556` 配套 |

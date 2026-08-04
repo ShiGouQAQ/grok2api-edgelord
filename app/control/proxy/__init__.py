@@ -22,6 +22,7 @@ from .models import (
     EgressMode,
     ClearanceMode,
     EgressNode,
+    EgressNodeState,
     ClearanceBundle,
     ProxyLease,
     ProxyFeedback,
@@ -35,7 +36,33 @@ from .providers.turnstile import TurnstileClearanceProvider
 
 _DEFAULT_CLEARANCE_ORIGIN = "https://grok.com"
 _CONSOLE_CLEARANCE_ORIGIN = "https://console.x.ai"
+# Proxy URLs carrying the account placeholder are sticky: pinned to one
+# account, never rotated (Go ProxyAccountPlaceholder "{account}").
+_PROXY_ACCOUNT_PLACEHOLDER = "{account}"
 BundleKey = tuple[str, str]
+
+# Egress-node health machine (mirrors account-level feedback.py factors).
+_NODE_SUCCESS_STEP = 0.12
+_NODE_FAILURE_FACTORS = {
+    ProxyFeedbackKind.UNAUTHORIZED: 0.55,
+    ProxyFeedbackKind.FORBIDDEN: 0.25,
+    ProxyFeedbackKind.RATE_LIMITED: 0.45,
+    ProxyFeedbackKind.UPSTREAM_5XX: 0.75,
+    ProxyFeedbackKind.CHALLENGE: 0.55,
+    ProxyFeedbackKind.NODE_BANNED: 0.3,
+    ProxyFeedbackKind.TRANSPORT_ERROR: 0.5,
+}
+_NODE_MIN_HEALTH = 0.05
+_NODE_DEGRADED_HEALTH = 0.6
+_NODE_UNHEALTHY_HEALTH = 0.3
+
+
+def _node_state_for_health(health: float) -> EgressNodeState:
+    if health < _NODE_UNHEALTHY_HEALTH:
+        return EgressNodeState.UNHEALTHY
+    if health < _NODE_DEGRADED_HEALTH:
+        return EgressNodeState.DEGRADED
+    return EgressNodeState.HEALTHY
 
 
 def _clearance_host(clearance_origin: str | None) -> str:
@@ -230,7 +257,13 @@ class ProxyDirectory:
 
         For DIRECT mode, returns a lease with no proxy or clearance.
         """
-        proxy_url = await self._pick_proxy_url(resource=resource)
+        # Build + proxy_pool rotates to a fresh exit per request; sticky
+        # (account-pinned) URLs keep pinning (Go 75f4f7a7).
+        rotate = (
+            scope == ProxyScope.BUILD and self._egress_mode == EgressMode.PROXY_POOL
+        )
+        proxy_url = await self._pick_proxy_url(resource=resource, rotate=rotate)
+        fresh_tunnel = rotate and _PROXY_ACCOUNT_PLACEHOLDER not in (proxy_url or "")
         affinity = proxy_url or "direct"
         clearance_host = _clearance_host(clearance_origin)
 
@@ -249,10 +282,15 @@ class ProxyDirectory:
             scope=scope,
             kind=kind,
             acquired_at=now_ms(),
+            fresh_tunnel=fresh_tunnel,
         )
 
     async def feedback(self, lease: ProxyLease, result: ProxyFeedback) -> None:
         """Apply upstream feedback to the appropriate egress node."""
+        if result.kind == ProxyFeedbackKind.SUCCESS:
+            await self._apply_node_success(lease)
+        elif result.kind in _NODE_FAILURE_FACTORS:
+            await self._apply_node_failure(lease, result, after_success=False)
         if result.kind in (
             ProxyFeedbackKind.CHALLENGE,
             ProxyFeedbackKind.UNAUTHORIZED,
@@ -311,11 +349,77 @@ class ProxyDirectory:
                     lease.proxy_url,
                 )
 
+    async def mark_failure_after_success(
+        self, lease: ProxyLease, result: ProxyFeedback
+    ) -> None:
+        """A stream failed AFTER a successful response header.
+
+        Failure count starts from a FRESH baseline (1) instead of incrementing,
+        so failures that preceded this request do not compound the cooldown
+        (Go 0893557a MarkFailureAfterSuccess).
+        """
+        await self._apply_node_failure(lease, result, after_success=True)
+
+    # ------------------------------------------------------------------
+    # Node health machine
+    # ------------------------------------------------------------------
+
+    def _find_node_locked(self, proxy_url: str | None) -> EgressNode | None:
+        for node in [*self._nodes, *self._resource_nodes]:
+            if node.proxy_url == proxy_url:
+                return node
+        return None
+
+    async def _apply_node_success(self, lease: ProxyLease) -> None:
+        async with self._lock:
+            node = self._find_node_locked(lease.proxy_url)
+            if node is None:
+                return
+            node.failure_count = 0
+            node.health = min(1.0, float(node.health) + _NODE_SUCCESS_STEP)
+            node.state = _node_state_for_health(node.health)
+
+    async def _apply_node_failure(
+        self, lease: ProxyLease, result: ProxyFeedback, *, after_success: bool
+    ) -> None:
+        factor = _NODE_FAILURE_FACTORS.get(result.kind)
+        if factor is None:
+            return
+        async with self._lock:
+            node = self._find_node_locked(lease.proxy_url)
+            if node is None:
+                # Do not silently drop the health write (Go logs
+                # stream_failure_health_write_failed). Direct-mode leases have
+                # no node — that is expected, not an error.
+                if lease.proxy_url:
+                    logger.warning(
+                        "proxy node failure write failed: proxy_url={} kind={}",
+                        lease.proxy_url,
+                        result.kind,
+                    )
+                return
+            node.failure_count = (
+                1 if after_success else min(int(node.failure_count) + 1, 65535)
+            )
+            node.health = max(_NODE_MIN_HEALTH, float(node.health) * factor)
+            node.state = _node_state_for_health(node.health)
+            logger.debug(
+                "proxy node health updated: node={} state={} health={:.2f} "
+                "failure_count={} kind={}",
+                node.node_id,
+                node.state.value,
+                node.health,
+                node.failure_count,
+                result.kind,
+            )
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    async def _pick_proxy_url(self, resource: bool = False) -> str | None:
+    async def _pick_proxy_url(
+        self, resource: bool = False, rotate: bool = False
+    ) -> str | None:
         if self._egress_mode == EgressMode.DIRECT:
             return None
         async with self._lock:
@@ -329,9 +433,13 @@ class ProxyDirectory:
                 return None
             if self._egress_mode in (EgressMode.SINGLE_PROXY, EgressMode.MIHOMO):
                 return nodes[0].proxy_url
-            # PROXY_POOL: sticky routing — use current cursor, rotate on failure.
+            # PROXY_POOL: sticky routing — use current cursor, rotate on failure
+            # (and per request for Build fresh tunnels, except pinned URLs).
             idx = self._pool_cursor % len(nodes)
-            return nodes[idx].proxy_url
+            url = nodes[idx].proxy_url
+            if rotate and _PROXY_ACCOUNT_PLACEHOLDER not in (url or ""):
+                self._pool_cursor += 1
+            return url
 
     async def _refresh_bundle_with_node_fallback(
         self,

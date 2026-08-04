@@ -84,6 +84,14 @@ def build_session_kwargs(
         else:
             kwargs.setdefault("proxies", {"http": proxy_url, "https": proxy_url})
 
+    # Build proxy-pool leases rotate exits per request: force a fresh tunnel
+    # and forbid reuse (Go 75f4f7a7 request.Close = true).
+    if lease is not None and lease.fresh_tunnel:
+        opts = dict(kwargs.get("curl_options") or {})
+        opts[CurlOpt.FRESH_CONNECT] = 1
+        opts[CurlOpt.FORBID_REUSE] = 1
+        kwargs["curl_options"] = opts
+
     # curl SSL options for proxy.
     if _skip_proxy_ssl(proxy_url):
         opts = dict(kwargs.get("curl_options") or {})

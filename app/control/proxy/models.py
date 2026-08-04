@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 class ProxyScope(StrEnum):
     APP = "app"  # grok.com API calls
+    BUILD = "build"  # Grok Build (proxy-pool tunnels rotate per request)
     ASSET = "asset"  # static asset / CDN fetches
 
 
@@ -69,6 +70,7 @@ class EgressNode(BaseModel):
     scope: ProxyScope = ProxyScope.APP
     state: EgressNodeState = EgressNodeState.HEALTHY
     health: float = 1.0
+    failure_count: int = 0  # consecutive failures; reset by success
     inflight: int = 0
     last_used: int | None = None  # ms
 
@@ -92,6 +94,9 @@ class ProxyLease(BaseModel):
     scope: ProxyScope = ProxyScope.APP
     kind: RequestKind = RequestKind.HTTP
     acquired_at: int = 0  # ms
+    # Build + proxy_pool + non-sticky: force a fresh tunnel per request so
+    # the exit IP rotates (Go 75f4f7a7 request.Close = true).
+    fresh_tunnel: bool = False
 
     @property
     def has_proxy(self) -> bool:
