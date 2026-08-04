@@ -21,7 +21,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, RootModel
 
-from app.platform.errors import AppError, ErrorKind, ValidationError
+from app.platform.errors import AppError, ErrorKind, UpstreamError, ValidationError
 from app.platform.config.snapshot import get_config
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
@@ -727,8 +727,10 @@ async def build_convert(
     repo: "AccountRepository" = Depends(get_repo),
 ):
     """Batch-convert SSO tokens to Build OAuth credentials."""
-    from app.control.account.sso_build import convert_sso_to_build
+    from app.control.account.sso_build import convert_sso_to_build, decode_build_claims
     from app.control.account.build_refresh import compute_refresh_due_at
+    from app.control.account.invalid_credentials import mark_account_invalid_credentials
+    from app.dataplane.reverse.protocol.xai_billing import fetch_build_billing
     from app.platform.runtime.batch import run_batch
 
     results: dict = {"success": 0, "failed": 0, "errors": []}
@@ -738,8 +740,33 @@ async def build_convert(
             sso_token_clean = sso_token.strip()
             creds = await convert_sso_to_build(sso_token_clean)
             access_token = creds["access_token"]
+            if not access_token or not access_token.strip():
+                raise RuntimeError("minted Build access_token is empty")
             now = now_ms()
-            expires_at = now + int(creds.get("expires_in", "3600")) * 1000
+
+            # Real JWT exp wins over now + expires_in arithmetic
+            claims = decode_build_claims(access_token)
+            exp = claims.get("exp") if isinstance(claims, dict) else None
+            if isinstance(exp, (int, float)):
+                expires_at = int(exp) * 1000
+                if expires_at <= now:
+                    raise RuntimeError("minted Build access_token already expired")
+            else:
+                expires_at = now + int(creds.get("expires_in", "3600")) * 1000
+
+            # Smoke verification: real token must pass an authenticated billing call
+            billing = await fetch_build_billing(access_token)
+            billing_info = {
+                "plan_code": billing.plan_code,
+                "plan_name": billing.plan_name,
+                "monthly_limit": float(billing.monthly_limit),
+                "used": float(billing.used),
+                "remaining": float(billing.monthly_limit - billing.used),
+                "on_demand_cap": float(billing.on_demand_cap),
+                "on_demand_used": float(billing.on_demand_used),
+                "prepaid_balance": float(billing.prepaid_balance),
+                "synced_at": now,
+            }
             refresh_due_at = int(
                 compute_refresh_due_at(expires_at / 1000, access_token) * 1000
             )
@@ -753,6 +780,7 @@ async def build_convert(
                 "build_refresh_due_at": refresh_due_at,
                 "converted_from_token": sso_hash,
                 "converted_at": now,
+                "build_billing": billing_info,
             }
 
             await repo.upsert_accounts(
@@ -791,6 +819,19 @@ async def build_convert(
             results["failed"] += 1
             results["errors"].append(str(exc))
             logger.warning("SSO→Build conversion failed: error={}", exc)
+            # Align Go markSSOCredentialRejected: rejected credentials (incl.
+            # SSOCredentialRejected, which carries credential_rejected=True)
+            # invalidate the source SSO account.
+            if isinstance(exc, UpstreamError) and exc.credential_rejected:
+                try:
+                    await mark_account_invalid_credentials(
+                        repo, sso_token_clean, exc, source="sso→build convert"
+                    )
+                except Exception:
+                    logger.warning(
+                        "failed to mark SSO credential rejected: token={}...",
+                        sso_token_clean[:10],
+                    )
 
     await run_batch(
         [t for t in req.sso_tokens if t.strip()],
