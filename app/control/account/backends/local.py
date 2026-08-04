@@ -434,6 +434,8 @@ class LocalAccountRepository:
                     "disabled_reason",
                     "expired_at",
                     "expired_reason",
+                    "reauth_at",
+                    "reauth_reason",
                     "forbidden_strikes",
                     "console_429_count",
                 ):
@@ -698,7 +700,7 @@ class LocalAccountRepository:
                     SELECT token
                     FROM {_TBL}
                     WHERE deleted_at IS NULL
-                      AND status NOT IN (?, ?, ?)
+                      AND status NOT IN (?, ?, ?, ?)
                       AND NOT (status = ? AND COALESCE(state_reason, '') = ?)
                     ORDER BY updated_at DESC
                     """,
@@ -706,6 +708,7 @@ class LocalAccountRepository:
                         AccountStatus.ACTIVE.value,
                         AccountStatus.COOLING.value,
                         AccountStatus.DISABLED.value,
+                        AccountStatus.REAUTH_REQUIRED.value,
                         AccountStatus.EXPIRED.value,
                         "console_429_threshold_exceeded",
                     ),

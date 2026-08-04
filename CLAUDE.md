@@ -175,9 +175,11 @@ uv sync
 # Run
 uv run granian --interface asgi --host 0.0.0.0 --port 8000 --workers 1 app.main:app
 
-# Test
-uv run pytest tests/ -v
+# Test（--timeout 防止测试卡死无输出；pytest-timeout 已入 dev 依赖）
+uv run pytest tests/ -q --timeout=30
 ```
+
+**测试挂起警示（2026-08-04 踩坑）：** SSO→Build mint 路径（`app/control/account/sso_build.py` 的 `_acquire_mint_lease` → `get_proxy_runtime` → `proxy.acquire`）在 `clearance_mode=turnstile` 时会触发**真实 Cloudflare Turnstile 网络求解**，测试里永不返回 → pytest 间歇挂起（失败集随机，删 event_loop 不根治）。写任何调用 `convert_sso_to_build`/`_mint_via_*` 的测试必须 mock `get_proxy_runtime`——参考 `tests/test_sso_build.py` 的 autouse fixture `_no_real_mint_network`（专测 `_resolve_mint_profile`/`_resolve_cf_clearance_value` 的测试自带 `get_proxy_runtime` patch，会覆盖 autouse）。**禁止**添加 session-scoped `event_loop` fixture（pytest-asyncio 1.4.0 已废弃，曾致共享 loop 挂起）。
 
 ## Docs
 

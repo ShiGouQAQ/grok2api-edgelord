@@ -28,6 +28,16 @@ async def mark_account_invalid_credentials(
 
     record = next(iter(await repo.get_accounts([token])), None)
     reason = "invalid_credentials"
+    # SSO-class accounts (Web/Console, incl. image/video which normalize to
+    # grok_web) get REAUTH_REQUIRED instead of EXPIRED — the SSO cookie may
+    # still work elsewhere, so preserve the account. Only build-token deaths
+    # (provider grok_build) hard-expire. Mirrors refresh._expire_invalid_credentials.
+    if (
+        record is not None
+        and not record.is_deleted()
+        and record.provider in ("grok_web", "grok_console")
+    ):
+        return await mark_account_reauth_required(repo, token, reason, source=source)
     ts = now_ms()
     ext = record.ext if record is not None else {}
 
@@ -57,6 +67,50 @@ async def mark_account_invalid_credentials(
     return True
 
 
+async def mark_account_reauth_required(
+    repo: "AccountRepository",
+    token: str,
+    reason: str,
+    *,
+    source: str,
+) -> bool:
+    """Mark *token* as needing re-authentication (REAUTH_REQUIRED).
+
+    Preserves the account (unlike EXPIRED) — it leaves the selection pool
+    but stays recoverable via refresh success or manual restore. Mirrors Go
+    MarkReauthRequired.
+    """
+    record = next(iter(await repo.get_accounts([token])), None)
+    if record is None or record.is_deleted():
+        return False
+    reason = str(reason)[:512]
+    ts = now_ms()
+    ext = record.ext or {}
+    await repo.patch_accounts(
+        [
+            AccountPatch(
+                token=token,
+                status=AccountStatus.REAUTH_REQUIRED,
+                last_fail_at=ts,
+                last_fail_reason=reason,
+                state_reason=reason,
+                ext_merge={
+                    **ext,
+                    "reauth_at": ts,
+                    "reauth_reason": reason,
+                },
+            )
+        ]
+    )
+    logger.info(
+        "account reauth required from {}: token={}... status={}",
+        source,
+        token[:10],
+        AccountStatus.REAUTH_REQUIRED,
+    )
+    return True
+
+
 def feedback_kind_for_error(exc: BaseException | None) -> FeedbackKind:
     """Map an upstream exception to the appropriate account feedback kind."""
     if exc is None:
@@ -73,4 +127,8 @@ def feedback_kind_for_error(exc: BaseException | None) -> FeedbackKind:
     return FeedbackKind.SERVER_ERROR
 
 
-__all__ = ["mark_account_invalid_credentials", "feedback_kind_for_error"]
+__all__ = [
+    "feedback_kind_for_error",
+    "mark_account_invalid_credentials",
+    "mark_account_reauth_required",
+]

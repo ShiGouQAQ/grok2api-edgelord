@@ -313,6 +313,7 @@
       "active": "Activa",
       "cooling": "Limitada",
       "disabled": "Desactivada",
+      "reauthRequired": "Reautenticación requerida",
       "expired": "Expirada",
       "invalid": "Anómalo"
     }

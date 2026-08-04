@@ -248,6 +248,7 @@ async def _list_invalid_tokens(repo: "AccountRepository") -> list[str]:
             AccountStatus.ACTIVE.value,
             AccountStatus.COOLING.value,
             AccountStatus.DISABLED.value,
+            AccountStatus.REAUTH_REQUIRED.value,
         )
         and not (
             item.get("status") == AccountStatus.EXPIRED.value
@@ -729,7 +730,9 @@ async def build_convert(
     """Batch-convert SSO tokens to Build OAuth credentials."""
     from app.control.account.sso_build import convert_sso_to_build, decode_build_claims
     from app.control.account.build_refresh import compute_refresh_due_at
-    from app.control.account.invalid_credentials import mark_account_invalid_credentials
+    from app.control.account.invalid_credentials import (
+        mark_account_reauth_required,
+    )
     from app.dataplane.reverse.protocol.xai_billing import fetch_build_billing
     from app.platform.runtime.batch import run_batch
 
@@ -821,11 +824,16 @@ async def build_convert(
             logger.warning("SSO→Build conversion failed: error={}", exc)
             # Align Go markSSOCredentialRejected: rejected credentials (incl.
             # SSOCredentialRejected, which carries credential_rejected=True)
-            # invalidate the source SSO account.
+            # preserve the source SSO account as REAUTH_REQUIRED — the SSO
+            # cookie may still work on Web/Console even when Build minting
+            # rejects it. Only body-marker-confirmed deaths become EXPIRED.
             if isinstance(exc, UpstreamError) and exc.credential_rejected:
                 try:
-                    await mark_account_invalid_credentials(
-                        repo, sso_token_clean, exc, source="sso→build convert"
+                    await mark_account_reauth_required(
+                        repo,
+                        sso_token_clean,
+                        str(exc) or "sso credential rejected",
+                        source="sso→build convert",
                     )
                 except Exception:
                     logger.warning(

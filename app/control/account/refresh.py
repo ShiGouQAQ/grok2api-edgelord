@@ -4,12 +4,13 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from app.platform.errors import UpstreamError
-from app.platform.config.snapshot import get_config
-from app.platform.logging.logger import logger
-from app.platform.runtime.clock import now_ms
-from app.platform.runtime.batch import run_batch
 from app.control.model.enums import ALL_MODES_FULL
+from app.platform.config.snapshot import get_config
+from app.platform.errors import UpstreamError
+from app.platform.logging.logger import logger
+from app.platform.runtime.batch import run_batch
+from app.platform.runtime.clock import now_ms
+
 from .enums import AccountStatus, QuotaSource
 from .models import AccountRecord, QuotaWindow
 from .quota_defaults import (
@@ -375,6 +376,10 @@ class AccountRefreshService:
 
         from .commands import AccountPatch
 
+        # Reauth account recovers on refresh success — clear_failures is the
+        # only patch flag that wipes state_reason (backends skip None fields).
+        reauth_restore = refreshed and record.status == AccountStatus.REAUTH_REQUIRED
+
         await self._repo.patch_accounts(
             [
                 AccountPatch(
@@ -382,6 +387,7 @@ class AccountRefreshService:
                     pool=pool_patch,
                     last_sync_at=now_ms() if refreshed else None,
                     usage_sync_delta=1 if refreshed else None,
+                    clear_failures=reauth_restore,
                     **patches,  # type: ignore[arg-type]
                 )
             ]
@@ -553,7 +559,12 @@ class AccountRefreshService:
                                 "console_429_last_at": now,
                             }
                             # 12 小时内累计 3 次 429 标记为 EXPIRED 异常组
-                            if new_429_count >= 3:
+                            # (REAUTH_REQUIRED 账号保持 reauth——429 是配额问题，
+                            # 不应覆盖并发 refresh 已标记的 reauth 语义)
+                            if (
+                                new_429_count >= 3
+                                and record.status != AccountStatus.REAUTH_REQUIRED
+                            ):
                                 extra_patch["status"] = AccountStatus.EXPIRED
                                 extra_patch["state_reason"] = (
                                     "console_429_threshold_exceeded"
@@ -719,8 +730,34 @@ class AccountRefreshService:
     async def _expire_invalid_credentials(
         self, record: AccountRecord, exc: UpstreamError
     ) -> bool:
-        from .invalid_credentials import mark_account_invalid_credentials
+        from app.dataplane.reverse.protocol.xai_usage import (
+            is_invalid_credentials_error,
+        )
 
+        from .invalid_credentials import (
+            mark_account_invalid_credentials,
+            mark_account_reauth_required,
+        )
+
+        # credential_rejected on an SSO-class account is a pre-check reject
+        # (e.g. a converted Build credential failed) — the SSO cookie itself
+        # may still work on Web/Console, so preserve as REAUTH_REQUIRED.
+        # Body-marker-confirmed deaths and Build OAuth 401s stay EXPIRED.
+        # A 400 with an invalid-credentials body (not classified as
+        # credential_rejected by _classify_upstream_status) must follow the
+        # same REAUTH route — otherwise the same marker would EXPIRED on 400
+        # but REAUTH on 401/403 (account mis-kill).
+
+        if (
+            getattr(exc, "credential_rejected", False)
+            or is_invalid_credentials_error(exc)
+        ) and record.provider in ("grok_web", "grok_console"):
+            return await mark_account_reauth_required(
+                self._repo,
+                record.token,
+                str(exc) or "sso credential rejected",
+                source="usage refresh",
+            )
         return await mark_account_invalid_credentials(
             self._repo,
             record.token,

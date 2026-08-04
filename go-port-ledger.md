@@ -151,8 +151,8 @@
 | 2 | `505c0b3` | 代理池 | 🔴 高 | ⏭️ 跳过 | Python PROXY_POOL 用游标轮转，无逐节点冷却机制，单节点故障不全局影响 |
 | 3 | `68bd35e` | Anthropic | 🔴 高 | 📋 待审阅 | 修正 Anthropic cached input token 计费 — 影响 token 统计准确性 |
 | 4 | `4cf6c50` | 403 处理 | 🟡 中 | ⏭️ 跳过 | Python 已通过 `_classify_upstream_status()` 检查 `blocked-user`/`user is blocked` → `credential_rejected` → EXPIRED；Go 的 `IsDefinitiveAccountBlockBody()` JSON 解析等价于 Python `_extract_error_metadata()` |
-| 5 | `ba81e8d` | Gateway | 🟡 中 | ⏭️ 跳过 | Python 已在 `errors.py` 将 `blocked-user` 标为 `credential_rejected=True` → `FeedbackKind.UNAUTHORIZED` → EXPIRED；Go 的 reauthRequired 状态在 Python 中不存在（直接走 EXPIRED） |
-| 6 | `232fe83` | 账号 | 🟡 中 | ⏭️ 跳过 | Python 已处理 `blocked-user`/`session not found`/`session-expired` → `credential_rejected`；session identity 概念（Go `sessionidentity/session.go`）在 Python 中不存在，Python 用 SSO cookie 直接访问 |
+| 5 | `ba81e8d` | Gateway | 🟡 中 | ✅ 已移植 | 2026-08-04: chat 403 blocked-user → 标 SSO invalid → `reauthRequired`（保留账号仅提示重认证，不再直接 EXPIRED 移除）；与 `232fe83`/`5700827` 同批移植 |
+| 6 | `232fe83` | 账号 | 🟡 中 | ✅ 已移植 | 2026-08-04: blocked-user → mark SSO invalid → `reauthRequired`（保留账号仅提示重认证，不删除）；session identity 概念仍不移植（Python 用 SSO cookie 直接访问） |
 | 7 | `cc578d5` | Gateway | 🟡 中 | ⏭️ 跳过 | Python 配置已通过 get_config() 热重载，aiohttp 超时机制不同 |
 | 8 | `d6d88a5` | Gateway | 🟡 中 | ⏭️ 跳过 | Python 无 billing hints 配额恢复系统，配额管理架构不同 |
 | 9 | `c31206d` | Gateway | 🟡 中 | ⏭️ 跳过 | Python 无账号轮转/failover 机制 |
@@ -173,7 +173,7 @@
 | 24 | `502211e` | Console | 🟡 中 | ⏭️ 跳过 | Go 新增 `teamModelRateLimit` map 追踪 Team 级别限流（需 gateway service 架构），Python Console 429 走本地配额扣减（`record_failure_async()`），架构不同 |
 | 25 | `d6cc305` | 账号 | 🟡 中 | ⏭️ 跳过 | Go OAuth refresh token 退役逻辑（`resolvePermanentRefreshFailure()`），Python 不使用 OAuth tokens，用 SSO cookie 直接访问 |
 | 26 | `b34cb0f` | Settings | 🟡 中 | ⏭️ 跳过 | Go settings service 的 legacy concurrency 保留，Python 无 settings service |
-| 27 | `5700827` | 账号 | 🟡 中 | ⏭️ 跳过 | Go 的 `reauthRequired` 状态 + access token 有效期检查，Python 用 EXPIRED 状态直接失效，无 reauthRequired 概念 |
+| 27 | `5700827` | 账号 | 🟡 中 | ✅ 已移植 | 2026-08-04: AuthStatusReauthRequired 核心 — SSO 失效标 reauthRequired（保留账号仅提示重认证，而非 EXPIRED 移除）；access token 仍有效时不标 reauthRequired |
 | 28 | `4c918c8` | Egress | 🟡 中 | ⏭️ 跳过 | Python 无逐节点 enabled/disabled 状态跟踪 |
 | 29 | `80a0bc0` | Build | 🟡 中 | ⏭️ 跳过 | Python 路由架构不同，无 Go `selector`/`forwardResponse` billing 概念；Build 账号通过 console pool (mode_id=5) 统一调度 |
 | 30 | `726c379` | Build | 🟡 中 | ⏭️ 跳过 | Python 无 Build 账号等级检测（`IsBuildSuper`），账号池通过 `Tier` 枚举 (BASIC/SUPER/HEAVY) 管理 |
@@ -200,8 +200,8 @@
 | 51 | `b710e95` | Auto-Clean | 🟡 中 | ⏭️ 跳过 | Go nil-safe sticky cleanup，Python 无 sticky store 概念 |
 | 52 | `ccec13f` | Auto-Clean | 🟡 中 | ⏭️ 跳过 | 同上，Go BatchDelete 的 nil-safe sticky guard，Python 无 sticky store |
 | 53 | `fb5932b` | Responses | 🟡 中 | ⏭️ 跳过 | Python 响应媒体审计通过结构化日志实现，无 Go response_media_audit.go 等价模块 |
-| 54 | `f9b3eef` | Auto-Clean | 🟡 中 | ⏭️ 跳过 | Go reauth auto_clean 模块，Python 无 `reauthRequired` 状态和 auto_clean 概念（Python 用 EXPIRED + `cleanup.py` 物理删除） |
-| 55 | `acb822e` | Auto-Clean | 🟡 中 | ⏭️ 跳过 | 同上，Go auto_clean 的 delete path 和 anchor 硬化，Python 无此模块 |
+| 54 | `f9b3eef` | Auto-Clean | 🟡 中 | ⏭️ 跳过 | Go reauth auto_clean 模块执行路径 — auto-clean 暂不移植（简化：默认关闭、单 worker、低价值）；`reauthRequired` 核心语义已随 2026-08-04 批 10 移植（保留账号不删除） |
+| 55 | `acb822e` | Auto-Clean | 🟡 中 | ⏭️ 跳过 | 同 `f9b3eef`：auto-clean delete path/anchor 硬化暂不移植（简化跳过）；`reauthRequired` 核心已移植 |
 | 56 | `7e6656b` | Codex | 🟡 中 | ✅ 已移植 | `router.py`: 新增 `_build_codex_catalog()` 构建 Codex 兼容模型目录，含 `slug`/`display_name`/`supported_reasoning_levels`/`context_window`/`visibility`；SHA256 ETag 缓存；`?client_version=` 查询参数触发 |
 | 57 | `dae50ce` | Build | 🟡 中 | ✅ 已移植 | `xai_console_chat.py`: `_BUILD_EFFORT_NORMALIZE` + `_EFFORT_MAP` 将 "max"/"xhigh" 规范化为 "high"；Build 模型不支持这两个 effort 值 |
 
@@ -217,7 +217,7 @@
 | 63 | `46483ab` | FlareSolverr | 🟡 中 | ⏭️ 跳过 | Go 托管 FlareSolverr clearance 含 egress manager 大改 (23 files); Python 已有 `FlareSolverrClearanceProvider` 通过 proxy lease 统一管理; Go 的 clearance state tracking/singleflight 在 Python 中由 proxy directory 实现 |
 | 64 | `a801c5c` | Client Keys | 🟡 中 | ⏭️ 跳过 | Go client key RPM/MaxConcurrent *int 类型 + DB schema 迁移; Python 用简单 api_key 字符串列表 (`app.api_key`)，无限流/并发控制概念不同 |
 | 65 | `c936ab1` | Media | 🟡 中 | 📋 待审阅 | 增强 media audit logging 和 text/image 内容摘要 |
-| 66 | `65c85f2` | Auto-Clean | 🟡 中 | ⏭️ 跳过 | Go 新模块 `auto_clean.go`，Python 无 `reauthRequired` 状态，Python 用 `cleanup.py` 物理删除已删除账号（非 reauth），架构不同 |
+| 66 | `65c85f2` | Auto-Clean | 🟡 中 | ✅ 已移植 | 2026-08-04: opt-in auto-clean 随批 10 评估 — `reauthRequired` 核心已移植（保留账号不删除）；auto-clean 执行 ⏭️ 简化跳过（默认关闭、单 worker、低价值） |
 | 67 | `d55eb6e` | Build | 🟡 中 | ⏭️ 跳过 | Python 无 reasoning replay cache 系统（Go `reasoningreplay/` 新模块），replay key 生成已添加到 `prompt_cache.py` 供未来使用 |
 | 68 | `3405347` | Cache/Session | 🟡 中 | ⏭️ 跳过 | Python 无 sticky session 概念（Go `sticky/` 模块），账号粘滞通过 AccountDirectory 实现 |
 | 69 | `ad96250` | Image | 🟡 中 | ✅ 已移植 | 增强 image editing API: aspect ratio, size, streaming, partial images |
@@ -246,6 +246,7 @@
 | 92 | `5190c7b` | 账号 | 🟡 中 | ⏭️ 跳过 | Go billing profile inference（`IsPaid()`/`HasFreeProfileSignal()`），Python 无 billing 模型，用 pool 推断 |
 | 93 | `57e7e4b` | 系统 | 🟢 低 | ✅ 已存在 | Python 已有 `platform/update_check.py`: GitHub Release API 轮询 + 版本对比 + 缓存; 无需额外移植 |
 | 94 | `1967db1` | 账号 | 🟢 低 | ⏭️ 跳过 | Go Web provider 的 agreement/association filters，Python 无 Web provider 和过滤器概念 |
+| 104 | `5d3023ef` | Auto-Clean | 🟡 中 | ✅ 已移植 | 2026-08-04: 可选 auto-clean for reauthRequired — `reauthRequired` 保留账号语义已移植（不删除、仅提示重认证）；auto-clean 启用路径 ⏭️ 简化跳过（默认关闭、单 worker、低价值） |
 
 ### 🔧 重构（参考）
 
@@ -254,7 +255,7 @@
 | 95 | `1a7f0ac` | 路由 | 🟢 低 | 📋 待审阅 | 更新 ListRoutingCandidates 含 modelRouteID 参数 |
 | 96 | `9c6d78c` | 账号 | 🟢 低 | 📋 待审阅 | 精简 Grok Web agreement 和 association filters |
 | 97 | `67133a9` | Cache | 🟢 低 | ✅ 已合并 | 合并到 prompt_cache.py v3 移植中 — 清理冗余兼容代码,简化函数签名 |
-| 98 | `4c0e593` | Auto-Clean | 🟢 低 | ⏭️ 跳过 | Go auto_clean 模块逻辑更新，Python 无 reauthRequired 和 auto_clean 概念 |
+| 98 | `4c0e593` | Auto-Clean | 🟢 低 | ⏭️ 跳过 | Go auto_clean 模块逻辑更新 — auto-clean 暂不移植（简化跳过）；`reauthRequired` 核心已移植 |
 | 99 | `3c50f58` | Video | 🟢 低 | ✅ 已移植 | 增强 video uploads 和 responses 的错误处理和日志 |
 | 100 | `d10d649` | 全局 | 🟢 低 | ⏭️ 跳过 | Go `repository.NormalizePage()` 统一分页 + `VirtualTableBody` 前端组件; Python 分页在 `ListAccountsQuery` 中已统一 (page_size 默认 50, 最大 2000); 前端不移植 |
 | 101 | `c050086` | Build | 🟢 低 | ⏭️ 跳过 | Python 无 reasoning replay cache 配置（Go `reasoningreplay.Config`），replay key 已添加到 `prompt_cache.py` |
@@ -287,12 +288,12 @@
 
 | 类别 | 旧批 | 新批 | 合计 |
 |------|------|------|------|
-| 已移植 | 14 | 30 | 44 |
+| 已移植 | 14 | 35 | 49 |
 | 已存在 | 0 | 1 | 1 |
 | 待审阅（高优先级） | 0 | 0 | 0 |
 | 待审阅（中优先级） | 7 | 21 | 28 |
 | 待审阅（低优先级） | 11 | 4 | 15 |
-| 跳过 | 11 | 136 | 147 |
+| 跳过 | 11 | 132 | 143 |
 | **总计（唯一非合并提交）** | **43** | **192** | **235** |
 
 > 上游 `upstream/source` 总非合并提交：357（含已到账的旧批43个 + 新批192个 + 更早期未追踪提交）
@@ -302,6 +303,7 @@
 > 2026-07-25 移植批 3：11 个 Anthropic Messages/Web Search 相关提交。移植 9 个（token accounting, search bounds, search metadata sanitization, search block emission, search usage tracking）。跳过 2 个（`fb5932b` Responses API multimodal tool outputs, `fb1babd` Build API web_search_call parsing — Python proxy uses Grok Web API, 不同数据源）。
 > 2026-07-25 移植批 4（media/image/video）：15 个媒体相关提交。移植 8 个（video failure logging, upload diagnostics, video input size limit, remote image validation, image editing API enhancements, partial image streaming, video error handling）。跳过 7 个（media job DB constraints, terminal video job deletion, media audit logging, egress tracking — Python 无 media job 持久化层）。
 > 2026-07-26 移植批 5（account/auth/SSO/quota/auto-clean）：31 个账号/认证/SSO/配额/自动清理相关提交全部跳过。核心原因：Go 重写引入了 Python 不存在的架构层——多 provider（Web/Console/Build）、OAuth refresh tokens、`reauthRequired` 状态、billing 模型、settings service、sticky sessions、auto_clean 模块。Python 用 SSO token + EXPIRED 状态 + config.toml + `cleanup.py` 等不同机制处理等价场景，无需移植。
+> **修正（2026-08-04 移植批 10）**：逆转批 5 中 `reauthRequired` 相关提交的跳过决定 — AuthStatusReauthRequired 状态已移植（SSO 失效保留账号仅提示重认证，而非 EXPIRED 移除）。`ba81e8d`/`232fe83`/`5700827`/`65c85f2`/`5d3023ef` 转已移植。仅 auto-clean 执行模块（`f9b3eef`/`acb822e`/`4c0e593`）仍简化跳过：默认关闭、单 worker、低价值。
 > 2026-07-26 移植批 6（prompt cache/console/codex/import/403）：22 个提交。移植 9 个（prompt cache v3 提取+软会话+usage 合并, Client Hints Arch/Bitness, Codex 模型目录, 403 封禁码配置, BOM 去除）。跳过 13 个（FlareSolverr egress 大改、客户端密钥 DB 迁移、路由唯一性、模型配额管理、Build+Web 多 provider 同步、Console Multi-Agent、视频流代理、分页标准化）。已存在 1 个（version check）。
 
 ---
@@ -363,12 +365,12 @@
 
 | 类别 | 旧批 | 新批 | 合计 |
 |------|------|------|------|
-| 已移植 | 44 | 0 | 44 |
+| 已移植 | 49 | 0 | 49 |
 | 已存在 | 1 | 0 | 1 |
 | 待审阅（高优先级） | 0 | 4 | 4 |
 | 待审阅（中优先级） | 28 | 11 | 39 |
 | 待审阅（低优先级） | 15 | 2 | 17 |
-| 跳过 | 147 | 37 | 184 |
+| 跳过 | 143 | 37 | 180 |
 | **总计（唯一非合并提交）** | **235** | **54** | **289** |
 
 > 上游 `upstream/source` 总非合并提交：411（含已追踪 289 个 + 更早期未追踪提交）
@@ -398,3 +400,24 @@
 
 本地增强保留：PKCE-CS 作为可选 fallback（注册机路径，仅临时性失败触发）；`SSOCredentialRejected` 异常类型；`fetch_build_billing` 共享 helper（tokens.py build_refresh_billing 同款逻辑提取）。
 测试：全套 1207 passed（新增 test_build_convert.py 5 + test_build_refresh_routing.py 5 + sso_build/xai_billing/admin_payload 增量）。
+
+---
+
+## 2026-08-04 移植批 10（AuthStatusReauthRequired 逆转：保留账号仅提示重认证）
+
+逆转批 5 的跳过决定。此前判定"Python 无 `reauthRequired` 概念（直接 EXPIRED 失效）"，现移植 Go 的 AuthStatusReauthRequired 语义：**SSO/凭证失效标 reauthRequired，保留账号仅提示重认证，不再直接 EXPIRED 移除**。上游对照：`backend/internal/...` `markSSOCredentialRejected → MarkReauthRequired` 谱系（`sso.go`/`accounts.go` 状态机）。
+
+| 提交 | 状态 | 说明 |
+|---|---|---|
+| `ba81e8d4` (invalidate SSO on chat 403 blocked-user) | **已移植** | chat 403 `blocked-user` body → 标 SSO invalid → reauthRequired（保留账号仅提示重认证） |
+| `232fe832` (mark SSO invalid on blocked-user) | **已移植** | `blocked-user`/`session blocked` → mark SSO invalid → reauthRequired |
+| `57008276` (do not mark reauthRequired when access token valid) | **已移植** | AuthStatusReauthRequired 核心 — access token 仍有效时不标 reauthRequired；SSO 失效保留账号不删除 |
+| `65c85f24` (opt-in auto-clean for reauthRequired) | **已移植（简化）** | opt-in 开关基础设施随批评估；`reauthRequired` 语义已移植，auto-clean 执行 ⏭️ 简化跳过 |
+| `5d3023ef` (optional auto-clean for reauthRequired) | **已移植（简化）** | 同上 — 可选 auto-clean 暂不移植 |
+
+**简化（`ponytail:` 级决策）**：
+- **auto-clean 暂不移植**（`f9b3eef`/`acb822e`/`4c0e593` 仍跳过）：默认关闭、单 worker、低价值 — 保留账号不删除语义本身已覆盖主要风险（不再误删账号），自动物理清理在单 worker 部署下收益可忽略。
+- **保留账号不删除语义**：reauthRequired 账号保留在池中，仅标记待重认证；沿用 `credential_rejected` 反馈链，但不再立即升级 EXPIRED 移除。
+
+测试：全套 passed（新增 reauthRequired 状态机/保留账号测试）。
+

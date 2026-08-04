@@ -316,6 +316,7 @@
       "active": "正常",
       "cooling": "限流",
       "disabled": "禁用",
+      "reauthRequired": "需重新认证",
       "expired": "过期",
       "invalid": "异常"
     },

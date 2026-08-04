@@ -362,6 +362,8 @@ class RedisAccountRepository:
                     "disabled_reason",
                     "expired_at",
                     "expired_reason",
+                    "reauth_at",
+                    "reauth_reason",
                     "forbidden_strikes",
                     "console_429_count",
                 ):

@@ -239,6 +239,11 @@ class ListInvalidTokensTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("tok-cooling", result)
         self.assertNotIn("tok-disabled", result)
 
+    async def test_excludes_reauth_required(self):
+        await self._insert("tok-reauth", AccountStatus.REAUTH_REQUIRED)
+        result = await self.repo.list_invalid_tokens()
+        self.assertNotIn("tok-reauth", result)
+
     async def test_expired_without_state_reason_is_returned(self):
         await self._insert("tok-noreason", AccountStatus.EXPIRED)
         result = await self.repo.list_invalid_tokens()

@@ -145,7 +145,7 @@ async def test_convert_smoke_401_fails_and_marks_source():
             AsyncMock(side_effect=exc),
         ),
         patch(
-            "app.control.account.invalid_credentials.mark_account_invalid_credentials",
+            "app.control.account.invalid_credentials.mark_account_reauth_required",
             AsyncMock(return_value=True),
         ) as mock_mark,
     ):
@@ -157,7 +157,7 @@ async def test_convert_smoke_401_fails_and_marks_source():
     mock_mark.assert_awaited_once()
     assert mock_mark.await_args is not None
     assert mock_mark.await_args.args[1] == "sso-token-1"
-    assert mock_mark.await_args.args[2] is exc
+    assert mock_mark.await_args.args[2] == str(exc)
     assert mock_mark.await_args.kwargs["source"] == "sso→build convert"
 
 
@@ -171,22 +171,21 @@ async def test_convert_one_marks_account_on_device_precheck_rejected():
     from app.control.account.sso_build import SSOCredentialRejected
 
     repo = _mock_repo()
+    rejected = SSOCredentialRejected(
+        "SSO token invalid or expired: redirected to sign-in"
+    )
 
     with (
         patch(
             "app.control.account.sso_build._mint_via_device_flow",
-            AsyncMock(
-                side_effect=SSOCredentialRejected(
-                    "SSO token invalid or expired: redirected to sign-in"
-                )
-            ),
+            AsyncMock(side_effect=rejected),
         ),
         patch(
             "app.control.account.sso_build._mint_via_pkce_cs",
             AsyncMock(side_effect=RuntimeError("PKCE must not run")),
         ),
         patch(
-            "app.control.account.invalid_credentials.mark_account_invalid_credentials",
+            "app.control.account.invalid_credentials.mark_account_reauth_required",
             AsyncMock(return_value=True),
         ) as mock_mark,
     ):
@@ -198,7 +197,8 @@ async def test_convert_one_marks_account_on_device_precheck_rejected():
     mock_mark.assert_awaited_once()
     assert mock_mark.await_args is not None
     assert mock_mark.await_args.args[1] == "sso-token-1"
-    assert isinstance(mock_mark.await_args.args[2], SSOCredentialRejected)
+    assert mock_mark.await_args.args[2] == str(rejected)
+    assert mock_mark.await_args.kwargs["source"] == "sso→build convert"
 
 
 @pytest.mark.asyncio
@@ -313,7 +313,7 @@ async def test_convert_smoke_failure_does_not_touch_web_account():
             AsyncMock(side_effect=exc),
         ),
         patch(
-            "app.control.account.invalid_credentials.mark_account_invalid_credentials",
+            "app.control.account.invalid_credentials.mark_account_reauth_required",
             AsyncMock(return_value=True),
         ),
     ):

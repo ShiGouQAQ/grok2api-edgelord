@@ -316,6 +316,7 @@
       "active": "Active",
       "cooling": "Rate-Limited",
       "disabled": "Disabled",
+      "reauthRequired": "Reauth required",
       "expired": "Expired",
       "invalid": "Abnormal"
     },

@@ -28,6 +28,7 @@ class StatusId(IntEnum):
     EXPIRED = 2
     DISABLED = 3
     DELETED = 4
+    REAUTH_REQUIRED = 5
 
 
 # Map pool string → PoolId integer (used during sync from control plane).
@@ -44,6 +45,7 @@ STATUS_STR_TO_ID: dict[str, int] = {
     "cooling": int(StatusId.COOLING),
     "expired": int(StatusId.EXPIRED),
     "disabled": int(StatusId.DISABLED),
+    "reauth_required": int(StatusId.REAUTH_REQUIRED),
 }
 
 ALL_MODE_IDS: tuple[int, ...] = (

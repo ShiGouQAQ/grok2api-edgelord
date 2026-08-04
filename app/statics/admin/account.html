@@ -430,6 +430,10 @@
       color:#6f675d;
       background:#f1ece4;
     }
+    .table-card .badge-reauth {
+      color:#b45309;
+      background:#fef3c7;
+    }
     .link-badge {
       display:inline-flex;
       align-items:center;
@@ -952,6 +956,10 @@
                   <span data-i18n="account.filterStatusCooling">限流</span>
                   <span class="filter-chip-count is-orange" id="fc-status-cooling">0</span>
                 </button>
+                <button type="button" class="filter-chip" data-status="reauth_required" onclick="switchStatus('reauth_required')">
+                  <span data-i18n="account.status.reauthRequired">需重新认证</span>
+                  <span class="filter-chip-count" id="fc-status-reauth">0</span>
+                </button>
                 <button type="button" class="filter-chip" data-status="invalid" onclick="switchStatus('invalid')">
                   <span data-i18n="account.filterStatusInvalid">异常</span>
                   <span class="filter-chip-count is-red" id="fc-status-invalid">0</span>
@@ -1369,7 +1377,7 @@ function getTokenView() {
     qc: 0,
     qb: 0,
   };
-  const statusCounts = { all: 0, active: 0, cooling: 0, invalid: 0, disabled: 0 };
+  const statusCounts = { all: 0, active: 0, cooling: 0, invalid: 0, disabled: 0, reauth_required: 0 };
   const nsfwCounts = { all: 0, enabled: 0, disabled: 0 };
   const poolCounts = new Map([['all', 0]]);
   const poolsSet = new Set(['basic', 'super', 'heavy', 'build']);
@@ -1413,6 +1421,7 @@ function getTokenView() {
       if (token.status === 'cooling') statusCounts.cooling += 1;
       if (invalid) statusCounts.invalid += 1;
       if (disabled) statusCounts.disabled += 1;
+      if (token.status === 'reauth_required') statusCounts.reauth_required += 1;
     }
 
     if (matchesPool && matchesStatus) {
@@ -1456,7 +1465,7 @@ function isDisabledStatus(status) {
 
 function isInvalidStatus(status, state_reason) {
   if (status === 'expired' && state_reason === 'console_429_threshold_exceeded') return false;
-  return !['active', 'cooling', 'disabled'].includes(status);
+  return !['active', 'cooling', 'disabled', 'reauth_required'].includes(status);
 }
 
 function isManageableStatus(status) {
@@ -1529,6 +1538,7 @@ function renderStatusFilters(view = getTokenView()) {
   setFilterCount('fc-status-cooling', view.statusCounts.cooling);
   setFilterCount('fc-status-invalid', view.statusCounts.invalid);
   setFilterCount('fc-status-disabled', view.statusCounts.disabled);
+  setFilterCount('fc-status-reauth', view.statusCounts.reauth_required);
   document.querySelectorAll('[data-status]').forEach(el => el.classList.toggle('active', el.dataset.status === curStatus));
 }
 
@@ -1621,6 +1631,8 @@ function rowHtml(t) {
   const q      = t.quota || {};
   const isNsfw = (t.tags || []).includes('nsfw');
   const isDisabled = t.status === 'disabled';
+  const isReauth = t.status === 'reauth_required';
+  const needsRestore = isDisabled || isReauth;
   const canManageNsfw = isManageableStatus(t.status);
   const isRefreshing = refreshingTokens.has(t.token);
   const success = t.use_count || 0;
@@ -1674,8 +1686,8 @@ function rowHtml(t) {
     <td style="font-size:12px;color:#9a9a9a">${fmtDate(t.last_used_at)}</td>
     <td><div class="row-actions">
       ${nsfwBtn}
-      <button onclick="${isDisabled ? `restoreOne('${xe(t.token)}')` : `disableOne('${xe(t.token)}')`}" class="row-icon-btn row-icon-btn-state" data-tip="${xe(isDisabled ? tr('account.actionRestore', null, '恢复账号') : tr('account.actionDisable', null, '禁用账号'))}" aria-label="${xe(isDisabled ? tr('account.actionRestore', null, '恢复账号') : tr('account.actionDisable', null, '禁用账号'))}">
-        ${isDisabled
+      <button onclick="${needsRestore ? `restoreOne('${xe(t.token)}')` : `disableOne('${xe(t.token)}')`}" class="row-icon-btn row-icon-btn-state" data-tip="${xe(needsRestore ? tr('account.actionRestore', null, '恢复账号') : tr('account.actionDisable', null, '禁用账号'))}" aria-label="${xe(needsRestore ? tr('account.actionRestore', null, '恢复账号') : tr('account.actionDisable', null, '禁用账号'))}">
+        ${needsRestore
           ? '<svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M3 12a9 9 0 1 0 3-6.708"/><path d="M3 4v5h5"/></svg>'
           : '<svg viewBox="0 0 24 24" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M8.5 8.5 15.5 15.5"/></svg>'}
       </button>
@@ -1825,6 +1837,7 @@ function statusBadge(s) {
     cooling:['badge-cooling', tr('account.status.cooling', null, '限流')],
     expired:['badge-expired', tr('account.status.expired', null, '过期')],
     disabled:['badge-disabled', tr('account.status.disabled', null, '禁用')],
+    reauth_required:['badge-reauth', tr('account.status.reauthRequired', null, '需重新认证')],
     invalid:['badge-invalid', tr('account.status.invalid', null, '异常')],
   };
   const [cls, label] = m[s] || ['badge-invalid', s || tr('account.unknown', null, '未知')];

@@ -64,6 +64,8 @@ _DISABLED_REASON_KEY = "disabled_reason"
 _EXPIRED_AT_KEY = "expired_at"
 _EXPIRED_REASON_KEY = "expired_reason"
 _FORBIDDEN_STRIKE_KEY = "forbidden_strikes"
+_REAUTH_AT_KEY = "reauth_at"
+_REAUTH_REASON_KEY = "reauth_reason"
 
 
 def derive_status(record: AccountRecord, *, now: int | None = None) -> AccountStatus:
@@ -98,7 +100,11 @@ def is_manageable(record: AccountRecord, *, now: int | None = None) -> bool:
     if record.is_deleted():
         return False
     status = derive_status(record, now=now)
-    return status in (AccountStatus.ACTIVE, AccountStatus.COOLING)
+    return status in (
+        AccountStatus.ACTIVE,
+        AccountStatus.COOLING,
+        AccountStatus.REAUTH_REQUIRED,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +196,8 @@ def apply_feedback(
             state_reason = feedback.reason or "token_expired"
             ext[_EXPIRED_AT_KEY] = ts
             ext[_EXPIRED_REASON_KEY] = state_reason
+            ext.pop(_REAUTH_AT_KEY, None)
+            ext.pop(_REAUTH_REASON_KEY, None)
         else:
             # Unconfirmed 401 — only note failure; do not expire.
             pass
@@ -204,15 +212,19 @@ def apply_feedback(
             ext[_DISABLED_REASON_KEY] = state_reason
 
     elif feedback.kind == FeedbackKind.RATE_LIMITED:
-        cooldown_ms = (
-            feedback.retry_after_ms
-            if feedback.retry_after_ms
-            else policy.default_cooling_ms
-        )
-        status = AccountStatus.COOLING
-        state_reason = feedback.reason or "rate_limited"
-        ext[_COOLDOWN_UNTIL_KEY] = ts + cooldown_ms
-        ext[_COOLDOWN_REASON_KEY] = state_reason
+        if status == AccountStatus.REAUTH_REQUIRED:
+            # Keep REAUTH — cooldown must not downgrade a reauth account.
+            pass
+        else:
+            cooldown_ms = (
+                feedback.retry_after_ms
+                if feedback.retry_after_ms
+                else policy.default_cooling_ms
+            )
+            status = AccountStatus.COOLING
+            state_reason = feedback.reason or "rate_limited"
+            ext[_COOLDOWN_UNTIL_KEY] = ts + cooldown_ms
+            ext[_COOLDOWN_REASON_KEY] = state_reason
 
     elif feedback.kind == FeedbackKind.SUCCESS:
         if status == AccountStatus.COOLING:
@@ -223,6 +235,11 @@ def apply_feedback(
                 ext.pop(_COOLDOWN_UNTIL_KEY, None)
                 ext.pop(_COOLDOWN_REASON_KEY, None)
                 ext.pop(_FORBIDDEN_STRIKE_KEY, None)
+        if status == AccountStatus.REAUTH_REQUIRED:
+            status = AccountStatus.ACTIVE
+            state_reason = None
+            ext.pop(_REAUTH_AT_KEY, None)
+            ext.pop(_REAUTH_REASON_KEY, None)
 
     elif feedback.kind == FeedbackKind.DISABLE:
         status = AccountStatus.DISABLED
@@ -243,6 +260,8 @@ def apply_feedback(
         ext.pop(_EXPIRED_AT_KEY, None)
         ext.pop(_EXPIRED_REASON_KEY, None)
         ext.pop(_FORBIDDEN_STRIKE_KEY, None)
+        ext.pop(_REAUTH_AT_KEY, None)
+        ext.pop(_REAUTH_REASON_KEY, None)
         # Reset quota to defaults.
         qs = default_quota_set(record.pool)
 
@@ -275,6 +294,8 @@ def clear_failures(record: AccountRecord) -> AccountRecord:
         _EXPIRED_AT_KEY,
         _EXPIRED_REASON_KEY,
         _FORBIDDEN_STRIKE_KEY,
+        _REAUTH_AT_KEY,
+        _REAUTH_REASON_KEY,
     ):
         ext.pop(k, None)
     return record.model_copy(

@@ -313,6 +313,7 @@
       "active": "有効",
       "cooling": "レート制限中",
       "disabled": "無効化",
+      "reauthRequired": "再認証が必要",
       "expired": "期限切れ",
       "invalid": "異常"
     }

@@ -10,7 +10,8 @@ import orjson
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 
-from app.control.account.state_machine import is_manageable
+from app.control.account.enums import AccountStatus
+from app.control.account.state_machine import derive_status
 from app.platform.auth.middleware import verify_api_key
 from app.platform.errors import AppError, ValidationError
 from app.platform.logging.logger import logger
@@ -43,7 +44,14 @@ async def _available_pools(request: Request) -> frozenset[str]:
         return frozenset()
 
     snapshot = await repo.runtime_snapshot()
-    pools = {record.pool for record in snapshot.items if is_manageable(record)}
+    # Only pools with at least one actually-selectable account advertise
+    # models — is_manageable would include REAUTH_REQUIRED/COOLING accounts
+    # that cannot serve requests (model listed but 429 on selection).
+    pools = {
+        record.pool
+        for record in snapshot.items
+        if derive_status(record) == AccountStatus.ACTIVE
+    }
     return frozenset(pools)
 
 
