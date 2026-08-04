@@ -79,7 +79,7 @@
 | 21 | `2db3f65` | 账号/管理 | 🟡 中 | ⏭️ 跳过 | Go 多 provider batch workflows + admin preferences（24 files, ~1200 行），Python 无多 provider 架构和 Go admin UI |
 | 22 | `d2eecc4` | 全链路 | 🟡 中 | 📋 待审阅 | gateway Multi-Provider 路由 + 运行时并发管理 — 61 files, ~3600 行, 对话模块拆分为独立文件 |
 | 23 | `8004840` | 图片 | 🟡 中 | ✅ 已移植 (wave1-G) | `images.py generate()` 非流式路径：重试失败时记录 `last_credential_error`；最终尝试仍可重试失败 → 503 `upstream_unavailable` 审计日志 + 包装错误抛出（Go `writeFailureAudit` + `ErrNoAvailableAccount` 等价） |
-| 10 | `5cee3d2` | Console | 🟡 中 | 📋 待审阅 | 新增 Grok Console provider（Python 版已有） |
+| 10 | `5cee3d2` | Console | 🟡 中 | ⏭️ 跳过 (verify-only) | Console provider 已存在：`console_chat.py` 通过 `spec.is_console_chat()` 路由（chat.py:507-508），headers.py:314 `build_console_headers()`；Go 新增 provider 架构无增量可移植 |
 | 11 | `d626a26` | 配额 | 🟡 中 | ⏭️ 跳过 | Go `account_model_quota_blocks` DB 表 + `SelectionUnavailableError` + `CapacityWait` 路由配置 + `signerurl` 验证; Python 配额通过 `QuotaWindow` 内存管理 + `_classify_upstream_status()` 错误分类，无 per-model quota block DB |
 | 12 | `90c3320` | 同步 | 🟢 低 | ⏭️ 跳过 | Go `syncAllAccounts` 迭代 `ProviderBuild` + `ProviderWeb` 双 provider; Python 单 provider 模型 (`AccountDirectory.sync()`)，无多 provider 同步 |
 | 13 | `75d3896` | Console | 🟡 中 | ⏭️ 跳过 | Go Console Multi-Agent 前端页面 (Gallery/Video Gallery) + 媒体 API; Python Admin UI 独立 (`products/web/admin/`)，前端不移植 |
@@ -341,7 +341,7 @@
 | 12 | `1edc9fbe` | 模型别名 | ✅ 已移植 | current (wave1-E) | `registry.py` ALIASES 映射 + `resolve_alias()`/别名感知 `resolve()`；`spec.py` 新增 `supports_reasoning`；`xai_build.py` `_normalize_reasoning_effort` 别名路由 + "none"→thinking disabled/其余 adaptive；`xai_console_chat.py` CONSOLE_MODELS/_MODEL_FIXED_EFFORT 扩展 `grok-4.20-0309-reasoning-{low,medium,high}` |
 | 13 | `15146556` | 路由 | 📋 待审阅 | 无限路由尝试功能 — Python 路由重试逻辑相关 |
 | 14 | `72340380` | 路由 | 📋 待审阅 | 移除 maxAttempts 硬上限 10 — 与 `15146556` 配套 |
-| 15 | `2aaac4d0` | Clearance | 📋 待审阅 | 允许无 challenge cookies 的 clearance — Python CF clearance 生命周期相关 |
+| 15 | `2aaac4d0` | Clearance | ⏭️ 跳过 (verify-only) | 已满足：`ManualClearanceProvider.build_bundle()`（providers/manual.py:11-25）从不校验 `cf_cookies` 非空 — mode==MANUAL 时无条件构建 bundle（仅模式不匹配返回 None）；无 challenge cookies 的 clearance 在 Python 架构性成立 |
 
 ### 🟢 低优先级（参考）
 
