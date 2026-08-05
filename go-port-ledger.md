@@ -584,3 +584,49 @@
 - **should_invalidate_build_forbidden 记录修正**：经审计 app/ 零调用方（build_chat.py/build_detect.py 均未引用），为保留 API（供客户端/测试）；detect 403 reauth 实际由 `mark_build_chat_denied_as_reauth` 配置**直接**门控（见行 335 修正）。
 
 **测试基线**：全套 **1646 passed / 1 skipped**（12 个修复 commit 后实跑，含 C1 竞态 5 测试 + Build seam 2 测试）。已修复：Critical 3 + Important 10 + C1 竞态 + Build seam twin。待评估架构决策项见上。
+
+---
+
+## 待评估（新批：PR #853 合并 + v3.1.1，725ecf08..fee63588）
+
+> 同步于 2026-08-05 | chenyme 正式发布 **v3.1.1**（tag），PR #853（grok_console_260805）**已合并**进 main（此前批 13/14 基于未合并的 PR head f1d51254+377710f4 移植）。本批为合并后的增量提交（6 个非合并提交）。
+
+### 🔴 高优先级
+
+| # | 提交 | 范围 | 状态 | 描述 |
+|---|------|------|------|------|
+| 1 | `a05e06a2` | Console 媒体 | 🔄 审计中 | console provider 集成增强 + 媒体路由配额处理：`media.go`（727 行新文件）、`quota.go`+8、`adapter.go`（QuotaMode 增 image/video 分支 + ImageAssetStore）、`catalog.go`+57、`definition.go`（Console 增 CapabilityImage/ImageEdit/Video + MediaSurface）、`read_closer.go`（46 行新）；egress/inference/model HTTP handler 各 +16/+42。**Console 媒体能力是 Python 侧架构缺口，需评估** |
+
+### 🟡 中优先级
+
+| # | 提交 | 范围 | 状态 | 描述 |
+|---|------|------|------|------|
+| 2 | `cd7d3cd3` | 模型路由 | 🔄 审计中 | 加固分组路由查询与选择安全：`model/service.go`+4、`domain/model/model.go`+17、`relational/model_repository.go`+96（分组路由查询）。Python 模型为静态注册表无关系型 model repo，大概率 ⏭️ 跳过，待确认是否含行为修复 |
+| 3 | `1b58823a` | 凭证导入 | 🔄 审计中 | 支持裸 JSON 数组导入凭证文件（PR #854）：`import_json.go`+30、console/web `import.go`、`account/service.go`+13。Python 导入侧需确认是否已支持 `["token1","token2"]` 形式 |
+| 4 | `2a320e69` | 测试 | 🔄 审计中 | console provider adapter 初始化补参——仅测试文件（import_limit_test.go / web_console_sync_test.go 各 1 行），纯测试适配 |
+
+### ⏭️ 跳过候选
+
+| # | 提交 | 原因 |
+|---|------|------|
+| 5 | `75fa94f8` | fix(test): Windows 跳过 POSIX 权限断言 — 纯测试 |
+| 6 | `95d6471a` | chore: bump v3.1.1 — 版本号 |
+| 7 | `a4405eda` | refactor: 澄清 console/build adapter 导入限制测试 — 纯测试 |
+
+**DPoP 生产故障（用户报告）**：`Console DPoP setup failed: Console DPoP token response invalid` 502 —— `dpop.py:353` 判定 token 端点 2xx 但 body 无有效 access_token/token_type（`_post_dpop_token` 空/非 JSON body → `{}`）。疑点：Python `_post_dpop_token` 用**新 acquire 的 lease** 发传输，但 cookie headers 来自 `_dpop_manager_lease`（旧 lease）→ egress 节点/clearance 可能不匹配 → CF 200 挑战页；Go 用同一 lease + `DoDeferredForbidden` + chromium client hints。根因审计 Agent 进行中（bg_cd058ed7）。
+
+### 审计结论（2026-08-05，3 个并行审计 Agent，只读）
+
+| # | 提交 | 最终判定 | 结论 |
+|---|------|---------|------|
+| 1 | `a05e06a2` | **部分移植** | 全量 = 新功能（console.x.ai 媒体：GenerateImage/EditImage/GenerateVideo/DownloadVideo + DPoP、可信主机白名单下载、ScopeConsoleAsset 免 clearance、quota mode console_image/video 参与路由恢复）~600-800 行；**模型名冲突**：Go 复用 grok-imagine-image 但 Python 已将该名路由到 grok.com，需新命名（如 `grok-imagine-image-console`）或路由表改造——设计决策，另批。**本批立即可移植切片**：(a) ASSET scope 403 豁免（`ProxyDirectory.feedback()` ~5 行：公网媒体主机 403 = 对象 URL 过期，非节点故障）；(b) 下载加固 ~40 行（SSRF 主机白名单 + 重定向校验，`_download_image_bytes`/`download_asset`） |
+| 2 | `cd7d3cd3` | **⏭️ 跳过** | 纯关系型 DB ListGroups SQL 硬化（model_repository.go）+ Go models-page.tsx UI；Python 静态 MODELS 注册表（app/control/model/registry.py），无 model_routes 表、无 admin models 端点（`@router.*model` grep 0 命中），无行为 fix 可搬 |
+| 3 | `1b58823a` | **部分移植（前端 ~10 行）** | `app/statics/admin/account.html` `doImportFile`：JSON 分支（L1950-1952）现拒绝数组 → 接受裸数组（string→token；object→.token ?? .sso_token），数组时显示 pool 选择器（现对 .json 隐藏，L2002-2004），默认 basic；TXT 分支（L1966）`raw.trimStart().startsWith('[')` → JSON.parse 展平（修 JSON 数组被静默当纯文本导入）。后端 tokens.py add_tokens/save_tokens 已兼容 string+object（L297），无需改 |
+| 4 | `2a320e69` | **⏭️ 跳过** | 测试-only（2 测试文件各 1 行构造函数补参） |
+| 5 | `75fa94f8` | ⏭️ 跳过 | 纯测试（Windows 权限断言跳过） |
+| 6 | `95d6471a` | ⏭️ 跳过 | 版本号 bump v3.1.1 |
+| 7 | `a4405eda` | ⏭️ 跳过 | 纯测试 refactor |
+
+**DPoP 根因定案**：`_post_dpop_token`（xai_console_chat.py:422-459）自 acquire 新 lease 发传输，headers（Cookie: cf_clearance）来自全局 `_dpop_manager_lease`（并发 last-writer-wins）→ 传输节点 ≠ cookie 节点 → cf_clearance IP 绑定不匹配 → CF 200 挑战页（浏览器指纹请求）→ body 非 JSON → `{}` → DPoPError。Go 从未有此问题（f1d51254 起 `fetchDPoPSession(ctx, ssoToken, lease)` 同 lease：`lease.DoDeferredForbidden` + `applyBrowserHeaders`）。**修复 = 让 token 交换复用产生 headers 的那个 lease**（Fix A：`get_or_fetch → _fetch → _post_json_fn` 全程穿 lease；`_post_dpop_token(url, headers, json_body, lease)` 用传入 lease 建 session，删全局 `_dpop_manager_lease`；`xai_console_usage.py` 本已自洽不破坏）。**不会新增 CF 求解**：求解只发生在 `proxy.acquire()` 的 bundle 有效性检查（按 proxy_url+host 缓存，同节点全账号共享），token 交换只带已有 cookie；修复反而消除双 acquire 选到冷节点引发的多余求解。377710f4/a05e06a2 均无此病的修复——同 lease 不变量在原始 f1d51254 就有，Python e41c5d96 移植时丢掉了。
+
+**DPoP 修复已实施（2026-08-05）**：`app/dataplane/reverse/protocol/dpop.py`（`PostJsonFn` 4 参 + `resolve_browser_headers(lease)` + `get_or_fetch/…/ _post_json_fn` 全程穿 lease + `do_dpop_request(lease=…)`）；`xai_console_chat.py`（`_post_dpop_token` 删 `proxy.acquire` 改用传入 lease；`_get_dpop_manager(token)` 删全局 `_dpop_manager_lease`，`browser_headers=lambda lease: build_console_headers(token, lease=lease)`；`stream_console_chat`/`_post_console_with_dpop` 调用传 lease）；`xai_console_usage.py`（`post_json` 4 参兼容）。回归测试 `tests/test_console_dpop.py` 新增 `test_token_exchange_reuses_chat_lease_no_second_acquire`（RED 证明 `assert 2 == 1`，GREEN 后 acquire 仅 1 次）；另修复 `tests/test_console_clearance_origin.py` fixture lambda 旧签名（`lambda token: fake`）。全量：**1654 passed / 1 skipped**（基线 1646 + 新增 8）。

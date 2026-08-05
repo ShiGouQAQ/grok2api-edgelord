@@ -279,6 +279,16 @@ class ProxyDirectory:
 
     async def feedback(self, lease: ProxyLease, result: ProxyFeedback) -> None:
         """Apply upstream feedback to the appropriate egress node."""
+        # Go ScopeConsoleAsset @a05e06a2: a 403 from a public media host
+        # (assets.grok.com / imagine-public.x.ai / imgen.x.ai / vidgen.x.ai …)
+        # means the signed object URL expired — it says nothing about egress
+        # node health. Never cool down nodes, rotate the pool, or touch
+        # clearance on ASSET-scope FORBIDDEN.
+        if (
+            lease.scope == ProxyScope.ASSET
+            and result.kind == ProxyFeedbackKind.FORBIDDEN
+        ):
+            return
         if result.kind == ProxyFeedbackKind.SUCCESS:
             await self._apply_node_success(lease)
         else:

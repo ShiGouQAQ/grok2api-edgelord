@@ -1938,6 +1938,28 @@ async function doAdd() {
   );
 }
 
+// 扁平化裸 JSON 数组（字符串 或 {token}/{sso_token} 对象）为 token 列表并导入
+function importTokenArray(parsed, autoNsfw) {
+  const poolEl  = document.getElementById('import-file-pool');
+  const poolRow = document.getElementById('import-file-pool-row');
+  if (poolRow) poolRow.style.display = '';
+  if (poolEl) poolEl.value = 'basic';
+  const newToks = parsed
+    .map(t => typeof t === 'string' ? t : ((t && (t.token || t.sso_token)) || ''))
+    .map(s => String(s).trim())
+    .filter(Boolean);
+  if (!newToks.length) return showToast(tr('account.fileEmpty', null, '文件中没有可导入的 Token'), 'error');
+  return saveTokens(
+    poolEl ? poolEl.value : 'basic',
+    newToks,
+    autoNsfw,
+    'modal-import-file',
+    tr('account.importing', { n: newToks.length }, `正在导入 ${newToks.length} 个账户…`),
+    tr('account.importDone', null, '导入完成'),
+    tr('account.importFailed', null, '导入失败'),
+  );
+}
+
 async function doImport() {
   const file = document.getElementById('import-file').files?.[0];
   if (!file) return showToast(tr('account.selectFile', null, '请选择文件'), 'error');
@@ -1949,7 +1971,8 @@ async function doImport() {
   if (isJson) {
     let parsed;
     try { parsed = JSON.parse(raw); } catch { return showToast(tr('account.jsonInvalid', null, 'JSON 格式错误'), 'error'); }
-    if (typeof parsed !== 'object' || Array.isArray(parsed)) return showToast(tr('account.jsonShapeInvalid', null, 'JSON 格式不正确，应为 {pool:[tokens]} 结构'), 'error');
+    if (Array.isArray(parsed)) return importTokenArray(parsed, autoNsfw);
+    if (typeof parsed !== 'object') return showToast(tr('account.jsonShapeInvalid', null, 'JSON 格式不正确，应为 {pool:[tokens]} 结构'), 'error');
     let total = 0;
     Object.values(parsed).forEach(arr => { if (Array.isArray(arr)) total += arr.length; });
     if (!total) return showToast(tr('account.jsonEmpty', null, 'JSON 文件中没有可导入的 Token'), 'error');
@@ -1961,7 +1984,13 @@ async function doImport() {
       load();
     } catch (e) { showToast(`${tr('account.importFailed', null, '导入失败')}: ${e.message}`, 'error'); }
   } else {
-    // TXT 格式: 每行一个 token
+    // TXT 格式: 每行一个 token（以 [ 开头按 JSON 数组导入）
+    if (raw.trimStart().startsWith('[')) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return importTokenArray(parsed, autoNsfw);
+      } catch { /* 不是合法 JSON 数组，回退为按行解析 */ }
+    }
     const pool = document.getElementById('import-file-pool').value;
     const newToks = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
     if (!newToks.length) return showToast(tr('account.fileEmpty', null, '文件中没有可导入的 Token'), 'error');
