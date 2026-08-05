@@ -6,6 +6,7 @@ session rebuild, and token-endpoint failure semantics. No real network: the
 DPoP manager factory, the proxy runtime and the HTTP session are all mocked.
 """
 
+import json
 import time
 from contextlib import contextmanager
 from typing import Any
@@ -21,6 +22,7 @@ from app.dataplane.reverse.protocol.dpop import (
     DPoPSession,
     DPoPSessionManager,
     DPoPTokenEndpointError,
+    dpop_jwk_thumbprint,
     dpop_session_cache_key,
     public_dpop_jwk,
 )
@@ -56,11 +58,9 @@ def _reset_chat_dpop_globals():
     """The chat path caches one manager per SSO token at module scope."""
     chat_module._dpop_manager = None
     chat_module._dpop_manager_token = None
-    chat_module._dpop_manager_lease = None
     yield
     chat_module._dpop_manager = None
     chat_module._dpop_manager_token = None
-    chat_module._dpop_manager_lease = None
 
 
 def _fake_session(access_token: str = "at-123") -> DPoPSession:
@@ -121,6 +121,12 @@ def _sse_ok_lines() -> list[bytes]:
     ]
 
 
+def _b64url(data: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
 @contextmanager
 def _patched(manager: MagicMock, session: AsyncMock):
     proxy = AsyncMock()
@@ -153,7 +159,7 @@ async def test_success_sends_dpop_headers_and_streams():
     manager = _fake_manager(session)
     http = _session_mock(_response(sse_lines=_sse_ok_lines()))
 
-    with _patched(manager, http):
+    with _patched(manager, http) as (_proxy, lease):
         events = [
             ev
             async for ev in stream_console_chat(
@@ -177,7 +183,7 @@ async def test_success_sends_dpop_headers_and_streams():
     assert (
         headers["x-cluster"] == "https://us-east-1.api.x.ai"
     )  # G6-M2: /responses only
-    manager.get_or_fetch.assert_awaited_once_with(CONSOLE_BASE, 0, 0, "sso-tok")
+    manager.get_or_fetch.assert_awaited_once_with(CONSOLE_BASE, 0, 0, "sso-tok", lease)
 
 
 @pytest.mark.asyncio
@@ -290,9 +296,9 @@ async def test_dpop_error_raises_502():
 # ---------------------------------------------------------------------------
 
 
-def _build_chat_manager(token: str, lease):
+def _build_chat_manager(token: str):
     """Real ``_get_dpop_manager`` (not patched); caller patches the exchange."""
-    return chat_module._get_dpop_manager(token, lease)
+    return chat_module._get_dpop_manager(token)
 
 
 @pytest.mark.asyncio
@@ -313,7 +319,7 @@ async def test_chat_manager_definitive_block_403_keeps_clearance():
             return_value=_Profile(),
         ),
     ):
-        manager = _build_chat_manager("sso-tok", MagicMock(proxy_url=None))
+        manager = _build_chat_manager("sso-tok")
         with pytest.raises(DPoPTokenEndpointError) as exc_info:
             await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok")
 
@@ -335,7 +341,7 @@ async def test_chat_manager_non_definitive_403_invalidates_clearance():
             return_value=_Profile(),
         ),
     ):
-        manager = _build_chat_manager("sso-tok", MagicMock(proxy_url=None))
+        manager = _build_chat_manager("sso-tok")
         with pytest.raises(DPoPTokenEndpointError) as exc_info:
             await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok")
 
@@ -355,13 +361,16 @@ async def test_manager_browser_headers_callable_rebuilt_per_fetch():
     captured: list[dict[str, str]] = []
 
     async def post_json(
-        _url: str, headers: dict[str, str], _payload: dict[str, Any]
+        _url: str,
+        headers: dict[str, str],
+        _payload: dict[str, Any],
+        _lease: Any | None = None,
     ) -> tuple[int, dict[str, Any]]:
         captured.append(headers)
         raise DPoPTokenEndpointError(403, b"{}", invalidate_clearance=False)
 
     manager = DPoPSessionManager(
-        post_json, browser_headers=lambda: {"Cookie": f"cf_clearance={box[0]}"}
+        post_json, browser_headers=lambda _lease: {"Cookie": f"cf_clearance={box[0]}"}
     )
     with pytest.raises(DPoPTokenEndpointError):
         await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "tok")
@@ -384,7 +393,10 @@ async def test_chat_exchange_headers_follow_current_lease():
     captured: list[dict[str, str]] = []
 
     async def fake_post(
-        _url: str, headers: dict[str, str], _payload: dict[str, Any]
+        _url: str,
+        headers: dict[str, str],
+        _payload: dict[str, Any],
+        _lease: Any | None = None,
     ) -> tuple[int, dict[str, Any]]:
         captured.append(headers)
         raise DPoPTokenEndpointError(403, b"{}", invalidate_clearance=False)
@@ -398,15 +410,15 @@ async def test_chat_exchange_headers_follow_current_lease():
             side_effect=lambda lease: _LeaseProfile(cf_clearance=lease.cf_clearance),
         ),
     ):
-        manager = chat_module._get_dpop_manager("sso-tok", lease1)
+        manager = chat_module._get_dpop_manager("sso-tok")
         with pytest.raises(DPoPTokenEndpointError):
-            await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok")
+            await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok", lease1)
 
         # Same token → same manager, but the lease moved on.
-        manager2 = chat_module._get_dpop_manager("sso-tok", lease2)
+        manager2 = chat_module._get_dpop_manager("sso-tok")
         assert manager2 is manager
         with pytest.raises(DPoPTokenEndpointError):
-            await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok")
+            await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok", lease2)
 
     assert "cf_clearance=c1" in captured[0]["Cookie"]
     assert "cf_clearance=c2" in captured[1]["Cookie"]
@@ -423,7 +435,10 @@ async def test_chat_dpop_exchange_has_no_x_cluster():
     captured: list[dict[str, str]] = []
 
     async def fake_post(
-        _url: str, headers: dict[str, str], _payload: dict[str, Any]
+        _url: str,
+        headers: dict[str, str],
+        _payload: dict[str, Any],
+        _lease: Any | None = None,
     ) -> tuple[int, dict[str, Any]]:
         captured.append(headers)
         raise DPoPTokenEndpointError(403, b"{}", invalidate_clearance=False)
@@ -435,8 +450,84 @@ async def test_chat_dpop_exchange_has_no_x_cluster():
             return_value=_Profile(),
         ),
     ):
-        manager = chat_module._get_dpop_manager("sso-tok", MagicMock(proxy_url=None))
+        manager = chat_module._get_dpop_manager("sso-tok")
         with pytest.raises(DPoPTokenEndpointError):
             await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok")
 
     assert "x-cluster" not in captured[0]
+
+
+# ---------------------------------------------------------------------------
+# Fix A regression: the token exchange must reuse the chat request's lease
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_token_exchange_reuses_chat_lease_no_second_acquire():
+    """Before the fix, _post_dpop_token called proxy.acquire() itself while the
+    request headers (Cookie: cf_clearance) came from the global
+    _dpop_manager_lease — transport egress node != clearance node, so
+    Cloudflare served a challenge interstitial and the exchange failed
+    (Go fetchDPoPSession always reuses the caller's lease)."""
+    proxy = AsyncMock()
+    lease, other_lease = MagicMock(), MagicMock()
+    proxy.acquire.side_effect = [lease, other_lease]
+
+    session_kwarg_leases: list[Any] = []
+
+    def _record_session_kwargs(*, lease=None, **kwargs):
+        session_kwarg_leases.append(lease)
+        return {}
+
+    def _token_or_sse(url, headers=None, data=None, timeout=None, **kwargs):
+        if url == CONSOLE_RESPONSES:
+            return _response(sse_lines=_sse_ok_lines())
+        # Mint a DPoP access token bound to the JWK the exchange just posted.
+        jwk = json.loads(data or b"")["jwk"]
+        now = int(time.time())
+        token = (
+            f"{_b64url(json.dumps({'alg': 'ES256', 'typ': 'JWT'}).encode())}."
+            f"{_b64url(json.dumps({'exp': now + 3600, 'cnf': {'jkt': dpop_jwk_thumbprint(jwk)}}).encode())}."
+            f"{_b64url(b'sig')}"
+        )
+        return _response(
+            200,
+            body=json.dumps(
+                {"access_token": token, "token_type": "DPoP", "expires_in": 3600}
+            ),
+        )
+
+    http = _session_mock()
+    http.post.side_effect = _token_or_sse
+
+    with (
+        patch("app.dataplane.proxy.get_proxy_runtime", return_value=proxy),
+        patch(
+            "app.dataplane.proxy.adapters.session.ResettableSession",
+            return_value=http,
+        ),
+        patch(
+            "app.dataplane.proxy.adapters.session.build_session_kwargs",
+            side_effect=_record_session_kwargs,
+        ),
+        patch(
+            "app.dataplane.proxy.adapters.headers._resolve_profile",
+            return_value=_Profile(),
+        ),
+    ):
+        events = [
+            ev
+            async for ev in stream_console_chat(
+                "sso-tok", {"model": "grok-4.3", "input": []}
+            )
+        ]
+
+    # The token exchange must NOT acquire its own lease.
+    assert proxy.acquire.await_count == 1
+    # Same egress node, same cf_clearance cookie for exchange and chat POST.
+    assert session_kwarg_leases == [lease, lease]
+    assert all(l is lease for l in session_kwarg_leases)
+    assert events == [
+        ("response.output_text.delta", '{"delta": "hi"}'),
+        ("response.completed", '{"response": {"usage": {"total_tokens": 3}}}'),
+    ]

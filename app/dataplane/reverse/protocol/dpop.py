@@ -52,7 +52,8 @@ _X_CLUSTER_HEADER = "https://us-east-1.api.x.ai"
 _P256_BYTE_WIDTH = 32
 
 PostJsonFn = Callable[
-    [str, dict[str, str], dict[str, Any]], Awaitable[tuple[int, dict[str, Any]]]
+    [str, dict[str, str], dict[str, Any], Any],
+    Awaitable[tuple[int, dict[str, Any]]],
 ]
 RequestFn = Callable[
     [dict[str, str], bytes | None], Awaitable[tuple[int, bytes, dict[str, str]]]
@@ -244,23 +245,24 @@ class DPoPSessionManager:
         self,
         post_json_fn: PostJsonFn,
         *,
-        browser_headers: dict[str, str] | Callable[[], dict[str, str]] | None = None,
+        browser_headers: dict[str, str] | Callable[[Any], dict[str, str]] | None = None,
         is_definitive_block: Callable[[str], bool] | None = None,
     ) -> None:
         self._post_json_fn: PostJsonFn = post_json_fn
         self._is_definitive_block: Callable[[str], bool] | None = is_definitive_block
-        self.browser_headers: dict[str, str] | Callable[[], dict[str, str]] = (
+        self.browser_headers: dict[str, str] | Callable[[Any], dict[str, str]] = (
             browser_headers or {}
         )
         self._cache: OrderedDict[str, DPoPSession] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[DPoPSession]] = {}
 
-    def resolve_browser_headers(self) -> dict[str, str]:
-        """Headers for the next token exchange — a callable is resolved fresh."""
+    def resolve_browser_headers(self, lease: Any | None = None) -> dict[str, str]:
+        """Headers for the next token exchange — a callable is resolved fresh
+        with the current lease (Go ``applyBrowserHeaders(request, ssoToken, lease)``)."""
         headers = self.browser_headers
         if isinstance(headers, dict):
             return headers.copy()
-        return dict(headers())
+        return dict(headers(lease))
 
     # -- cache --------------------------------------------------------------
 
@@ -295,7 +297,12 @@ class DPoPSessionManager:
     # -- fetch --------------------------------------------------------------
 
     async def get_or_fetch(
-        self, base_url: str, credential_id: int, node_id: int, sso_token: str
+        self,
+        base_url: str,
+        credential_id: int,
+        node_id: int,
+        sso_token: str,
+        lease: Any | None = None,
     ) -> DPoPSession:
         """Go ``get``: return the cached session or fetch one, coalesced per key."""
         key = dpop_session_cache_key(base_url, credential_id, node_id, sso_token)
@@ -304,23 +311,25 @@ class DPoPSessionManager:
             return cached
         task = self._inflight.get(key)
         if task is None:
-            task = asyncio.create_task(self._fetch_and_store(key, base_url))
+            task = asyncio.create_task(self._fetch_and_store(key, base_url, lease))
             self._inflight[key] = task
             task.add_done_callback(lambda _done: self._inflight.pop(key, None))
         return await asyncio.shield(task)
 
-    async def _fetch_and_store(self, key: str, base_url: str) -> DPoPSession:
+    async def _fetch_and_store(
+        self, key: str, base_url: str, lease: Any
+    ) -> DPoPSession:
         # Singleflight closure re-check: the cache may have been populated by a
         # concurrent refresh between the outer lookup and this task starting.
         cached = self._cached(key)
         if cached is not None:
             return cached
-        session = await self._fetch(base_url)
+        session = await self._fetch(base_url, lease)
         self._store(key, session)
         logger.debug("dpop session cached", key=key, expires_at_ms=session.expires_at)
         return session
 
-    async def _fetch(self, base_url: str) -> DPoPSession:
+    async def _fetch(self, base_url: str, lease: Any) -> DPoPSession:
         """Go ``fetchDPoPSession``: mint a fresh P-256 key, exchange it for a
         DPoP-bound access token, and validate the binding.
         """
@@ -329,8 +338,9 @@ class DPoPSessionManager:
         endpoint = console_v1_endpoint(base_url, DPOP_DPOP_TOKEN_PATH)
         status, data = await self._post_json_fn(
             endpoint,
-            {"Content-Type": "application/json", **self.resolve_browser_headers()},
+            {"Content-Type": "application/json", **self.resolve_browser_headers(lease)},
             {"jwk": public_jwk},
+            lease,
         )
         if status < 200 or status >= 300:
             body_text = (
@@ -433,6 +443,7 @@ async def do_dpop_request(
     credential_id: int,
     node_id: int,
     sso_token: str,
+    lease: Any | None = None,
     request_fn: RequestFn,
 ) -> tuple[int, bytes, dict[str, str]]:
     """Go ``doDPoPRequest``: perform one DPoP-authenticated request with a
@@ -447,9 +458,9 @@ async def do_dpop_request(
     key = dpop_session_cache_key(base_url, credential_id, node_id, sso_token)
     for attempt in range(2):
         session = await manager.get_or_fetch(
-            base_url, credential_id, node_id, sso_token
+            base_url, credential_id, node_id, sso_token, lease
         )
-        headers = manager.resolve_browser_headers()
+        headers = manager.resolve_browser_headers(lease)
         headers["Authorization"] = f"DPoP {session.access_token}"
         headers["DPoP"] = sign_dpop_proof(session, method=method, url=url)
         if body:

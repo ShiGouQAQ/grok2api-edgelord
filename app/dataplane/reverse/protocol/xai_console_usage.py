@@ -179,7 +179,8 @@ def _make_post_json_fn(
     lease: Any,
     timeout_s: float,
 ) -> Callable[
-    [str, dict[str, str], dict[str, Any]], Awaitable[tuple[int, dict[str, Any]]]
+    [str, dict[str, str], dict[str, Any], Any],
+    Awaitable[tuple[int, dict[str, Any]]],
 ]:
     """``post_json_fn`` for DPoPSessionManager: POST {base}/v1/dpop/token.
 
@@ -190,7 +191,10 @@ def _make_post_json_fn(
     """
 
     async def post_json(
-        endpoint: str, headers: dict[str, str], payload: dict[str, Any]
+        endpoint: str,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+        lease: Any | None = None,
     ) -> tuple[int, dict[str, Any]]:
         merged = {**headers, **build_console_headers(token, lease=lease)}
         try:
@@ -420,6 +424,7 @@ async def fetch_console_usage(
                 credential_id=0,
                 node_id=0,
                 sso_token=token,
+                lease=lease,
                 request_fn=_make_request_fn(session, timeout_s),
             )
         except DPoPTokenEndpointError as exc:

@@ -324,12 +324,12 @@ async def stream_console_chat(
     payload_bytes = orjson.dumps(payload)
     session_kwargs = _session_adapter.build_session_kwargs(lease=lease)
 
-    manager = _get_dpop_manager(token, lease)
+    manager = _get_dpop_manager(token)
 
     async with _session_adapter.ResettableSession(**session_kwargs) as session:
         try:
             dpop_session = await manager.get_or_fetch(
-                CONSOLE_BASE, 0, _lease_node_id(lease), token
+                CONSOLE_BASE, 0, _lease_node_id(lease), token, lease
             )
         except DPoPTokenEndpointError as exc:
             if exc.invalidate_clearance:
@@ -420,23 +420,20 @@ async def stream_console_chat(
 
 
 async def _post_dpop_token(
-    url: str, headers: dict[str, str], json_body: dict[str, Any]
+    url: str, headers: dict[str, str], json_body: dict[str, Any], lease
 ) -> tuple[int, dict[str, Any]]:
     """Perform the POST {base}/v1/dpop/token exchange through the proxy machinery.
 
-    Acquires its own lease (the exchange is rare — the DPoP session is cached
-    per SSO token). Transport failures surface as status 0 so the manager
-    raises DPoPTokenEndpointError instead of leaking raw exceptions.
+    Runs on the SAME lease as the triggering request (Go fetchDPoPSession) so
+    the transport egress node matches the request headers' cf_clearance node.
+    Transport failures surface as status 0 so the manager raises
+    DPoPTokenEndpointError instead of leaking raw exceptions.
     """
-    from app.dataplane.proxy import get_proxy_runtime
     from app.dataplane.proxy.adapters.session import (
         ResettableSession,
         build_session_kwargs,
     )
-    from app.dataplane.reverse.runtime.endpoint_table import CONSOLE_BASE
 
-    proxy = await get_proxy_runtime()
-    lease = await proxy.acquire(clearance_origin=CONSOLE_BASE)
     session_kwargs = build_session_kwargs(lease=lease)
     try:
         async with ResettableSession(**session_kwargs) as s:
@@ -460,7 +457,6 @@ async def _post_dpop_token(
 
 _dpop_manager = None  # DPoPSessionManager — built lazily, one per SSO token
 _dpop_manager_token: str | None = None
-_dpop_manager_lease = None  # most recent lease, used for token-exchange headers
 
 
 def _lease_node_id(lease) -> int:
@@ -473,28 +469,24 @@ def _lease_node_id(lease) -> int:
     return zlib.crc32(url.encode()) if isinstance(url, str) and url else 0
 
 
-def _get_dpop_manager(token: str, lease) -> "DPoPSessionManager":
+def _get_dpop_manager(token: str) -> "DPoPSessionManager":
     """Lazily build the DPoP session manager.
 
-    One manager per SSO token so the token-exchange browser headers (sso
-    cookie) match the account; the cached DPoP session survives across calls.
-    Token-exchange headers are re-derived from the most recent lease — Go
-    fetchDPoPSession applies the *current* lease's browser headers per
-    exchange, not the first request's.
+    One manager per SSO token so the cached DPoP session survives across calls.
+    Token-exchange browser headers are re-derived from the lease of the request
+    that triggers the exchange — Go fetchDPoPSession applies the *current*
+    lease's browser headers per exchange, not the first request's.
     """
-    global _dpop_manager, _dpop_manager_token, _dpop_manager_lease
+    global _dpop_manager, _dpop_manager_token
     if _dpop_manager is None or _dpop_manager_token != token:
         from app.dataplane.proxy.adapters.headers import build_console_headers
 
         _dpop_manager = DPoPSessionManager(
             _post_dpop_token,
-            browser_headers=lambda: build_console_headers(
-                token, lease=_dpop_manager_lease
-            ),
+            browser_headers=lambda lease: build_console_headers(token, lease=lease),
             is_definitive_block=_is_definitive_block_body,
         )
         _dpop_manager_token = token
-    _dpop_manager_lease = lease
     return _dpop_manager
 
 
@@ -541,7 +533,7 @@ async def _post_console_with_dpop(
         dpop_session.access_token,
     )
     refreshed = await manager.get_or_fetch(
-        CONSOLE_BASE, 0, _lease_node_id(lease), token
+        CONSOLE_BASE, 0, _lease_node_id(lease), token, lease
     )
     return await _post(refreshed)
 

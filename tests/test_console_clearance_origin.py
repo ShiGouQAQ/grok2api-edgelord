@@ -39,7 +39,7 @@ def _bypass_dpop_exchange(monkeypatch):
     fake.get_or_fetch = AsyncMock(return_value=session)
     monkeypatch.setattr(
         "app.dataplane.reverse.protocol.xai_console_chat._get_dpop_manager",
-        lambda token, lease: fake,
+        lambda token: fake,
     )
 
 

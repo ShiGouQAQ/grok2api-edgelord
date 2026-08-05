@@ -84,7 +84,11 @@ class FakeTokenEndpoint:
         self.started = 0
 
     async def __call__(
-        self, url: str, headers: dict[str, str], json_body: dict[str, Any]
+        self,
+        url: str,
+        headers: dict[str, str],
+        json_body: dict[str, Any],
+        lease: Any | None = None,
     ) -> tuple[int, dict[str, Any]]:
         self.calls.append((url, dict(headers), json_body))
         self.started += 1
@@ -403,7 +407,10 @@ async def test_singleflight_coalesces_concurrent_fetches() -> None:
 @pytest.mark.asyncio
 async def test_fetch_failure_propagates_to_all_waiters() -> None:
     async def fail(
-        _url: str, _headers: dict[str, str], _body: dict[str, Any]
+        _url: str,
+        _headers: dict[str, str],
+        _body: dict[str, Any],
+        _lease: Any | None = None,
     ) -> tuple[int, dict[str, Any]]:
         return 500, {}
 
@@ -422,7 +429,7 @@ async def test_token_type_and_lifetime_validated() -> None:
     jwk = public_dpop_jwk(ec.generate_private_key(ec.SECP256R1()))
 
     async def wrong_type(
-        _url: str, _h: dict[str, str], _b: dict[str, Any]
+        _url: str, _h: dict[str, str], _b: dict[str, Any], _lease: Any | None = None
     ) -> tuple[int, dict[str, Any]]:
         return 200, {
             "access_token": _make_access_token(jwk),
@@ -436,7 +443,7 @@ async def test_token_type_and_lifetime_validated() -> None:
         await mgr.get_or_fetch("https://console.x.ai", 1, 0, "s")
 
     async def expires_in_zero(
-        _url: str, _h: dict[str, str], _b: dict[str, Any]
+        _url: str, _h: dict[str, str], _b: dict[str, Any], _lease: Any | None = None
     ) -> tuple[int, dict[str, Any]]:
         return 200, {
             "access_token": _make_access_token(jwk),
@@ -449,7 +456,7 @@ async def test_token_type_and_lifetime_validated() -> None:
         await mgr.get_or_fetch("https://console.x.ai", 1, 0, "s")
 
     async def expires_in_too_long(
-        _url: str, _h: dict[str, str], _b: dict[str, Any]
+        _url: str, _h: dict[str, str], _b: dict[str, Any], _lease: Any | None = None
     ) -> tuple[int, dict[str, Any]]:
         return 200, {
             "access_token": _make_access_token(jwk),
@@ -468,7 +475,7 @@ async def test_cnf_jkt_mismatch_rejects_session() -> None:
     other = public_dpop_jwk(ec.generate_private_key(ec.SECP256R1()))
 
     async def mismatched(
-        _url: str, _h: dict[str, str], _b: dict[str, Any]
+        _url: str, _h: dict[str, str], _b: dict[str, Any], _lease: Any | None = None
     ) -> tuple[int, dict[str, Any]]:
         return 200, {
             "access_token": _make_access_token(jwk, jkt=_ref_thumbprint(other)),
@@ -490,7 +497,10 @@ async def test_jwt_exp_shortens_session_lifetime() -> None:
     )  # 25s: >20s skew so fetch succeeds, but shorter than expires_in 3600
 
     async def short_exp(
-        _url: str, _h: dict[str, str], json_body: dict[str, Any]
+        _url: str,
+        _h: dict[str, str],
+        json_body: dict[str, Any],
+        _lease: Any | None = None,
     ) -> tuple[int, dict[str, Any]]:
         return 200, {
             "access_token": _make_access_token(json_body["jwk"], exp=exp),
@@ -510,7 +520,10 @@ async def test_jwt_exp_inside_skew_rejected() -> None:
     exp = int(time.time()) + 10  # 10s < 20s skew → fetch must fail
 
     async def expiring_soon(
-        _url: str, _h: dict[str, str], json_body: dict[str, Any]
+        _url: str,
+        _h: dict[str, str],
+        json_body: dict[str, Any],
+        _lease: Any | None = None,
     ) -> tuple[int, dict[str, Any]]:
         return 200, {
             "access_token": _make_access_token(json_body["jwk"], exp=exp),
@@ -527,7 +540,7 @@ async def test_jwt_exp_inside_skew_rejected() -> None:
 @pytest.mark.asyncio
 async def test_403_non_definitive_signals_clearance_invalidation() -> None:
     async def forbidden(
-        _url: str, _h: dict[str, str], _b: dict[str, Any]
+        _url: str, _h: dict[str, str], _b: dict[str, Any], _lease: Any | None = None
     ) -> tuple[int, dict[str, Any]]:
         return 403, {"error": {"code": "challenge_required"}}
 
@@ -542,7 +555,7 @@ async def test_403_non_definitive_signals_clearance_invalidation() -> None:
 @pytest.mark.asyncio
 async def test_403_definitive_block_keeps_clearance() -> None:
     async def forbidden(
-        _url: str, _h: dict[str, str], _b: dict[str, Any]
+        _url: str, _h: dict[str, str], _b: dict[str, Any], _lease: Any | None = None
     ) -> tuple[int, dict[str, Any]]:
         return 403, {"error": {"message": "definitive account block"}}
 
@@ -713,7 +726,7 @@ async def test_do_dpop_request_second_401_propagates() -> None:
 @pytest.mark.asyncio
 async def test_do_dpop_request_propagates_token_endpoint_error() -> None:
     async def forbidden(
-        _url: str, _h: dict[str, str], _b: dict[str, Any]
+        _url: str, _h: dict[str, str], _b: dict[str, Any], _lease: Any | None = None
     ) -> tuple[int, dict[str, Any]]:
         return 403, {"error": "challenge"}
 
