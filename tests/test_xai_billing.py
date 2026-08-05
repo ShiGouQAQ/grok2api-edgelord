@@ -57,6 +57,25 @@ def test_parse_billing_empty():
 # ---------------------------------------------------------------------------
 
 
+def test_parse_billing_real_upstream_shape():
+    # Verified 2026-08-05 against cli-chat-proxy.grok.com/v1/billing with a
+    # live minted Build OAuth token: values are {"val": int} objects.
+    data = {
+        "config": {
+            "monthlyLimit": {"val": 0},
+            "used": {"val": 0},
+            "onDemandCap": {"val": 0},
+            "billingPeriodStart": "2026-08-01T00:00:00+00:00",
+            "history": [],
+        }
+    }
+    b = parse_billing(data)
+    assert b.monthly_limit == 0
+    assert b.used == 0
+    assert b.on_demand_cap == 0
+    assert not b.is_paid
+
+
 def test_parse_subscription_tier():
     assert (
         parse_subscription_tier({"subscription": {"plan": {"code": "supergrok"}}})
@@ -179,10 +198,13 @@ def _patch_config(monkeypatch, proxy_url="", skip_ssl_verify=False):
 
 def test_fetch_build_billing_ok(monkeypatch):
     payload = {
-        "config": {"planCode": "supergrok", "planName": "SuperGrok"},
-        "usage": {"monthlyLimit": 100, "used": 30},
-        "onDemand": {"cap": 50, "used": 10},
-        "prepaidBalance": 20,
+        "config": {
+            "monthlyLimit": {"val": 100},
+            "used": {"val": 30},
+            "onDemandCap": {"val": 50},
+            "onDemandUsed": {"val": 10},
+            "prepaidBalance": {"val": 20},
+        }
     }
     session = _FakeSession(_FakeResponse(200, payload=payload))
     monkeypatch.setattr(aiohttp, "ClientSession", lambda **kw: session)
@@ -190,15 +212,16 @@ def test_fetch_build_billing_ok(monkeypatch):
 
     b = asyncio.run(fetch_build_billing("tok-123"))
 
-    assert b.plan_code == "supergrok"
-    assert b.plan_name == "SuperGrok"
+    assert b.plan_code == ""
+    assert b.plan_name == ""
     assert b.monthly_limit == 100
     assert b.used == 30
     assert b.on_demand_cap == 50
+    assert b.on_demand_used == 10
     assert b.prepaid_balance == 20
     assert b.is_paid
     url, kwargs = session.calls[0]
-    assert url == "https://api.x.ai/billing/usage"
+    assert url == "https://cli-chat-proxy.grok.com/v1/billing"
     assert kwargs["headers"] == {"Authorization": "Bearer tok-123"}
     assert kwargs["timeout"].total == 15.0
 

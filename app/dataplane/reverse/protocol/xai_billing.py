@@ -1,7 +1,7 @@
 """XAI Build billing/subscription tier parser.
 
 Handles responses from:
-- GET /billing?format=credits
+- GET cli-chat-proxy.grok.com/v1/billing (Build OAuth access token)
 - GET /user?include=subscription
 - JWT token tier extraction
 """
@@ -65,14 +65,24 @@ def _str_or(val: object, default: str = "") -> str:
     return str(val)
 
 
-def parse_billing(data: dict[str, Any]) -> BuildBilling:
-    """Parse the billing JSON response.
+def _val(obj: object) -> int:
+    """Coerce a real billing field. Values are either bare ints or
+    ``{"val": int}`` objects (cli-chat-proxy /v1/billing responses)."""
+    if isinstance(obj, dict):
+        raw = obj.get("val")
+        if raw is not None:
+            return _int_or(raw)
+    return _int_or(obj)
 
-    Supports flexible nesting:
-    - ``config.planCode`` / ``config.planName``
-    - ``usage.monthlyLimit`` / ``usage.used``
-    - ``onDemand.cap`` / ``onDemand.used``
-    - ``prepaidBalance``
+
+def parse_billing(data: dict[str, Any]) -> BuildBilling:
+    """Parse the billing JSON response (cli-chat-proxy.grok.com /v1/billing).
+
+    Real upstream shape (verified 2026-08-05 against a live minted token):
+    ``config.monthlyLimit.val`` / ``config.used.val`` / ``config.onDemandCap.val``,
+    plus ``?format=credits`` variant ``config.onDemandUsed.val`` and
+    ``config.prepaidBalance.val``. Values are ``{"val": int}`` objects;
+    bare-int legacy shapes are still tolerated.
     """
     config_raw = data.get("config")
     config: dict[str, Any] = config_raw if isinstance(config_raw, dict) else {}
@@ -84,12 +94,24 @@ def parse_billing(data: dict[str, Any]) -> BuildBilling:
     return BuildBilling(
         plan_code=_str_or(config.get("planCode") or data.get("planCode")),
         plan_name=_str_or(config.get("planName") or data.get("planName")),
-        monthly_limit=_int_or(usage.get("monthlyLimit") or data.get("monthlyLimit")),
-        used=_int_or(usage.get("used") or data.get("used")),
-        on_demand_cap=_int_or(on_demand.get("cap") or data.get("onDemandCap")),
-        on_demand_used=_int_or(on_demand.get("used") or data.get("onDemandUsed")),
-        prepaid_balance=_int_or(
-            data.get("prepaidBalance") or data.get("prepaid_balance")
+        monthly_limit=_val(
+            config.get("monthlyLimit")
+            or usage.get("monthlyLimit")
+            or data.get("monthlyLimit")
+        ),
+        used=_val(config.get("used") or usage.get("used") or data.get("used")),
+        on_demand_cap=_val(
+            config.get("onDemandCap") or on_demand.get("cap") or data.get("onDemandCap")
+        ),
+        on_demand_used=_val(
+            config.get("onDemandUsed")
+            or on_demand.get("used")
+            or data.get("onDemandUsed")
+        ),
+        prepaid_balance=_val(
+            config.get("prepaidBalance")
+            or data.get("prepaidBalance")
+            or data.get("prepaid_balance")
         ),
     )
 
@@ -215,14 +237,17 @@ async def fetch_build_billing(
             http_proxy = normalized
 
     try:
-        async with aiohttp.ClientSession(
-            connector=connector, connector_owner=False
-        ) as session, session.get(
-            "https://api.x.ai/billing/usage",
-            headers={"Authorization": f"Bearer {access_token}"},
-            timeout=aiohttp.ClientTimeout(total=timeout_s),
-            proxy=http_proxy,
-        ) as resp:
+        async with (
+            aiohttp.ClientSession(
+                connector=connector, connector_owner=False
+            ) as session,
+            session.get(
+                "https://cli-chat-proxy.grok.com/v1/billing",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=aiohttp.ClientTimeout(total=timeout_s),
+                proxy=http_proxy,
+            ) as resp,
+        ):
             if resp.status == 200:
                 return parse_billing(await resp.json())
             body = await resp.text()
