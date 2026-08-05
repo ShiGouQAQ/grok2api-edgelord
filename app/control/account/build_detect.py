@@ -451,7 +451,7 @@ async def _probe_build(access_token: str) -> tuple[int, str]:
             raise UpstreamError(
                 f"Build detection transport failed: {exc}", status=0
             ) from exc
-        body = await response.atext()
+        body = response.text
         return response.status_code, body
 
 

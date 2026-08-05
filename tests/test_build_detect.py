@@ -488,3 +488,50 @@ class TestSsoMintLeaseScope:
         kwargs = proxy.acquire.await_args.kwargs
         assert kwargs.get("scope") == ProxyScope.BUILD
         assert kwargs.get("clearance_origin") == "https://accounts.x.ai/"
+
+
+class TestProbeBuildBodyRead:
+    """curl_cffi stream semantics: non-streamed response → sync .text.
+
+    Regression for the 2026-08-05 sweep: `await response.atext()` on a
+    non-streamed curl_cffi response raises AssertionError (stream mode not
+    enabled). The probe POST has no stream=True, so the body must be read via
+    the sync `.text` property.
+    """
+
+    @pytest.mark.asyncio
+    async def test_probe_reads_body_via_sync_text(self):
+        from app.control.account.build_detect import _probe_build
+
+        session = AsyncMock()
+        resp = AsyncMock()
+        resp.status_code = 401
+        resp.text = '{"error":"invalid token"}'
+        # Simulate real curl_cffi: atext() on a non-streamed response raises.
+        async def _bad_atext():
+            raise AssertionError("stream mode is not enabled.")
+
+        resp.atext = _bad_atext
+        session.post.return_value = resp
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
+
+        proxy = AsyncMock()
+        lease = AsyncMock()
+        lease.cf_cookies = ""
+        proxy.acquire.return_value = lease
+
+        with (
+            patch(
+                "app.dataplane.proxy.get_proxy_runtime",
+                AsyncMock(return_value=proxy),
+            ),
+            patch(
+                "app.dataplane.proxy.adapters.session.ResettableSession",
+                return_value=session,
+            ),
+        ):
+            status, body = await _probe_build("at-tok")
+
+        assert status == 401
+        assert '"invalid token"' in body

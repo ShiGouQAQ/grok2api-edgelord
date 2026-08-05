@@ -10,9 +10,7 @@ Performance notes:
 import asyncio
 import hashlib
 import re
-import ssl
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
 import aiohttp
 
@@ -881,24 +879,6 @@ async def build_refresh_billing(
     Queries upstream billing API for each Build account and updates
     the billing info in ext dict.
     """
-    raw_proxy = str(get_config().get_str("proxy.egress.proxy_url", ""))
-    proxy_url = normalize_proxy_url(raw_proxy) if raw_proxy else None
-    http_proxy: str | None = None
-    connector: aiohttp.TCPConnector | None = None
-    if proxy_url:
-        ssl_ctx = ssl.create_default_context()
-        if get_config().get_bool("proxy.egress.skip_ssl_verify", False):
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
-        scheme = urlparse(proxy_url).scheme.lower()
-        if scheme.startswith("socks"):
-            from aiohttp_socks import ProxyConnector
-
-            connector = ProxyConnector.from_url(proxy_url, ssl=ssl_ctx)
-        else:
-            connector = aiohttp.TCPConnector(ssl=ssl_ctx)
-            http_proxy = proxy_url
-
     if req.tokens:
         records = await repo.get_accounts(req.tokens)
     else:
@@ -907,41 +887,23 @@ async def build_refresh_billing(
 
     results: dict = {"refreshed": 0, "failed": 0, "errors": []}
 
+    from app.dataplane.reverse.protocol.xai_billing import fetch_build_billing
+
     async def _refresh_one(record) -> None:
         try:
             ext = record.ext or {}
             access_token = ext.get("build_access_token", record.token)
-
-            async with aiohttp.ClientSession(
-                connector=connector, connector_owner=False
-            ) as session:
-                async with session.get(
-                    "https://api.x.ai/billing/usage",
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    timeout=aiohttp.ClientTimeout(total=15),
-                    proxy=http_proxy,
-                ) as resp:
-                    if resp.status != 200:
-                        results["failed"] += 1
-                        return
-                    billing_data = await resp.json()
+            billing = await fetch_build_billing(access_token)
 
             billing_info = {
-                "plan_code": billing_data.get("plan_code", ""),
-                "plan_name": billing_data.get("plan_name", ""),
-                "monthly_limit": float(billing_data.get("monthly_limit", 0)),
-                "used": float(billing_data.get("used", 0)),
-                "remaining": float(
-                    billing_data.get("monthly_limit", 0) - billing_data.get("used", 0)
-                ),
-                "on_demand_cap": float(billing_data.get("on_demand_cap", 0)),
-                "on_demand_used": float(billing_data.get("on_demand_used", 0)),
-                "prepaid_balance": float(billing_data.get("prepaid_balance", 0)),
-                "credit_usage_percent": float(
-                    billing_data.get("credit_usage_percent", 0)
-                ),
-                "usage_period_end": billing_data.get("usage_period_end", ""),
-                "billing_period_end": billing_data.get("billing_period_end", ""),
+                "plan_code": billing.plan_code,
+                "plan_name": billing.plan_name,
+                "monthly_limit": float(billing.monthly_limit),
+                "used": float(billing.used),
+                "remaining": float(billing.monthly_limit - billing.used),
+                "on_demand_cap": float(billing.on_demand_cap),
+                "on_demand_used": float(billing.on_demand_used),
+                "prepaid_balance": float(billing.prepaid_balance),
                 "synced_at": now_ms(),
             }
 
@@ -967,9 +929,6 @@ async def build_refresh_billing(
     from app.platform.runtime.batch import run_batch
 
     await run_batch(records, _refresh_one, concurrency=5)
-
-    if connector is not None:
-        await connector.close()
 
     logger.info(
         "build billing refresh completed: refreshed={} failed={}",

@@ -1335,7 +1335,7 @@ async def _stream_image_edit(
             stream=True,
         )
         if response.status_code != 200:
-            body = response.content.decode("utf-8", "replace")[:300]
+            body = (await response.acontent()).decode("utf-8", "replace")[:300]
             raise UpstreamError(
                 f"Image-edit upstream returned {response.status_code}",
                 status=response.status_code,
@@ -1372,7 +1372,7 @@ async def _stream_lite_generate(
             stream=True,
         )
         if response.status_code != 200:
-            body = response.content.decode("utf-8", "replace")[:300]
+            body = (await response.acontent()).decode("utf-8", "replace")[:300]
             raise UpstreamError(
                 f"Image-generation upstream returned {response.status_code}",
                 status=response.status_code,

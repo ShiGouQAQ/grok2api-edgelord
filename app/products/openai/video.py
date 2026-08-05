@@ -351,7 +351,7 @@ async def _stream_video_request(
             stream=True,
         )
         if response.status_code != 200:
-            body = response.content.decode("utf-8", "replace")[:300]
+            body = (await response.acontent()).decode("utf-8", "replace")[:300]
             raise UpstreamError(
                 f"Video upstream returned {response.status_code}",
                 status=response.status_code,

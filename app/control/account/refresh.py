@@ -234,6 +234,19 @@ class AccountRefreshService:
                 )
                 return
 
+            # Build/console 配额不走 grok.com rate-limits（同 _refresh_one guard）：
+            # build→billing API、console→/v1/usage DPoP；误调会 401/429（2026-08-05 14×429 burst）
+            if record.pool == "build" or record.provider == "grok_build":
+                await self._apply_single_mode(
+                    record, mode_id, window=None, is_use=True, use_at_ms=now_ms()
+                )
+                return
+            if record.provider == "grok_console":
+                await self._apply_single_mode(
+                    record, mode_id, window=None, is_use=True, use_at_ms=now_ms()
+                )
+                return
+
             try:
                 window = await self._fetch_mode_quota(token, record.pool, mode_id)
             except UpstreamError as exc:
@@ -464,7 +477,7 @@ class AccountRefreshService:
         *,
         apply_fallback: bool,
     ) -> RefreshResult:
-        """Probe Build OAuth billing (api.x.ai/billing/usage) and persist it."""
+        """Probe Build OAuth billing (cli-chat-proxy.grok.com/v1/billing) and persist it."""
         from dataclasses import asdict
 
         from app.dataplane.reverse.protocol.xai_billing import fetch_build_billing
