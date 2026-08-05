@@ -31,8 +31,14 @@ from app.dataplane.reverse.protocol.tool_prompt import (
     extract_tool_names,
     inject_into_message,
 )
-from app.dataplane.reverse.protocol.tool_parser import parse_tool_calls
-from app.products._routing_policy import routing_attempt_policy
+from app.dataplane.reverse.protocol.tool_parser import (
+    parse_tool_calls,
+    schema_contains_reachable_integer,
+)
+from app.products._routing_policy import (
+    new_routing_attempt_policy,
+    routing_attempt_policy,
+)
 
 from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai.chat import _configured_retry_codes, _should_retry_upstream
@@ -49,6 +55,27 @@ def _log_task_exception(task: "asyncio.Task") -> None:
     exc = task.exception() if not task.cancelled() else None
     if exc:
         logger.warning("background task failed: task={} error={}", task.get_name(), exc)
+
+
+def _function_schemas(tools: list[dict] | None) -> dict[str, Any]:
+    """Collect alias → parameters for function tools whose schema contains a
+    reachable integer constraint (Go functionSchemas population, 8b5c1ed6)."""
+    if not tools:
+        return {}
+    schemas: dict[str, Any] = {}
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        name = tool.get("name")
+        parameters = tool.get("parameters")
+        if (
+            isinstance(name, str)
+            and name
+            and isinstance(parameters, dict)
+            and schema_contains_reachable_integer(parameters)
+        ):
+            schemas[name] = parameters
+    return schemas
 
 
 async def _quota_sync(token: str, mode_id: int) -> None:
@@ -97,13 +124,19 @@ async def create(
     tools: list[dict] | None = None,
     tool_choice: Any = None,
     agent_id: str | None = None,
+    previous_response_id: str | None = None,
 ) -> dict | AsyncGenerator[str, None]:
     """Build models /v1/responses handler."""
 
     cfg = get_config()
     spec = resolve_model(model)
     timeout_s = cfg.get_float("chat.timeout", 120.0)
-    policy = routing_attempt_policy(selection_max_retries())
+    # Go service.go: ownership != nil → newRoutingAttemptPolicy(1). Build is
+    # the stored-responses provider upstream: keep the chain on one account.
+    if previous_response_id:
+        policy = new_routing_attempt_policy(1)
+    else:
+        policy = routing_attempt_policy(selection_max_retries())
     retry_codes = _configured_retry_codes(cfg)
     _agent_id = agent_id or "grok2api-default-agent"
 
@@ -125,6 +158,8 @@ async def create(
         )
 
     effort = "low" if emit_think else "none"
+
+    schemas = _function_schemas(tools)
 
     from app.dataplane.account import _directory as _acct_dir
 
@@ -155,10 +190,11 @@ async def create(
                 success = False
                 fail_exc: BaseException | None = None
                 _retry = False
-                adapter = BuildStreamAdapter()
+                adapter = BuildStreamAdapter(schemas=schemas)
                 text_buf: list[str] = []
                 sieve = ToolSieve(tool_names) if tool_names else None
                 tool_call_items: list[dict] | None = None
+                native_fc_items: list[dict[str, Any]] = []
                 ended = False
 
                 try:
@@ -171,6 +207,7 @@ async def create(
                         stream=True,
                         tools=tools,
                         tool_choice=tool_choice,
+                        previous_response_id=previous_response_id,
                     )
 
                     try:
@@ -241,9 +278,25 @@ async def create(
                             items = adapter.feed(event_type, data)
                             for item in items:
                                 item_type = item.get("type", "")
+                                if item_type == "sse":
+                                    if (
+                                        item["event"] == "response.output_item.done"
+                                        and isinstance(
+                                            item["payload"].get("item"), dict
+                                        )
+                                        and item["payload"]["item"].get("type")
+                                        == "function_call"
+                                    ):
+                                        native_fc_items.append(item["payload"]["item"])
+                                    yield format_sse(item["event"], item["payload"])
+                                    continue
                                 if item_type == "text":
                                     delta = item.get("delta", "")
-                                    if sieve is not None and tool_call_items is None:
+                                    if (
+                                        sieve is not None
+                                        and tool_call_items is None
+                                        and not native_fc_items
+                                    ):
                                         safe_text, parsed_calls = sieve.feed(delta)
                                         if parsed_calls is not None:
                                             fc_items = _build_fc_items(parsed_calls)
@@ -283,7 +336,11 @@ async def create(
                                 break
 
                         # Flush sieve after stream ends
-                        if sieve is not None and tool_call_items is None:
+                        if (
+                            sieve is not None
+                            and tool_call_items is None
+                            and not native_fc_items
+                        ):
                             remaining = sieve.flush()
                             if remaining:
                                 fc_items = _build_fc_items(remaining)
@@ -298,8 +355,9 @@ async def create(
                             len(adapter.full_text),
                         )
 
-                        if tool_call_items:
-                            output_tokens = estimate_tool_call_tokens(tool_call_items)
+                        final_items = native_fc_items or tool_call_items
+                        if final_items:
+                            output_tokens = estimate_tool_call_tokens(final_items)
                             yield format_sse(
                                 "response.completed",
                                 {
@@ -308,7 +366,7 @@ async def create(
                                         response_id,
                                         model,
                                         "completed",
-                                        tool_call_items,
+                                        final_items,
                                         usage=build_resp_usage(
                                             estimate_prompt_tokens(messages),
                                             output_tokens,
@@ -321,7 +379,7 @@ async def create(
                             logger.info(
                                 "build responses stream tool_calls: model={} calls={} attempt={}/{}",
                                 model,
-                                len(tool_call_items),
+                                len(final_items),
                                 attempt + 1,
                                 policy.total_attempts,
                             )
@@ -412,9 +470,8 @@ async def create(
 
                     except UpstreamError as exc:
                         fail_exc = exc
-                        if (
-                            _should_retry_upstream(exc, retry_codes)
-                            and policy.has_next(attempt)
+                        if _should_retry_upstream(exc, retry_codes) and policy.has_next(
+                            attempt
                         ):
                             _retry = True
                             logger.warning(
@@ -482,6 +539,7 @@ async def create(
                 stream=True,
                 tools=tools,
                 tool_choice=tool_choice,
+                previous_response_id=previous_response_id,
             )
 
             try:
@@ -499,7 +557,9 @@ async def create(
                 if tool_names:
                     from .responses import _build_fc_items
 
-                    parse_result = parse_tool_calls(full_text, tool_names)
+                    parse_result = parse_tool_calls(
+                        full_text, tool_names, schemas=schemas
+                    )
                     if parse_result.calls:
                         output_items = _build_fc_items(parse_result.calls)
                         output_tokens = estimate_tool_call_tokens(parse_result.calls)
@@ -548,7 +608,9 @@ async def create(
 
             except UpstreamError as exc:
                 fail_exc = exc
-                if _should_retry_upstream(exc, retry_codes) and policy.has_next(attempt):
+                if _should_retry_upstream(exc, retry_codes) and policy.has_next(
+                    attempt
+                ):
                     logger.warning(
                         "build responses non-stream retry: attempt={}/{} status={}",
                         attempt + 1,

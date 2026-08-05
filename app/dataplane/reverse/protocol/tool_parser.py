@@ -724,3 +724,55 @@ def release_buffered_function_arguments(buffer: FunctionArgumentsBuffer) -> None
     )
     buffer._chunks = []
     buffer._bytes = 0
+
+
+class StreamFunctionArgumentsBuffer:
+    """Per-call streamed function_call arguments state machine.
+
+    Port of Go 8b5c1ed6 responsesStreamCall. Deltas accumulate in a
+    FunctionArgumentsBuffer; the last delta payload is kept so .done can
+    re-emit a corrected delta carrying the full normalized arguments.
+    On overflow the call falls back to passthrough and the buffered text is
+    flushed verbatim.
+    """
+
+    __slots__ = ("_buffer", "last_delta")
+
+    def __init__(self) -> None:
+        self._buffer = FunctionArgumentsBuffer()
+        self.last_delta: dict[str, Any] | None = None
+
+    def feed_delta(self, delta: str, payload: dict[str, Any]) -> str | None:
+        """feed_delta buffers one delta fragment.
+
+        Returns None when buffered. On cap overflow returns the flushed
+        buffered text: the caller emits it as one delta plus the current
+        delta verbatim, then continues in passthrough.
+        """
+        flushed = self._buffer.feed(delta)
+        if flushed is not None:
+            self.last_delta = None
+            return flushed
+        self.last_delta = dict(payload)
+        return None
+
+    def is_passthrough(self) -> bool:
+        return self._buffer.is_passthrough()
+
+    def done(self, arguments: str, schema: Any) -> tuple[str, dict[str, Any] | None]:
+        """done normalizes the full arguments and releases the buffer.
+
+        Returns (normalized, corrected last-delta payload or None). The
+        caller emits the corrected delta (when not None) followed by a
+        .done event carrying the normalized arguments.
+        """
+        if not arguments:
+            arguments = self._buffer.text()
+        normalized, _ = normalize_function_arguments(arguments, schema)
+        release_buffered_function_arguments(self._buffer)
+        last_delta = self.last_delta
+        self.last_delta = None
+        if last_delta is not None:
+            last_delta = dict(last_delta)
+            last_delta["delta"] = normalized
+        return normalized, last_delta
