@@ -70,6 +70,8 @@ CONSOLE_MODELS: dict[str, str] = {
     "grok-4.20-multi-agent-medium": "grok-4.20-multi-agent-0309",
     "grok-4.20-multi-agent-high": "grok-4.20-multi-agent-0309",
     "grok-4.20-multi-agent-xhigh": "grok-4.20-multi-agent-0309",
+    "grok-4.5-console": "grok-4.5",
+    "grok-build-console": "grok-build-0.1",
 }
 
 # 需要附带 reasoning 字段的模型（grok-4.3 系列需要，grok-4.20 系列不需要）
@@ -77,6 +79,7 @@ _MODELS_WITH_REASONING_FIELD: frozenset[str] = frozenset(
     {
         "grok-4.3",
         "grok-4.20-multi-agent-0309",
+        "grok-4.5",
     }
 )
 
@@ -97,6 +100,8 @@ _MODEL_FIXED_EFFORT: dict[str, str] = {
 # 特殊 max_output_tokens（默认 1_000_000）
 _MODEL_MAX_OUTPUT_TOKENS: dict[str, int] = {
     "grok-4.20-multi-agent-0309": 2_000_000,
+    # Go catalog.go: grok-build-0.1 MaxOutputTokens = 256_000
+    "grok-build-0.1": 256_000,
 }
 
 # 支持 web_search / x_search 工具的模型
@@ -107,18 +112,21 @@ _MODELS_WITH_SEARCH_TOOLS: frozenset[str] = frozenset(
         "grok-4.20-0309-reasoning",
         "grok-4.20-0309-non-reasoning",
         "grok-4.3",
+        "grok-4.5",
+        "grok-build-0.1",
     }
 )
 
 # reasoning effort 映射：OpenAI reasoning_effort → console API effort
+# (mirror Go normalizeEffort: "xhigh" and "max" both stay "xhigh")
 _EFFORT_MAP: dict[str, str] = {
     "none": "none",
     "minimal": "low",
     "low": "low",
     "medium": "medium",
     "high": "high",
-    "xhigh": "high",
-    "max": "high",
+    "xhigh": "xhigh",
+    "max": "xhigh",
 }
 
 
@@ -370,7 +378,7 @@ async def stream_console_chat(
             await proxy.feedback(lease, _transport_error_feedback())
             raise UpstreamError(f"Console transport failed: {exc}", status=502) from exc
 
-        if response.status_code != 200:
+        if not (200 <= response.status_code < 300):
             try:
                 body = await response.atext()
             except Exception:

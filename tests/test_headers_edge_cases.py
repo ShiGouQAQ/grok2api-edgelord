@@ -623,6 +623,47 @@ class TestClientHints:
         result = headers._client_hints("chrome", CHROME_WIN_UA)
         assert result["Sec-Ch-Ua-Model"] == ""
 
+    def test_hints_derived_from_ua_version(self):
+        """Sec-Ch-Ua is derived from the UA version, not static constants."""
+        result = headers._client_hints("chrome", CHROME_WIN_UA)
+        assert '"Google Chrome";v="120"' in result["Sec-Ch-Ua"]
+        assert '"Chromium";v="120"' in result["Sec-Ch-Ua"]
+
+    def test_platform_derived_from_ua(self):
+        """Platform matches the UA (macOS UA → macOS, not the static Windows)."""
+        result = headers._client_hints("chrome", CHROME_MAC_UA)
+        assert result["Sec-Ch-Ua-Platform"] == '"macOS"'
+
+    def test_edge_brand_from_ua(self):
+        """Edg token in UA → brand is Microsoft Edge, version derived."""
+        result = headers._client_hints(None, EDGE_UA)
+        assert '"Microsoft Edge";v="120"' in result["Sec-Ch-Ua"]
+
+    def test_no_arch_info_no_arch_hints(self):
+        """UA without arch markers → no Sec-Ch-Ua-Arch / -Bitness."""
+        ua = (
+            "Mozilla/5.0 (Windows NT 10.0) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+        result = headers._client_hints("chrome", ua)
+        assert "Sec-Ch-Ua-Arch" not in result
+        assert "Sec-Ch-Ua-Bitness" not in result
+
+    def test_android_mobile_derived(self):
+        """Android UA → mobile ?1, platform Android."""
+        result = headers._client_hints("chrome", CHROME_ANDROID_UA)
+        assert result["Sec-Ch-Ua-Mobile"] == "?1"
+        assert result["Sec-Ch-Ua-Platform"] == '"Android"'
+
+    def test_unknown_ua_falls_back_to_constants(self):
+        """Chromium browser config with unparseable UA → static constants."""
+        result = headers._client_hints("chrome120", "Mozilla/5.0 (Windows NT 10.0)")
+        assert result["Sec-Ch-Ua"] == (
+            '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"'
+        )
+        assert "Sec-Ch-Ua-Arch" not in result
+
 
 # ===========================================================================
 # _sanitize

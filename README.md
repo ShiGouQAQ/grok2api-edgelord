@@ -351,6 +351,7 @@ basic 表示 free 账号，super 和 heavy 为付费。
 | `grok-4.20-multi-agent-medium` | medium（固定）→ 4 agents | basic |
 | `grok-4.20-multi-agent-high` | high（固定）→ 16 agents | basic |
 | `grok-4.20-multi-agent-xhigh` | xhigh（固定）→ 16 agents | basic |
+| `grok-4.5-console` | 用户传入（默认 medium） | basic |
 | `grok-build-console` | 默认 | basic |
 
 **Console 配额**：20 次 / 60 分钟窗口，采用延迟恢复轮换策略（消耗至剩余 12 次时启动计时器，评分机制自动轮换到其他账号）。后台每 30 秒巡检并自动重置过期配额。

@@ -70,6 +70,8 @@ MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("grok-4.20-multi-agent-high",             ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 Multi-Agent High", supports_reasoning=True),
     ModelSpec("grok-4.20-multi-agent-xhigh",            ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 Multi-Agent XHigh", supports_reasoning=True),
     ModelSpec("grok-4.20-0309-non-reasoning-console",   ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.20 0309 Non-Reasoning (Console)"),
+    ModelSpec("grok-4.5-console",                       ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.5 (Console)", supports_reasoning=True),
+    ModelSpec("grok-build-console",                     ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok Build (Console)"),
 
     # === Build (grok.com build 端点) ==========================================
     ModelSpec("grok-4.5",              ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok 4.5 (Build)"),

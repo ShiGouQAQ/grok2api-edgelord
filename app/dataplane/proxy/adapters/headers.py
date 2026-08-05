@@ -138,25 +138,60 @@ def _arch(ua: str) -> Optional[str]:
 def _client_hints(browser: Optional[str], ua: Optional[str]) -> dict[str, str]:
     """Build Sec-CH-UA client hints headers.
 
-    Uses centralized browser config constants for consistent fingerprinting.
-    Returns empty dict for non-chromium browsers.
+    Mirrors Go applyChromiumClientHints: when the User-Agent carries a
+    Chromium version token, every hint is derived from the UA itself so
+    Sec-Ch-Ua / platform / arch never contradict the UA (contradictory
+    fingerprints raise Cloudflare challenge rates). Sec-Ch-Ua-Arch /
+    -Bitness are emitted only when the UA actually names an architecture.
+    Non-chromium UAs get no hints. When the UA is unparseable but the
+    browser config says Chromium, fall back to the static browser constants.
     """
+    ua_str = ua or ""
+    lower = ua_str.lower()
+
+    # UA-derived brand + major version (mirror Go chromium.go regexes)
+    brand = "Google Chrome"
+    match = re.search(r"(?i)\b(?:chrome|chromium|crios)/(\d{2,3})(?:\.\d+)*", ua_str)
+    edge = re.search(r"(?i)\b(?:edg|edga|edgios)/(\d{2,3})(?:\.\d+)*", ua_str)
+    if edge:
+        brand, match = "Microsoft Edge", edge
+    elif "chromium/" in lower:
+        brand = "Chromium"
+
     b = (browser or "").lower()
-    u = (ua or "").lower()
     is_chromium = any(k in b for k in ("chrome", "chromium", "edge", "brave")) or any(
-        k in u for k in ("chrome", "chromium", "edg")
+        k in lower for k in ("chrome", "chromium", "edg")
     )
-    if not is_chromium or "firefox" in u or ("safari" in u and "chrome" not in u):
+    if "firefox" in lower or ("safari" in lower and "chrome" not in lower):
+        return {}
+    if not is_chromium and match is None:
         return {}
 
-    return {
-        "Sec-Ch-Ua": BROWSER_SEC_CH_UA,
-        "Sec-Ch-Ua-Mobile": BROWSER_SEC_CH_UA_MOBILE,
-        "Sec-Ch-Ua-Platform": BROWSER_SEC_CH_UA_PLATFORM,
+    if match is not None:
+        version = match.group(1)
+        sec_ch_ua = (
+            f'"{brand}";v="{version}", "Chromium";v="{version}", "Not(A:Brand";v="24"'
+        )
+        platform = _platform(ua_str)
+        mobile = "?1" if ("mobile" in lower or platform in ("Android", "iOS")) else "?0"
+    else:
+        # Fallback: UA has no parseable version but browser config is Chromium.
+        sec_ch_ua = BROWSER_SEC_CH_UA
+        platform = _platform(ua_str) or BROWSER_SEC_CH_UA_PLATFORM
+        mobile = BROWSER_SEC_CH_UA_MOBILE
+
+    hints: dict[str, str] = {
+        "Sec-Ch-Ua": sec_ch_ua,
+        "Sec-Ch-Ua-Mobile": mobile,
         "Sec-Ch-Ua-Model": "",
-        "Sec-Ch-Ua-Arch": _arch(ua or "") or "x86",
-        "Sec-Ch-Ua-Bitness": "64",
     }
+    if platform:
+        hints["Sec-Ch-Ua-Platform"] = f'"{platform}"'
+    arch = _arch(ua_str)
+    if arch:
+        hints["Sec-Ch-Ua-Arch"] = arch
+        hints["Sec-Ch-Ua-Bitness"] = "64"
+    return hints
 
 
 # ---------------------------------------------------------------------------

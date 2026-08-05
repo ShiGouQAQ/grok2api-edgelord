@@ -12,8 +12,10 @@ import pathlib
 import urllib.parse
 from urllib.parse import urlparse
 
-ASSETS_LIST_URL      = "https://grok.com/rest/assets"
-ASSETS_DELETE_URL    = "https://grok.com/rest/assets-metadata"   # append /{asset_id}
+from app.dataplane.reverse.transport.trusted_hosts import trusted_download_url
+
+ASSETS_LIST_URL = "https://grok.com/rest/assets"
+ASSETS_DELETE_URL = "https://grok.com/rest/assets-metadata"  # append /{asset_id}
 ASSETS_DOWNLOAD_BASE = "https://assets.grok.com"
 
 # app-chat file management (used by asset_upload.py).
@@ -21,13 +23,14 @@ APP_CHAT_UPLOAD_URL = "https://grok.com/rest/app-chat/upload-file"
 
 # MIME type mapping used for download content-type inference.
 _EXTENSION_MIME: dict[str, str] = {
-    ".jpg":  "image/jpeg",
+    ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
-    ".png":  "image/png",
+    ".png": "image/png",
     ".webp": "image/webp",
-    ".mp4":  "video/mp4",
+    ".mp4": "video/mp4",
     ".webm": "video/webm",
 }
+
 
 def asset_delete_url(asset_id: str) -> str:
     return f"{ASSETS_DELETE_URL}/{asset_id}"
@@ -43,11 +46,13 @@ def resolve_download_url(file_path: str) -> tuple[str, str, str]:
     """
     parsed = urlparse(file_path)
     if parsed.scheme and parsed.netloc:
-        url    = file_path
+        # SSRF guard (Go a05e06a2): full URLs must be on the trusted media
+        # host allow-list; raises ValueError otherwise.
+        url = trusted_download_url(file_path)
         origin = f"{parsed.scheme}://{parsed.netloc}"
     else:
-        path   = file_path if file_path.startswith("/") else f"/{file_path}"
-        url    = f"{ASSETS_DOWNLOAD_BASE}{path}"
+        path = file_path if file_path.startswith("/") else f"/{file_path}"
+        url = f"{ASSETS_DOWNLOAD_BASE}{path}"
         origin = ASSETS_DOWNLOAD_BASE
     return url, origin, f"{origin}/"
 
@@ -74,8 +79,12 @@ def resolve_asset_reference(
 
 
 __all__ = [
-    "ASSETS_LIST_URL", "ASSETS_DELETE_URL", "ASSETS_DOWNLOAD_BASE",
+    "ASSETS_LIST_URL",
+    "ASSETS_DELETE_URL",
+    "ASSETS_DOWNLOAD_BASE",
     "APP_CHAT_UPLOAD_URL",
-    "asset_delete_url", "resolve_download_url", "infer_content_type",
+    "asset_delete_url",
+    "resolve_download_url",
+    "infer_content_type",
     "resolve_asset_reference",
 ]

@@ -5,6 +5,7 @@ retry-on-reset, and timeout.
 """
 
 from typing import AsyncGenerator
+from urllib.parse import urlparse
 
 import orjson
 
@@ -13,6 +14,10 @@ from app.platform.errors import UpstreamError
 from app.control.proxy.models import ProxyLease
 from app.dataplane.proxy.adapters.headers import build_http_headers
 from app.dataplane.proxy.adapters.session import ResettableSession, build_session_kwargs
+from app.dataplane.reverse.transport.trusted_hosts import (
+    MAX_MEDIA_BODY_BYTES,
+    trusted_download_url,
+)
 
 
 async def post_stream(
@@ -233,8 +238,21 @@ async def get_bytes_stream(
 ) -> AsyncGenerator[bytes, None]:
     """GET *url* and yield raw bytes chunks from the streaming response.
 
-    Raises ``UpstreamError`` on non-200 status.
+    Media downloads only: the URL host must be on the trusted media
+    allow-list (Go a05e06a2), the final redirect target is re-validated,
+    the Content-Type must be media-like, and the body is capped at 32 MiB.
+
+    Raises ``UpstreamError`` on non-200 status, untrusted hosts, invalid
+    Content-Type, empty/oversized bodies.
     """
+    # SSRF guard: only full http(s) URLs are checked; relative paths are not
+    # media downloads (none of the current callers pass them).
+    if urlparse(url).scheme in ("http", "https"):
+        try:
+            trusted_download_url(url)
+        except ValueError as exc:
+            raise UpstreamError(str(exc), status=502) from exc
+
     headers = build_http_headers(
         token,
         content_type=None,
@@ -258,6 +276,15 @@ async def get_bytes_stream(
             stream=True,
             allow_redirects=True,
         )
+        # Redirect hardening (Go a05e06a2): the effective URL after any
+        # redirects must still be on the trusted media allow-list.
+        try:
+            trusted_download_url(response.url or url)
+        except ValueError as exc:
+            await session.close()
+            raise UpstreamError(
+                f"Media download redirected to untrusted host: {exc}", status=502
+            ) from exc
         if response.status_code != 200:
             try:
                 body = (response.content).decode("utf-8", "replace")[:400]
@@ -275,6 +302,24 @@ async def get_bytes_stream(
                 status=response.status_code,
                 body=body,
             )
+        # Content-Type sanity check (Go a05e06a2): allow empty/octet-stream,
+        # otherwise the media must be image/* or video/*.
+        content_type = (
+            (response.headers.get("Content-Type", "") or "")
+            .split(";")[0]
+            .strip()
+            .lower()
+        )
+        if (
+            content_type
+            and content_type != "application/octet-stream"
+            and not content_type.startswith(("image/", "video/"))
+        ):
+            await session.close()
+            raise UpstreamError(
+                f"Media download returned invalid Content-Type: {content_type}",
+                status=502,
+            )
     except Exception:
         try:
             await session.close()
@@ -283,10 +328,18 @@ async def get_bytes_stream(
         raise
 
     async def _chunks() -> AsyncGenerator[bytes, None]:
+        total = 0
         try:
             async for chunk in response.aiter_content():
                 if chunk:
+                    total += len(chunk)
+                    if total > MAX_MEDIA_BODY_BYTES:
+                        raise UpstreamError(
+                            "Media download exceeded 32 MiB limit", status=502
+                        )
                     yield chunk
+            if total == 0:
+                raise UpstreamError("Media download returned empty content", status=502)
         finally:
             try:
                 await session.close()

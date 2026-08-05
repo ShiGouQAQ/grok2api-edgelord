@@ -640,3 +640,46 @@
    - 跳过：cd7d3cd3（relational SQL）、2a320e69（test-only）、75fa94f8/95d6471a/a4405eda（test/version）。
    - 待评估：a05e06a2 全量移植（console media ~600-800 行，命名冲突需设计决策）；SSRF 下载加固（resolve_download_url/get_bytes_stream 无主机白名单/重定向校验/32MiB 限制）；grok-4.5-console / grok-build-console 模型缺失（README 声称 grok-build-console 可用但 registry 未注册）。
 3. **测试基建修复**：`tests/test_headers_edge_cases.py` sys.modules 注入 fixture 泄漏空壳包（`app.control.proxy` 等 setdefault 创建后未恢复，导致后续收集 `import app.control.proxy.*` 的测试 ModuleNotFoundError）→ restore 时剔除无 `__path__` 的 ModuleType。全量：**1655 passed / 1 skipped**。
+
+---
+
+## a05e06a2 切片 (b)：Console 媒体下载 SSRF 加固（2026-08-05 移植）
+
+**移植内容**：Go `backend/internal/infra/provider/console/media.go` 的下载加固（`trustedConsoleImageURL` / `trustedConsoleVideoHost` / `downloadConsoleImageAttempt` 重定向校验 + 32MiB 上限 + Content-Type 校验）→ Python：
+
+| 文件 | 改动 |
+|------|------|
+| `app/dataplane/reverse/transport/trusted_hosts.py`（新） | 共享白名单模块：`TRUSTED_IMAGE_HOSTS` = {assets.grok.com, imagine-public.x.ai, imgen.x.ai}（Go `trustedConsoleImageHost` 精确匹配）、`TRUSTED_VIDEO_HOST` = vidgen.x.ai（含 `*.vidgen.x.ai` 子域，Go `trustedConsoleVideoHost`）、`MAX_MEDIA_BODY_BYTES` = 32MiB（Go `consoleImageBodyLimit`）；`trusted_download_url()` 复刻 Go 语义（https+白名单主机通过；否则同 scheme+host 于 base_url 通过；userinfo/无 host 拒绝）；`is_trusted_media_host()` |
+| `app/dataplane/reverse/transport/http.py` | `get_bytes_stream()`：请求前对完整 http(s) URL 执行白名单校验；响应后对 `response.url`（curl_cffi 重定向后有效 URL，等价 Go `response.Request.URL`）**重新校验**（防重定向逃逸白名单）；Content-Type 非空且非 `application/octet-stream` 时须为 `image/*` 或 `video/*`（Go 图片+视频校验并集）；流式读取累计 32MiB 超限报错 + 空 body 报错 |
+| `app/dataplane/reverse/protocol/xai_assets.py` | `resolve_download_url()`：完整 URL 一律过 `trusted_download_url()`，未受信主机抛 ValueError（覆盖 download_asset / `_absolutize_video_url` / `_absolutize_asset_url` / `resolve_asset_reference` 全部调用方，根因层修复） |
+| `tests/test_trusted_hosts.py`（新） | 白名单/拒绝集/base_url 回退/resolve_download_url 集成测试（5 个用例） |
+
+**调用方审计**：`get_bytes_stream` 唯一调用方 = `download_asset`（chat.py:201 / images.py:235 / video.py:585 图片与视频下载）；`resolve_download_url` 4 个调用方全部为媒体路径，**无非媒体调用方** → 集中层强制安全，无需 per-caller 门。chat.py `_resolve_image` 对所有下载异常已有回退到上游 URL 的行为，fail-closed 不破坏现有容错。
+
+**测试**：全量 **1667 passed / 1 skipped**（不含本批基线 1661 + test_trusted_hosts 新增 6）。
+
+---
+
+## 2026-08-05 移植：console 模型注册 + Chromium 指纹一致性（多 Agent 并行批）
+
+**来源**：Go `catalog.go` consoleAlias（grok-4.5-console → grok-4.5、grok-build-console → grok-build-0.1）+ `headers.go`/chromium.go `applyChromiumClientHints`。
+
+### 1. console 模型注册（grok-4.5-console / grok-build-console）
+
+| 文件 | 改动 |
+|------|------|
+| `app/control/model/registry.py` | console 段新增 `ModelSpec("grok-4.5-console", ModeId.CONSOLE, Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.5 (Console)", supports_reasoning=True)` + `ModelSpec("grok-build-console", ModeId.CONSOLE, Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok Build (Console)")` |
+| `app/dataplane/reverse/protocol/xai_console_chat.py` | `CONSOLE_MODELS` 新增 `grok-4.5-console→grok-4.5`、`grok-build-console→grok-build-0.1`；`_MODELS_WITH_REASONING_FIELD` +`grok-4.5`（Go SupportsReasoning）；`_MODELS_WITH_SEARCH_TOOLS` +`grok-4.5`/`grok-build-0.1`（Go SearchTools）；`_MODEL_MAX_OUTPUT_TOKENS` +`grok-build-0.1: 256_000`（Go MaxOutputTokens=256K，默认 1M） |
+| `README.md` | console 模型表补 `grok-4.5-console`（grok-build-console 原已列出） |
+
+### 2. Chromium 指纹一致性（DPoP 审计跟进）
+
+| 文件 | 改动 |
+|------|------|
+| `app/dataplane/proxy/adapters/headers.py` | `_client_hints()` 从 UA 派生（复刻 Go `applyChromiumClientHints`）：brand/版本解析自 UA token（chrome/chromium/crios→Google Chrome，edg/edga/edgios→Microsoft Edge，纯 chromium/→Chromium）；`Sec-Ch-Ua` = `"{brand}";v="{ver}", "Chromium";v="{ver}", "Not(A:Brand";v="24"`（Go 精确格式）；平台自 UA（Windows/macOS/Android/iOS/Linux）；Mobile=`?1` 当 UA 含 mobile 或平台 Android/iOS；**arch/bitness 仅当 UA 声明架构才输出**（arm/aarch64/arm64→arm；x86_64/x64/win64/intel→x86+64），无架构信息不发（原 `_arch(ua) or "x86"` 恒发 → 修复）。UA 无版本 token 但 browser 配置为 Chromium → 回退静态常量 |
+| `app/dataplane/reverse/protocol/xai_console_chat.py` | `_EFFORT_MAP`：xhigh→"xhigh"、max→"xhigh"（原 xhigh/max→"high"，Go normalizeEffort 保留 xhigh）；`stream_console_chat` 状态码 `200<=s<300`（原 `!=200`） |
+| `tests/test_headers_edge_cases.py` | +6 测试（UA 派生版本/平台/Edge brand/无架构不输 arch/Android mobile/未知 UA 回退常量） |
+
+**调查结论（不改代码）**：`_post_console_with_dpop` 401 重试同一 curl_cffi session，未 drain 的 401 body 不阻塞重试（curl 对未读完连接开新连接/新 stream，HTTP/1.1 不复用、HTTP/2 新流），无 hang 无损坏；Go `ReadDiagnosticBody` 仅为日志/连接复用优化 → 良性不动。
+
+**测试**：合并后全量 **1667 passed / 1 skipped**。
