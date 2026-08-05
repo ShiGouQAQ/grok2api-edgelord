@@ -99,6 +99,7 @@ app/
    - **media 格式键在 `[features]`**：`features.image_format`/`features.video_format`/`features.imagine_public_image_proxy`（2026-08-04 从 `[build]` 迁回，与 jiujiu532 上游一致）。
    - **curl_cffi 响应读 body 必须匹配 stream 模式**：`stream=True` 的响应用 `await resp.acontent()`/`aiter_*()`；非 stream 用同步 `resp.text`/`resp.content`。混用必抛 `AssertionError: stream mode is not enabled`，且常被 `except Exception` 吞成空 body → 上层误判（DPoP 502 根因之一，2026-08-05 修复）。mock 响应时同步模拟此行为，否则回归测试测不出。
    - **Build billing 端点是 `cli-chat-proxy.grok.com/v1/billing`**，不是 `api.x.ai/billing/usage`（后者恒 404，2026-08-05 浏览器实测修复）；响应值是 `{"val": int}` 对象（`config.monthlyLimit.val` 等），`parse_billing` 已兼容裸 int。
+   - **DPoP proof 的 `iat` 依赖服务器时钟，NTP 漂移会整链路 401**：`sign_dpop_proof`（`app/dataplane/reverse/protocol/dpop.py`）用 `time.time()` 生成 iat；服务器时钟比 x.ai 慢 >~60s 时，所有 DPoP 请求（console chat/usage/media）返回 **401 nginx HTML**（非业务 JSON），且会被误判为 reauth_required。排查顺序：先查 `curl -sI https://console.x.ai/` 的 `Date` 头对比本机 `date -u`（偏差应 <5s），再怀疑代码。Go 上游同样依赖 `time.Now()`，无补偿——代码偏移假设通常不成立（2026-08-05 生产故障，NTP 同步即恢复）。
 3. **Account pools** — Three tiers: `basic` (free), `super` (paid), `heavy` (premium)
 4. **Proxy modes** — `direct`, `single_proxy`, `proxy_pool`, `mihomo`
 5. **Clearance modes** — `none`, `manual`, `turnstile`, `flaresolverr`

@@ -749,3 +749,17 @@ Go `QuotaMode()`：chat 模型 → "console"，Image/ImageEdit → "console_imag
 **经验**：cli-chat-proxy.grok.com 是 Build provider 真实后端（Go 上游 Build 请求同域）；api.x.ai 无 billing 端点。免费账号 `monthlyLimit=0` → `is_paid=False` → 正确进入 free 池。
 
 **验证**：端到端 `fetch_build_billing(minted_token, proxy_url=20211)` → 200 解析成功；全量 **1684 passed / 1 skipped**。
+
+## 2026-08-05 生产 401 根因：服务器时钟漂移（NTP）vs DPoP iat（非移植差距）
+
+**现象**：生产 console chat 全 401（`attempt=1/32 status=401 body=<html>401 Authorization Required...nginx`），且 usage refresh 触发 `mark_account_reauth_required`。Go/Python 对照未发现任何代码偏移（`applyDPoPAuthorization` claims {jti,htm,htu,iat,ath}、ES256 r||s、jwk、ath=sha256(b64url) 逐字段一致）。
+
+**决定性实验**（本地同代码，真实 sso + 20211 代理 + turnstile clearance）：
+- `iat_off=0` → /v1/responses **400 业务错误**（DPoP 校验通过，到达业务层）
+- `iat_off=-96`（模拟生产偏移）→ **401 nginx HTML 与生产日志逐字节一致**
+
+**测量**：生产服务器时钟比 x.ai 慢 ~96s（`curl -I console.x.ai` Date header vs `date -u`）；NTP 同步后 **+0s**，故障消失。
+
+**结论**：DPoP `iat` 用 `time.time()`（Go 同），服务器时钟漂移 >~60s → 全部 DPoP 请求 401（nginx HTML 非业务 JSON）且被误判 reauth_required。**排查顺序：先比时钟，再查代码。** 已写入 CLAUDE.md Key Conventions。
+
+**验证**：本地 iat_off=0 实验 200/400 通过；生产 NTP 后恢复正常；全量 1684 passed / 1 skipped。
