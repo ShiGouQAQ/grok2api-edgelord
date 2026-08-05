@@ -1168,6 +1168,92 @@ class TestDeviceFlowMint:
                 await sso_build._mint_via_device_flow("sso-token")
 
     @pytest.mark.asyncio
+    async def test_device_flow_poll_403_access_denied_still_runtime_error(
+        self, _patch_sleep: Any
+    ) -> None:
+        """Poll 403 with 'Access denied' text → RuntimeError (CF/anti-bot, not credential)."""
+        device_resp = _make_ctx_resp(
+            {
+                "device_code": "dc-123",
+                "user_code": "UC-ABC",
+                "verification_uri_complete": "https://auth.x.ai/activate?user_code=UC-ABC",
+                "interval": 5,
+                "expires_in": 1800,
+            }
+        )
+        pre_resp = _make_url_resp(status=200, url="https://accounts.x.ai/")
+        verify_uri_resp = _make_url_resp(status=200)
+        verify_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/consent")
+        approve_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/done")
+        error_resp = _make_ctx_resp(
+            {
+                "error": "cf_challenge",
+                "error_description": "Access denied by Cloudflare",
+            },
+            status=403,
+        )
+
+        responses = [
+            pre_resp,
+            device_resp,
+            verify_uri_resp,
+            verify_resp,
+            approve_resp,
+            error_resp,
+        ]
+
+        with (
+            patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
+            _patch_sleep,
+        ):
+            mock_cls.return_value = _make_session(responses)
+            with pytest.raises(RuntimeError, match="poll failed"):
+                await sso_build._mint_via_device_flow("sso-token")
+
+    @pytest.mark.asyncio
+    async def test_device_flow_poll_429_access_denied_still_runtime_error(
+        self, _patch_sleep: Any
+    ) -> None:
+        """Poll 429 with 'Access denied' text → RuntimeError (rate limit, not credential)."""
+        device_resp = _make_ctx_resp(
+            {
+                "device_code": "dc-123",
+                "user_code": "UC-ABC",
+                "verification_uri_complete": "https://auth.x.ai/activate?user_code=UC-ABC",
+                "interval": 5,
+                "expires_in": 1800,
+            }
+        )
+        pre_resp = _make_url_resp(status=200, url="https://accounts.x.ai/")
+        verify_uri_resp = _make_url_resp(status=200)
+        verify_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/consent")
+        approve_resp = _make_url_resp(status=200, url="https://auth.x.ai/device/done")
+        error_resp = _make_ctx_resp(
+            {
+                "error": "rate_limit",
+                "error_description": "Too many requests: access denied",
+            },
+            status=429,
+        )
+
+        responses = [
+            pre_resp,
+            device_resp,
+            verify_uri_resp,
+            verify_resp,
+            approve_resp,
+            error_resp,
+        ]
+
+        with (
+            patch("app.control.account.sso_build.aiohttp.ClientSession") as mock_cls,
+            _patch_sleep,
+        ):
+            mock_cls.return_value = _make_session(responses)
+            with pytest.raises(RuntimeError, match="poll failed"):
+                await sso_build._mint_via_device_flow("sso-token")
+
+    @pytest.mark.asyncio
     async def test_device_flow_poll_403_fails_fast(self, _patch_sleep: Any) -> None:
         """Poll 403 (CF challenge) → RuntimeError immediately, not a 75s wait."""
         device_resp = _make_ctx_resp(
