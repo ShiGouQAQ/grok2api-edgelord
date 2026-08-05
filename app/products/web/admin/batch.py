@@ -53,13 +53,42 @@ def _mask(token: str) -> str:
     return f"{token[:8]}...{token[-8:]}" if len(token) > 20 else token
 
 
-async def _list_all_tokens(repo: "AccountRepository") -> list[str]:
+_PROVIDERS = ("grok_web", "grok_build")
+
+
+def _coerce_provider(provider: object) -> str | None:
+    """FastAPI injects a Query object when handlers are called directly
+    (unit tests); treat anything non-str as "no filter"."""
+    return provider if isinstance(provider, str) else None
+
+
+def _matches_provider(record: object, provider: object) -> bool:
+    """True when ``record`` belongs to ``provider`` (None = no filter)."""
+    p = _coerce_provider(provider)
+    if p is None:
+        return True
+    return (getattr(record, "provider", None) or "grok_web") == p
+
+
+def _validate_provider(provider: object) -> None:
+    p = _coerce_provider(provider)
+    if p is not None and p not in _PROVIDERS:
+        raise ValidationError(f"Invalid provider: {p}", param="provider")
+
+
+async def _list_all_tokens(
+    repo: "AccountRepository", provider: str | None = None
+) -> list[str]:
     page_num, tokens = 1, []
     while True:
         page = await repo.list_accounts(
             ListAccountsQuery(page=page_num, page_size=2000)
         )
-        tokens.extend(r.token for r in page.items if is_manageable(r))
+        tokens.extend(
+            r.token
+            for r in page.items
+            if is_manageable(r) and _matches_provider(r, provider)
+        )
         if page_num >= page.total_pages or not page.items:
             break
         page_num += 1
@@ -283,15 +312,17 @@ async def batch_nsfw(
     all_manageable: bool = Query(False),
     concurrency: int | None = Query(None, ge=1),
     enabled: bool = Query(True),
+    provider: str | None = Query(None),
     repo: "AccountRepository" = Depends(get_repo),
 ):
+    _validate_provider(provider)
     tokens = [t.strip() for t in req.tokens if t.strip()]
     if all_manageable and tokens:
         raise ValidationError(
             "tokens must be empty when all_manageable=true", param="tokens"
         )
     if all_manageable:
-        tokens = await _list_all_tokens(repo)
+        tokens = await _list_all_tokens(repo, provider)
         if enabled:
             records = await repo.get_accounts(tokens)
             by_token = {r.token: r for r in records}
@@ -339,16 +370,18 @@ async def batch_refresh(
     async_mode: bool = Query(False, alias="async"),
     all_manageable: bool = Query(False),
     concurrency: int | None = Query(None, ge=1),
+    provider: str | None = Query(None),
     repo: "AccountRepository" = Depends(get_repo),
     refresh_svc: "AccountRefreshService" = Depends(get_refresh_svc),
 ):
+    _validate_provider(provider)
     tokens = [t.strip() for t in req.tokens if t.strip()]
     if all_manageable and tokens:
         raise ValidationError(
             "tokens must be empty when all_manageable=true", param="tokens"
         )
     if all_manageable:
-        tokens = await _list_all_tokens(repo)
+        tokens = await _list_all_tokens(repo, provider)
     else:
         if not tokens:
             raise ValidationError("No tokens provided", param="tokens")

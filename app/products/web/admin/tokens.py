@@ -34,6 +34,7 @@ from app.control.account.commands import (
 from app.dataplane.proxy.adapters.session import normalize_proxy_url
 from app.control.account.enums import AccountStatus
 from app.control.account.state_machine import is_manageable
+from .batch import _coerce_provider, _validate_provider
 
 if TYPE_CHECKING:
     from app.control.account.refresh import AccountRefreshService
@@ -236,14 +237,25 @@ async def _list_token_payloads(repo: "AccountRepository") -> list[dict]:
     return [_serialize_record(r) for r in await _list_all_records(repo)]
 
 
-async def _list_invalid_tokens(repo: "AccountRepository") -> list[str]:
-    fast_list = getattr(repo, "list_invalid_tokens", None)
-    if callable(fast_list):
-        return await fast_list()
+def _matches_provider_payload(item: dict, provider: object) -> bool:
+    p = _coerce_provider(provider)
+    if p is None:
+        return True
+    return (item.get("provider") or "grok_web") == p
+
+
+async def _list_invalid_tokens(
+    repo: "AccountRepository", provider: object = None
+) -> list[str]:
+    if _coerce_provider(provider) is None:
+        fast_list = getattr(repo, "list_invalid_tokens", None)
+        if callable(fast_list):
+            return await fast_list()
     return [
         item["token"]
         for item in await _list_token_payloads(repo)
-        if item.get("status")
+        if _matches_provider_payload(item, provider)
+        and item.get("status")
         not in (
             AccountStatus.ACTIVE.value,
             AccountStatus.COOLING.value,
@@ -382,8 +394,12 @@ async def delete_tokens(
 
 
 @router.delete("/tokens/invalid")
-async def delete_invalid_tokens(repo: "AccountRepository" = Depends(get_repo)):
-    tokens = await _list_invalid_tokens(repo)
+async def delete_invalid_tokens(
+    provider: str | None = Query(None),
+    repo: "AccountRepository" = Depends(get_repo),
+):
+    _validate_provider(provider)
+    tokens = await _list_invalid_tokens(repo, provider)
 
     if not tokens:
         return _json({"deleted": 0})
