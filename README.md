@@ -486,6 +486,23 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## 更新日志
 
+### 2026-08-05 — DPoP 全链路修复 + Console 媒体 + Build billing
+
+**DPoP 协议全链路（console.x.ai）**
+- 修复生产 `Console DPoP setup failed: Console DPoP token response invalid`（502）三连根因：① token 交换与请求未用同一代理 lease（cf_clearance IP 绑定错位）；② token 交换误带 `Authorization: Bearer anonymous`（CF 拦为 200 挑战页）；③ curl_cffi 非 stream 响应用 `atext()` 读 body 抛 AssertionError 被吞
+- 回归测试模拟 curl_cffi 真实行为（atext 抛 AssertionError），防止复发
+
+**Console 媒体（a05e06a2 Go→Python 移植）**
+- 新增 `grok-imagine-image-quality-console` / `grok-imagine-image-console` / `grok-imagine-video-console` 模型
+- 支持 console.x.ai 图像生成/编辑、视频生成/轮询，DPoP 认证 + trusted-host 下载白名单 + console 配额窗口
+
+**Build billing 端点修正**
+- `api.x.ai/billing/usage` 恒 404 → 真实端点为 `cli-chat-proxy.grok.com/v1/billing`（真实浏览器实测）
+- `parse_billing` 兼容 `{"val": int}` 对象形状
+
+**健壮性**
+- 5-Agent 并行清扫全库过宽 `except Exception`：stream 响应误读、静默吞失败、缺日志、缺 `from exc` 根因链
+
 ### Beyond v0.2.2 — edgelord 本地增强
 
 **CF Clearance 增强**
