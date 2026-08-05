@@ -4,10 +4,9 @@ Port of Go cli/responses_reasoning_recovery.go.
 Handles opaque reasoning decode failures by stripping encrypted content and retrying.
 """
 
-import logging
+from app.platform.logging.logger import logger
 from typing import Any
 
-logger = logging.getLogger(__name__)
 
 
 def recover_reasoning_decode_failure(

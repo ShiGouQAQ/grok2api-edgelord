@@ -1,7 +1,7 @@
 """Build OAuth token refresh — credential scheduling for grok.com build endpoint."""
 
 import hashlib
-import logging
+from app.platform.logging.logger import logger
 
 from app.platform.auth.oauth_device import (
     AccessDenied,
@@ -10,7 +10,6 @@ from app.platform.auth.oauth_device import (
     TokenResponse,
 )
 
-logger = logging.getLogger(__name__)
 
 #: In-flight manual (admin-initiated) retries, keyed ``<account>:manual-retry``.
 #: Port of Go singleflight refreshKey += ":manual-retry" (ef10c4cb): a second

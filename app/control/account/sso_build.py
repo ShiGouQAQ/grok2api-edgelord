@@ -21,7 +21,7 @@ import asyncio
 import base64
 import hashlib
 import json
-import logging
+from app.platform.logging.logger import logger
 import re
 import secrets
 import ssl
@@ -68,7 +68,6 @@ CREATE_COOKIE_SETTER_RPC = (
     "https://accounts.x.ai/auth_mgmt.AuthManagement/CreateCookieSetterLink"
 )
 
-logger = logging.getLogger(__name__)
 
 
 class SSOCredentialRejected(UpstreamError):
@@ -494,7 +493,7 @@ async def _mint_via_pkce_cs(
             c_resp = await session.get(current, allow_redirects=False, timeout=30)
             loc = c_resp.headers.get("location") or ""
             logger.debug(
-                "PKCE-CS set-cookie hop: HTTP %s loc=%s", c_resp.status_code, loc[:100]
+                "PKCE-CS set-cookie hop: HTTP {} loc={}", c_resp.status_code, loc[:100]
             )
 
             if not loc:
@@ -855,7 +854,7 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
                 if error == "slow_down":
                     current_interval = min(current_interval + 5, 30)
                     logger.info(
-                        "SSO→Build slow_down, interval now %ds", current_interval
+                        "SSO→Build slow_down, interval now {}s", current_interval
                     )
                 elif error in ("access_denied", "expired_token"):
                     raise PermissionError(
@@ -863,7 +862,7 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
                     )
                 elif error == "authorization_pending":
                     logger.debug(
-                        "SSO→Build poll still pending (interval=%ds)", current_interval
+                        "SSO→Build poll still pending (interval={}s)", current_interval
                     )
                 else:
                     if resp.status >= 400:
@@ -872,7 +871,7 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
                             f"({resp.status}): {error_desc or error or json.dumps(body)[:200]}"
                         )
                     logger.info(
-                        "SSO→Build poll status=%s error=%s desc=%s",
+                        "SSO→Build poll status={} error={} desc={}",
                         resp.status,
                         error or "none",
                         (error_desc or "")[:100],
@@ -916,7 +915,7 @@ async def convert_sso_to_build(sso_token: str) -> BuildCredentialSeed:
         raise
     except Exception as df_err:
         logger.warning(
-            "SSO→Build Device Flow failed, falling back to PKCE-CS: %s", df_err
+            "SSO→Build Device Flow failed, falling back to PKCE-CS: {}", df_err
         )
 
     # PKCE-CS fallback (registration-bot path). Last resort: any failure

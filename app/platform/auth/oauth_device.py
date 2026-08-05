@@ -7,7 +7,7 @@ to authenticate CLI and headless clients against x.ai's OAuth server.
 from __future__ import annotations
 
 import asyncio
-import logging
+from app.platform.logging.logger import logger
 import ssl
 from dataclasses import dataclass
 from typing import Any
@@ -18,7 +18,6 @@ import aiohttp
 from app.platform.config.snapshot import get_config
 from app.dataplane.proxy.adapters.session import normalize_proxy_url
 
-logger = logging.getLogger(__name__)
 
 
 # ─── Data classes ───────────────────────────────────────────────────────────

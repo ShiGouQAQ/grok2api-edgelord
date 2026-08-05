@@ -7,11 +7,10 @@ Handles conversation history compaction with encrypted summary blobs.
 import base64
 import hashlib
 import json
-import logging
+from app.platform.logging.logger import logger
 import re
 from typing import Any
 
-logger = logging.getLogger(__name__)
 
 # Compaction version prefix
 _COMPACT_PREFIX = "g2a_compact_v1."
@@ -66,7 +65,7 @@ def decode_compaction(data: str, key: str) -> list[dict[str, Any]] | None:
         payload = json.loads(decrypted.decode())
         return payload.get("items", [])
     except Exception as e:
-        logger.warning("Failed to decode compaction: %s", e)
+        logger.warning("Failed to decode compaction: {}", e)
         return None
 
 
