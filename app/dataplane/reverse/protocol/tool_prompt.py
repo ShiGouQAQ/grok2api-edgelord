@@ -5,8 +5,9 @@ in a structured XML format we can reliably parse.
 
 from __future__ import annotations
 
-import json
 from typing import Any
+
+import orjson
 
 # ---------------------------------------------------------------------------
 # Instruction template
@@ -42,15 +43,16 @@ I'll call the search tool now. <tool_calls>...</tool_calls>
 NOTE: Even if you believe you cannot fulfill the request, you must still follow the WHEN TO CALL rule above.\
 """
 
-_CHOICE_AUTO     = "WHEN TO CALL: Call a tool when it is clearly needed. Otherwise respond in plain text."
-_CHOICE_NONE     = "WHEN TO CALL: Do NOT call any tools. Respond in plain text only."
+_CHOICE_AUTO = "WHEN TO CALL: Call a tool when it is clearly needed. Otherwise respond in plain text."
+_CHOICE_NONE = "WHEN TO CALL: Do NOT call any tools. Respond in plain text only."
 _CHOICE_REQUIRED = "WHEN TO CALL: You MUST output a <tool_calls> XML block. Do NOT write any plain-text reply. If you are uncertain, still call the most relevant tool with your best guess at the parameters."
-_CHOICE_FORCED   = "WHEN TO CALL: You MUST output a <tool_calls> XML block calling the tool named \"{name}\". Do NOT write any plain-text reply under any circumstances."
+_CHOICE_FORCED = 'WHEN TO CALL: You MUST output a <tool_calls> XML block calling the tool named "{name}". Do NOT write any plain-text reply under any circumstances.'
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def build_tool_system_prompt(
     tools: list[dict[str, Any]],
@@ -97,8 +99,8 @@ def tool_calls_to_xml(tool_calls: list[dict[str, Any]]) -> str:
         args = func.get("arguments", "{}")
         # Normalise to single-line JSON
         try:
-            args = json.dumps(json.loads(args), ensure_ascii=False, separators=(",", ":"))
-        except (json.JSONDecodeError, ValueError, TypeError):
+            args = orjson.dumps(orjson.loads(args)).decode()
+        except (ValueError, TypeError):
             pass
         lines.append("  <tool_call>")
         lines.append(f"    <tool_name>{name}</tool_name>")
@@ -111,6 +113,7 @@ def tool_calls_to_xml(tool_calls: list[dict[str, Any]]) -> str:
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
 
 def _format_tool_definitions(tools: list[dict[str, Any]]) -> str:
     parts: list[str] = []
@@ -126,7 +129,7 @@ def _format_tool_definitions(tools: list[dict[str, Any]]) -> str:
             lines.append(f"Description: {desc}")
         if params:
             try:
-                lines.append(f"Parameters: {json.dumps(params, ensure_ascii=False)}")
+                lines.append(f"Parameters: {orjson.dumps(params).decode()}")
             except (TypeError, ValueError):
                 lines.append(f"Parameters: {params}")
         parts.append("\n".join(lines))

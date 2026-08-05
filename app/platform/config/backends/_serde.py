@@ -5,7 +5,6 @@ from app.platform.logging.logger import logger
 from typing import Any
 
 
-
 def flatten(nested: dict[str, Any], prefix: str = "") -> dict[str, str]:
     """Recursively flatten *nested* to ``{"section.key": json_value, ...}``."""
     out: dict[str, str] = {}
@@ -29,6 +28,8 @@ def unflatten(flat: dict[str, str]) -> dict[str, Any]:
         try:
             node[parts[-1]] = json.loads(json_val)
         except (json.JSONDecodeError, ValueError):
-            _log.warning("config: failed to deserialize key {!r}, treating as string", dotted)
+            logger.warning(
+                "config: failed to deserialize key {!r}, treating as string", dotted
+            )
             node[parts[-1]] = json_val
     return result

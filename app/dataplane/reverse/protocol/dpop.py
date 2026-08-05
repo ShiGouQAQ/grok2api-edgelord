@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import json
 import time
 import uuid
 from collections import OrderedDict
@@ -35,6 +34,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlsplit
+
+import orjson
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -130,17 +131,16 @@ def dpop_jwk_thumbprint(public_jwk: dict[str, str]) -> str:
     Canonical JSON is ``{"crv":...,"kty":...,"x":...,"y":...}`` — Go marshals
     with sorted map keys, so ``sort_keys=True`` reproduces ``crv,kty,x,y``.
     """
-    canonical = json.dumps(
+    canonical = orjson.dumps(
         {
             "crv": public_jwk["crv"],
             "kty": public_jwk["kty"],
             "x": public_jwk["x"],
             "y": public_jwk["y"],
         },
-        sort_keys=True,
-        separators=(",", ":"),
+        option=orjson.OPT_SORT_KEYS,
     )
-    return _sha256_b64url(canonical.encode("utf-8"))
+    return _sha256_b64url(canonical)
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +159,8 @@ def parse_dpop_access_token(token: str) -> tuple[int, str]:
         raise DPoPError("Console DPoP access token format invalid")
     try:
         payload = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
-        claims = json.loads(payload)
-    except (ValueError, json.JSONDecodeError) as exc:
+        claims = orjson.loads(payload)
+    except (ValueError, orjson.JSONDecodeError) as exc:
         raise DPoPError("Console DPoP access token payload invalid") from exc
     exp = claims.get("exp")
     cnf = claims.get("cnf")
@@ -343,16 +343,18 @@ class DPoPSessionManager:
             lease,
         )
         if status < 200 or status >= 300:
-            body_text = (
-                data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
-            )
+            body_text = data if isinstance(data, str) else orjson.dumps(data)
             definitive = (
                 self._is_definitive_block is not None
-                and self._is_definitive_block(body_text)
+                and self._is_definitive_block(
+                    body_text.decode("utf-8")
+                    if isinstance(body_text, bytes)
+                    else body_text
+                )
             )
             raise DPoPTokenEndpointError(
                 status,
-                body_text.encode("utf-8"),
+                body_text.encode("utf-8") if isinstance(body_text, str) else body_text,
                 invalidate_clearance=status == 403 and not definitive,
             )
 
@@ -419,8 +421,8 @@ def sign_dpop_proof(
         "ath": _sha256_b64url(session.access_token.encode("utf-8")),
     }
     encoded = (
-        f"{_b64url(json.dumps(header, sort_keys=True, separators=(',', ':')).encode('utf-8'))}."
-        f"{_b64url(json.dumps(claims, sort_keys=True, separators=(',', ':')).encode('utf-8'))}"
+        f"{_b64url(orjson.dumps(header, option=orjson.OPT_SORT_KEYS))}."
+        f"{_b64url(orjson.dumps(claims, option=orjson.OPT_SORT_KEYS))}"
     )
     der = session.private_key.sign(encoded.encode("utf-8"), ec.ECDSA(hashes.SHA256()))
     r, s = decode_dss_signature(der)

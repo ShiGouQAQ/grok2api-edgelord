@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import orjson
+
 
 def normalize_custom_tool(tool: dict[str, Any]) -> dict[str, Any]:
     """normalize_custom_tool wraps a custom tool as a function with input=string schema.
@@ -48,7 +50,7 @@ def encode_custom_tool_arguments(
 
     Args are JSON-serialized and wrapped in {"input": serialized_json}.
     """
-    return {"input": json.dumps(args)}
+    return {"input": orjson.dumps(args).decode()}
 
 
 def decode_custom_tool_input(input_body: str) -> dict[str, Any]:

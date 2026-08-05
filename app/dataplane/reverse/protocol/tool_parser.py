@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import orjson
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -38,9 +40,9 @@ class ParsedToolCall:
             args_str = arguments
         else:
             try:
-                args_str = json.dumps(
-                    arguments, ensure_ascii=False, separators=(",", ":")
-                )
+                # orjson raises on non-finite floats (instead of emitting
+                # literal NaN) — the except below degrades to "{}". Stricter.
+                args_str = orjson.dumps(arguments).decode()
             except (TypeError, ValueError):
                 args_str = "{}"
         return ParsedToolCall(call_id=call_id, name=name, arguments=args_str)
@@ -222,7 +224,7 @@ def _parse_json_array(text: str) -> list[ParsedToolCall]:
     if not m:
         return []
     try:
-        arr = json.loads(m.group(0))
+        arr = orjson.loads(m.group(0))
     except (json.JSONDecodeError, ValueError):
         return []
     if not isinstance(arr, list):
@@ -299,7 +301,7 @@ def _parse_json_tolerant(s: str) -> Any:
     if not s:
         return {}
     try:
-        return json.loads(s)
+        return orjson.loads(s)
     except (json.JSONDecodeError, ValueError):
         repaired = _try_repair_json(s)
         return repaired
@@ -310,7 +312,7 @@ def _try_repair_json(s: str) -> Any:
     try:
         # Replace literal newlines inside strings (common model output issue)
         fixed = re.sub(r"(?<!\\)\n", r"\\n", s)
-        return json.loads(fixed)
+        return orjson.loads(fixed)
     except (json.JSONDecodeError, ValueError):
         return None
 
@@ -570,15 +572,13 @@ def _encode_normalized(value: Any) -> str:
             raise ValueError("non-finite float")
         return json.dumps(value)
     if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
+        return orjson.dumps(value).decode()
     if isinstance(value, list):
         return "[" + ",".join(_encode_normalized(item) for item in value) + "]"
     if isinstance(value, dict):
         parts = []
         for key, item in value.items():
-            parts.append(
-                json.dumps(key, ensure_ascii=False) + ":" + _encode_normalized(item)
-            )
+            parts.append(orjson.dumps(key).decode() + ":" + _encode_normalized(item))
         return "{" + ",".join(parts) + "}"
     raise TypeError(f"cannot encode {type(value).__name__}")
 

@@ -763,3 +763,38 @@ Go `QuotaMode()`：chat 模型 → "console"，Image/ImageEdit → "console_imag
 **结论**：DPoP `iat` 用 `time.time()`（Go 同），服务器时钟漂移 >~60s → 全部 DPoP 请求 401（nginx HTML 非业务 JSON）且被误判 reauth_required。**排查顺序：先比时钟，再查代码。** 已写入 CLAUDE.md Key Conventions。
 
 **验证**：本地 iat_off=0 实验 200/400 通过；生产 NTP 后恢复正常；全量 1684 passed / 1 skipped。
+
+---
+
+## 2026-08-05 orjson 热路径替换 + Build 模型远程发现（ModelCatalogRemote 移植）
+
+> 本批为本地性能/正确性优化 + Go `cli/adapter.go` ModelCatalogRemote 移植，均未提交（working tree）。orjson 替换为 **hot-path 性能优化**（非上游提交移植）；Build 模型远程发现为 Go 上游功能移植。
+
+### 1. orjson 热路径替换（uncommitted，10 文件）
+
+| 文件 | 改动 |
+|------|------|
+| `app/dataplane/reverse/protocol/dpop.py` | JWK thumbprint 序列化加 `OPT_SORT_KEYS`（Go jwk thumbprint 排序语义）、JWT header/claims 签发与解析切 orjson |
+| `app/dataplane/reverse/protocol/tool_parser.py` | :41/225/302/313/573/580 切 orjson；**KEEP** :192 `raw_decode`（流式增量解析）、:571 float 保真（JSON 数字原样）、:595 `parse_float=_NumberToken` |
+| `app/dataplane/reverse/protocol/tool_prompt.py` | :100/129 切 orjson |
+| `app/dataplane/reverse/protocol/responses_tool_custom.py` | :51 切 orjson |
+| `app/control/account/provider_infer.py` | :30 切 orjson |
+| `app/platform/storage/media_audit.py` | :69/470 切 orjson |
+| `app/platform/config/backends/_serde.py` | 修复 `_log`→`logger` NameError（orjson 加载失败路径原本必炸） |
+| `app/platform/net/grpc.py` | 删除死 import（orjson 引入时残留） |
+| `app/products/openai/router.py` | `_POOL_ID_TO_NAME` 补 `3: "build"`（修 `list_models` KeyError:3 — 与 1f455f28 PoolId.BUILD=3 配套） |
+| `tests/`（2 处） | 断言更新（orjson 输出形状一致） |
+
+### 2. Build 模型远程发现（ModelCatalogRemote 移植）— 🔄 移植中
+
+上游对照：Go `cli/adapter.go:559-700`（ModelCatalogRemote + listModelsAt 4MiB 上限 + hidden 过滤）、`cli/video.go:22`（BUILD_VIDEO_MODEL）、`domain/model/reasoning.go:22`（BUILD_COMPOSER_MODEL）。
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `app/control/account/build_models.py`（新） | 🔄 移植中 | `parse_build_model_catalog()`：Go ModelCatalogRemote 移植 — hidden 过滤 + `firstNonEmpty(id, model, modelId, _meta)`（`_first_non_empty`），4MiB body 上限；`normalize_account_model_capabilities()`：`BUILD_VIDEO_MODEL="grok-imagine-video-1.5"` super-only + `BUILD_COMPOSER_MODEL="grok-composer-2.5-fast"` oauth-only 能力归一化 |
+| `app/control/model/registry.py` | 🔄 移植中 | build 段新增 `grok-4.5-mini`（SUPER）+ `grok-4.5-build-free`（BASIC），与既有 `grok-4.5`/`grok-4.5-latest`/`grok-build-latest`（均 BUILD/SUPER）齐备 |
+| `app/products/openai/router.py` | ⏳ 待接入 | `list_models` 远程目录集成**未完成**（注册表静态模型 + 远程 catalog 合并逻辑 pending） |
+
+**待完成**：router.py `list_models` 集成 + 测试（远程目录解析/capability 归一化/hidden 过滤）。
+
+**验证**：`tests/test_build_pool_routing.py` + `tests/test_provider_infer.py` → **19 passed**（orjson 替换后无回归）。

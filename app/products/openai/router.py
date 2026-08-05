@@ -29,7 +29,7 @@ from .schemas import (
 from .chat import completions as chat_completions
 
 router = APIRouter(prefix="/v1")
-_POOL_ID_TO_NAME = {0: "basic", 1: "super", 2: "heavy"}
+_POOL_ID_TO_NAME = {0: "basic", 1: "super", 2: "heavy", 3: "build"}
 _TAG_MODELS = "OpenAI - Models"
 _TAG_CHAT = "OpenAI - Chat"
 _TAG_RESPONSES = "OpenAI - Responses"
@@ -179,6 +179,24 @@ async def list_models(request: Request, client_version: str | None = Query(None)
         for m in model_registry.list_enabled()
         if _model_available_for_pools(m, pools)
     ]
+    if "build" in pools:
+        from app.control.account.build_models import collect_build_remote_models
+
+        repo = getattr(request.app.state, "repository", None)
+        if repo is not None:
+            remote_ids = await collect_build_remote_models(repo)
+            listed = {m["id"] for m in models}
+            models.extend(
+                {
+                    "id": name,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "xai",
+                    "name": name,
+                }
+                for name in remote_ids
+                if name not in listed
+            )
     return JSONResponse({"object": "list", "data": models})
 
 

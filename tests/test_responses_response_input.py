@@ -158,7 +158,7 @@ def test_input_function_call_output_json_string_encoded():
     """Plain structured output is JSON-stringified (encodeToolOutput)."""
     items = [{"type": "function_call_output", "call_id": "call_1", "output": {"ok": 1}}]
     result = normalize_input_items(items)
-    assert result[0]["output"] == '{"ok": 1}'
+    assert result[0]["output"] == '{"ok":1}'
 
 
 def test_input_function_call_output_string_passes_through():

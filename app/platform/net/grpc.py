@@ -5,7 +5,6 @@ including trailer extraction and gRPC status code mapping.
 """
 
 import base64
-import json
 import re
 import struct
 from dataclasses import dataclass
@@ -18,10 +17,10 @@ _B64_RE = re.compile(rb"^[A-Za-z0-9+/=\r\n]+$")
 
 # gRPC status code → HTTP equivalent (best-effort mapping).
 _GRPC_HTTP: Dict[int, int] = {
-    0:  200,
-    4:  504,
-    7:  403,
-    8:  429,
+    0: 200,
+    4: 504,
+    7: 403,
+    8: 429,
     14: 503,
     16: 401,
 }
@@ -29,7 +28,7 @@ _GRPC_HTTP: Dict[int, int] = {
 
 @dataclass(frozen=True)
 class GrpcStatus:
-    code:    int
+    code: int
     message: str = ""
 
     @property
@@ -76,7 +75,7 @@ class GrpcClient:
 
     @staticmethod
     def _parse_trailers(payload: bytes) -> Dict[str, str]:
-        text   = payload.decode("utf-8", errors="replace")
+        text = payload.decode("utf-8", errors="replace")
         result: Dict[str, str] = {}
         for line in re.split(r"\r\n|\n", text):
             if ":" not in line:
@@ -90,9 +89,9 @@ class GrpcClient:
     @classmethod
     def parse_response(
         cls,
-        body:         bytes,
-        content_type: Optional[str]             = None,
-        headers:      Optional[Mapping[str, str]] = None,
+        body: bytes,
+        content_type: Optional[str] = None,
+        headers: Optional[Mapping[str, str]] = None,
     ) -> Tuple[List[bytes], Dict[str, str]]:
         """Parse a gRPC-Web response body.
 
@@ -102,19 +101,19 @@ class GrpcClient:
         """
         decoded = cls._maybe_decode_base64(body, content_type)
 
-        messages: List[bytes]    = []
+        messages: List[bytes] = []
         trailers: Dict[str, str] = {}
 
         i, n = 0, len(decoded)
         while i < n:
             if n - i < 5:
                 break
-            flag   = decoded[i]
-            length = int.from_bytes(decoded[i + 1: i + 5], "big")
+            flag = decoded[i]
+            length = int.from_bytes(decoded[i + 1 : i + 5], "big")
             i += 5
             if n - i < length:
                 break
-            payload = decoded[i: i + length]
+            payload = decoded[i : i + length]
             i += length
 
             if flag & 0x80:

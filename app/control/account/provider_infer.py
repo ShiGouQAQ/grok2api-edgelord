@@ -12,8 +12,9 @@ rejects console tokens with 401 (2026-08-05 production burst).
 from __future__ import annotations
 
 import base64
-import json
 from typing import Any
+
+import orjson
 
 
 def decode_sso_jwt(token: str) -> dict[str, Any] | None:
@@ -27,8 +28,8 @@ def decode_sso_jwt(token: str) -> dict[str, Any] | None:
         return None
     try:
         data = base64.urlsafe_b64decode(parts[1] + "==")
-        payload = json.loads(data)
-    except (ValueError, TypeError, json.JSONDecodeError):
+        payload = orjson.loads(data)
+    except (ValueError, TypeError):
         return None
     return payload if isinstance(payload, dict) else None
 

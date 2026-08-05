@@ -105,7 +105,7 @@ class TestSummarizeResponseMedia:
             decode_calls.append(args)
             return json.loads(*args, **kwargs)
 
-        monkeypatch.setattr("app.platform.storage.media_audit.json.loads", _spy_loads)
+        monkeypatch.setattr("app.platform.storage.media_audit.orjson.loads", _spy_loads)
         body = (
             b'{"input":[{"type":"function_call_output","call_id":"call_1",'
             b'"output":{"ImageContent":{"data":"aGVsbG8="}}}]}'
@@ -135,7 +135,7 @@ class TestSummarizeResponseMedia:
             decode_calls.append(args)
             return json.loads(*args, **kwargs)
 
-        monkeypatch.setattr("app.platform.storage.media_audit.json.loads", _spy_loads)
+        monkeypatch.setattr("app.platform.storage.media_audit.orjson.loads", _spy_loads)
         body = b'{"input":[{"type":"input_text","text":"hello"}]}'
         assert summarize_response_media(body) is None
         assert decode_calls == []
@@ -329,7 +329,7 @@ class TestNormalizeFunctionCallOutputInput:
             {"call_id": "call_1", "output": {"ImageContent": {"data": "aGVsbG8="}}},
             "input[0]",
         )
-        assert converted["output"] == '{"ImageContent": {"data": "aGVsbG8="}}'
+        assert converted["output"] == '{"ImageContent":{"data":"aGVsbG8="}}'
 
     def test_string_output_passes_through(self):
         converted = normalize_function_call_output_input(

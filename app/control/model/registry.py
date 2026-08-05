@@ -81,7 +81,10 @@ MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("grok-imagine-video-console",             ModeId.CONSOLE,  Tier.BASIC, Capability.VIDEO,      True, "Grok Imagine Video (Console)"),
 
     # === Build (grok.com build 端点) ==========================================
+    # 上游真实名 + 历史自创名（超集兼容）；账号级目录由 build_models 远程发现补充
     ModelSpec("grok-4.5",              ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok 4.5 (Build)"),
+    ModelSpec("grok-4.5-mini",         ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok 4.5 Mini (Build)"),
+    ModelSpec("grok-4.5-build-free",   ModeId.BUILD, Tier.BASIC, Capability.BUILD, True, "Grok 4.5 Free (Build)"),
     ModelSpec("grok-4.5-latest",       ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok 4.5 Latest (Build)"),
     ModelSpec("grok-build-latest",     ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok Build Latest"),
 )

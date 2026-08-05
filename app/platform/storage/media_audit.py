@@ -12,7 +12,7 @@ It never logs payload contents — only counts — and skips JSON decoding
 entirely when the body does not even contain the token ``image``.
 """
 
-import json
+import orjson
 from collections.abc import Mapping, Sequence
 from typing import Protocol, cast
 
@@ -66,7 +66,7 @@ def summarize_response_media(body: bytes) -> dict[str, int] | None:
     if not may_contain_response_media(body):
         return None
     try:
-        value = json.loads(body)
+        value = orjson.loads(body)
     except (ValueError, TypeError):
         return None
     if not isinstance(value, dict):
@@ -467,7 +467,7 @@ def _encode_tool_output(value: object, param: str) -> str:
     if isinstance(value, str):
         return value
     try:
-        return json.dumps(value, ensure_ascii=False)
+        return orjson.dumps(value).decode()
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{param} 无法编码") from exc
 
