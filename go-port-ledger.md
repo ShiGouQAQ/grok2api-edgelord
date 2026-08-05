@@ -556,3 +556,26 @@
 - errors.py：DPoP 相关 403 不误标 credential_rejected（防御）
 
 **测试基线**：全套 1478 passed（DPoP 移植前）。SSO→Build mint 测试全部 mock `get_proxy_runtime`。
+
+---
+
+## 2026-08-05 移植批 14（Go↔Python 差异审查修复：3 Critical + 6 Important + 架构决策项）
+
+> 审查方法：3 个分层审查 Agent（dataplane/control/products）+ 2 个专项 Go↔Python 逐行对照 Agent（godiff-1/godiff-2），全部 Go 语义经 `git show` 双向验证。发现 3 Critical + 19 Important + 24 Minor 偏移，本批修复 Critical 3 + Important 10（两个完整清单见 `app/platform/errors.py` 注释与 `/tmp/opencode/godiff-*.md`）。
+
+| 类别 | 偏移 | 提交 | 说明 |
+|---|---|---|---|
+| 🔴 C1 | G1-C1 model 免费额度 flags | `0fe9f89e` | 403/429/402 model 文案同步置 free_quota_exhausted + quota_exhausted=free or paid（Go failure.go:130-131/231-233/117）→ 403 model-text 从 FORBIDDEN 修正为 RATE_LIMITED |
+| 🔴 C2 | G2-C1 流式 tool-argument 整数规范化 | `e799e4c6` | `StreamFunctionArgumentsBuffer` + BuildStreamAdapter `schemas` 参数：缓冲 delta → done 规范化 → 重发纠正 delta+done；超限 passthrough；native 事件禁用 sieve 防双发；非流式 `parse_tool_calls(schemas=)` 一行接线。Go 8b5c1ed6 rewriteStreamData |
+| 🔴 C3 | G4-C1/I1/I2/M1 previous_response_id 链 | 随 `28e7f079`/`e799e4c6` 入库 | router 透传 → console/build 单尝试策略（new_routing_attempt_policy(1)）→ build/grok payload 转发；console 无状态重放 log WARNING；无 storage 层（架构缺口，仅 port 单尝试侧效应） |
+| 🟡 I | G1-1..G1-4 节点健康机 | `28e7f079` | 0.7 单因子（替代本地 factor 表）；401/429/Build-403/Build-400/pool-节点 跳过；3xx→SUCCESS；_NODE_SUCCESS_STEP 0.10；499 guard；mark_failure_after_success 接入 console stream seam。Go 75f4f7a7 FeedbackForScope |
+| 🟡 I | G6-I1/I2/M1/M2 console DPoP chat | `7a826f32` | is_definitive_block 谓词复用；browser_headers 每次交换解析（Callable）；缓存 key 带节点 crc32；x-cluster 仅 /responses。Go f1d51254 dpop.go |
+| 🟡 I | G3-I1 routing 200 哨兵 | `5554c198` | 删 _SHIPPED_DEFAULT_ATTEMPTS=200 → key-presence 回退；config.defaults.toml 删 max_routing_attempts=200（保留 legacy 默认）。Go 15146556 |
+| 🟡 I | G5-1/G5-2 恢复退避 + reset_at | `8c1f2eb0` | BACKOFF 1s/1min → 30s/30min（Go 默认）；reset_at=None 窗口跳过（Go IS NOT NULL）。Go 377710f4 |
+| 🟡 I | G3-1/G3-2 build-detect 状态写入 | `d02c025d` | quota→24h 恢复窗口（predicted）；permanent→5min COOLING；detect 403 credential 无条件 REAUTH（网关门保留）。Go b4c7baab |
+| 🟡 I | G1-I1/I2/M2 账号封锁 scope + 精确码匹配 | `2864c1f1` | "user is blocked"/"user blocked" → account_scoped（不放 credential）；should_invalidate 默认码表补 permission-denied + 精确 code 集合匹配替代子串 + 移除 account_scoped 前置门槛；token 信号集收窄为复合短语。Go d1205d85 failure.go |
+| 🟡 I | G2-1/G2-2/G2-3 媒体真实 body + 归一化接线 + 图片 502 | `671fc76f` | 真实 payload 审计（generate/_generate_lite/create_video）；function_call_output/image 归一化接入 responses_input 请求路径（import 复用）；非凭据错误（429/403/5xx）最终尝试原样 raise 保留原 status，401 凭据类保留 503 wrap。Go c936ab1/80048405 |
+
+**架构决策项（未实施，待评估）**：G4-1 等级重探测方向（Go 用 weekly-credit/auto-mode 成功作为升级到 Super 的正向信号，Python 仅 super/heavy 降级确认）；G4-4 事件驱动 vs 固定间隔；G5-3 Redis→内存 ClaimToken 已声明等价；G2-3 重试语义（Go 上游失败立即 502 不重试）；review-B C1 竞态（30s console-quota-reset × 60s console-quota-recovery 同字段：reset_at 到期瞬间 reset 先赢覆写 predicted 窗口 → 真实探测饿死，修复需 sql.py WHERE 排除 source=REAL/predicted）；Build seam twin（build_chat.py:555 同形未接，任务要求 ONE site）；quota_build 无数据层列（random 策略下 build 路由排除部分）。
+
+**测试基线**：全套 **1639 passed / 1 skipped**（10 个修复 commit 后实跑）。已修复：Critical 3 + Important 10。待评估架构决策项见上。
