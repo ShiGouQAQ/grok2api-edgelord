@@ -798,3 +798,19 @@ Go `QuotaMode()`：chat 模型 → "console"，Image/ImageEdit → "console_imag
 **待完成**：router.py `list_models` 集成 + 测试（远程目录解析/capability 归一化/hidden 过滤）。
 
 **验证**：`tests/test_build_pool_routing.py` + `tests/test_provider_infer.py` → **19 passed**（orjson 替换后无回归）。
+
+### 2.1 完成状态更新（2026-08-05 晚）
+
+- ✅ `build_models.py` + `router.py` list_models 集成已完成（Agent bg_8808e278）：
+  - `list_build_models` 默认路径改用 build_detect 模式（ResettableSession + build_build_headers(access_token, agent_id, is_stream=False, is_trace=False) GET BUILD_MODELS，同步读 response.content）
+  - `collect_build_remote_models(repo)`：runtime_snapshot → pool=="build" ACTIVE → 每账号 300s 进程内缓存（`_remote_models_cache`）→ merged 去重
+  - `_fetch_account_remote_models`：ext["build_access_token"] or record.token → fetch_build_billing.is_paid 判 is_super（失败→False）→ normalize_account_model_capabilities(is_super, is_build_oauth=True)
+  - router.py `list_models`：`if "build" in pools` → 合并远程模型（超集，静态保留）
+  - 新测试 tests/test_build_models.py（parse/normalize/list/collect + 缓存二次调用不重复 fetch）
+- 全量测试 **1720 passed / 1 skipped**（基线 1704 + 16 新增），已提交 `44091c6a` 并推送。
+
+### 2.2 grok-4.3-beta 移除（2026-08-05 晚，模型审查 bg_cce55de0 发现）
+
+- 根因：Python registry `grok-4.3-beta` → ModeId.GROK_4_3 → modeId "grok-420-computer-use-sa"。Go web catalog（web/catalog.go:18-25）**只有 4 个 chat 模式（fast/auto/expert/heavy）+ 3 media**，grok-420-computer-use-sa 在 Go 重写（a16837c9）时已移除；生产实测 grok.com 返回 403 `{"code":7,"message":"Model is not found"}`（code 7 被 Go webResponseError 映射 errWebAntiBot 是干扰项，真实语义是模型不存在）。
+- 处理（用户决策：从 registry 移除 + 检查类似情况）：删除 `app/control/model/registry.py` grok-4.3-beta 模型注册 + 注释块；README.md（模型表 + 付费账号行）+ docs/README.en.md 同步删除。**保留** ModeId.GROK_4_3 枚举 + quota_grok_4_3 存储列 + xai_usage _MODE_NAMES[4]（枚举数字位移会破坏 CONSOLE=5/BUILD=6 持久化兼容，mode 4 槽位留空即可）。
+- 检查结果：registry 其余模型全部对应用效 Go 模式（web 8 模式全齐、console 6+3 media 对齐、build 动态、multi-agent 2M max_tokens 与 jiujiu532 L1 一致保留）。

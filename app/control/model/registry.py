@@ -33,10 +33,6 @@ MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("grok-4.20-expert",                       ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 Expert",        prefer_best=True),
     ModelSpec("grok-4.20-heavy",                        ModeId.HEAVY,    Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 Heavy",         prefer_best=True),
 
-    # === grok-4.3 (grok-420-computer-use-sa) ==================================
-    # Super+（basic 池不支持此模式）
-    ModelSpec("grok-4.3-beta",                          ModeId.GROK_4_3, Tier.SUPER, Capability.CHAT,       True, "Grok 4.3 Beta"),
-
     # === Image ==============================================================
 
     # Basic fast

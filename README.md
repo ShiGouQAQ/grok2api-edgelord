@@ -321,7 +321,6 @@ basic 表示 free 账号，super 和 heavy 为付费。
 | `grok-4.20-auto` | auto | super |
 | `grok-4.20-expert` | expert | super |
 | `grok-4.20-heavy` | heavy | heavy |
-| `grok-4.3-beta` | grok-420-computer-use-sa | super |
 | `grok-4.20-multi-agent-0309` | heavy | heavy |
 | `grok-4.20-0309-non-reasoning` | fast | basic |
 | `grok-4.20-0309` | auto | super |
@@ -379,7 +378,7 @@ basic 表示 free 账号，super 和 heavy 为付费。
 
 | 类型 | 等级 | 适用模型 |
 | :-- | :-- | :-- |
-| 付费账号（x.ai 官方） | super / heavy | `grok-4.20-*`、`grok-4.3-beta`、`grok-4.3-fast` |
+| 付费账号（x.ai 官方） | super / heavy | `grok-4.20-*`、`grok-4.3-fast` |
 | 免费账号（console.x.ai SSO） | basic | 所有 `*-console` / `*-low` / `*-medium` / `*-high` / `*-xhigh` |
 
 **免费账号获取方式：**

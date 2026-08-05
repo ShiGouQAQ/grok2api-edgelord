@@ -208,7 +208,6 @@ Runtime config can also be overridden via `GROK_`-prefixed env vars, e.g. `GROK_
 | `grok-4.20-auto` | `auto` | `super` |
 | `grok-4.20-expert` | `expert` | `super` |
 | `grok-4.20-heavy` | `heavy` | `heavy` |
-| `grok-4.3-beta` | computer-use | `super` |
 | `grok-4.20-multi-agent-0309` | `heavy` | `heavy` |
 
 ### Chat (free — console.x.ai)
