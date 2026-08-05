@@ -88,7 +88,14 @@ class ModelSpec:
           BASIC tier  → try heavy first, then super, then basic
           SUPER tier  → try heavy first, then super
           HEAVY tier  → heavy only
+
+        BUILD-mode models always target the build pool exclusively (their
+        OAuth access tokens are not grok.com SSO cookies and would fail on
+        any web/console endpoint).
         """
+        if self.mode_id == ModeId.BUILD:
+            # 3 = dataplane PoolId.BUILD；build OAuth token 混入 web 池必失败
+            return (3,)
         if self.prefer_best:
             if self.tier == Tier.HEAVY:
                 return (2,)  # heavy only

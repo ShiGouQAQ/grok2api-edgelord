@@ -29,6 +29,7 @@ from app.control.account.commands import (
     BulkReplacePoolCommand,
     ListAccountsQuery,
 )
+from app.control.account.provider_infer import infer_provider
 from app.dataplane.proxy.adapters.session import normalize_proxy_url
 from app.control.account.enums import AccountStatus
 from app.control.account.state_machine import is_manageable
@@ -298,7 +299,10 @@ async def save_tokens(
                 continue
             upserts.append(
                 AccountUpsert(
-                    token=token_val, pool=pool_name, tags=td.get("tags") or []
+                    token=token_val,
+                    pool=pool_name,
+                    tags=td.get("tags") or [],
+                    provider=infer_provider(token_val),
                 )
             )
         if upserts:
@@ -350,7 +354,13 @@ async def add_tokens(
         return _json({"status": "success", "count": 0, "skipped": len(cleaned)})
 
     upserts = [
-        AccountUpsert(token=t, pool=requested_pool, tags=req.tags) for t in new_tokens
+        AccountUpsert(
+            token=t,
+            pool=requested_pool,
+            tags=req.tags,
+            provider=infer_provider(t),
+        )
+        for t in new_tokens
     ]
     result = await repo.upsert_accounts(upserts)
     logger.info(
@@ -445,6 +455,7 @@ async def edit_token(
                 token=new_token,
                 pool=pool,
                 tags=record.tags,
+                provider=infer_provider(new_token) or record.provider,
                 ext=record.ext,
             )
         ]
@@ -615,7 +626,10 @@ async def replace_pool(
     refresh_svc: "AccountRefreshService" = Depends(get_refresh_svc),
 ):
     cleaned = [t for t in (_sanitize(t) for t in req.tokens) if t]
-    upserts = [AccountUpsert(token=t, pool=req.pool, tags=req.tags) for t in cleaned]
+    upserts = [
+        AccountUpsert(token=t, pool=req.pool, tags=req.tags, provider=infer_provider(t))
+        for t in cleaned
+    ]
     await repo.replace_pool(BulkReplacePoolCommand(pool=req.pool, upserts=upserts))
     logger.info("admin pool replaced: pool={} token_count={}", req.pool, len(cleaned))
     if cleaned:

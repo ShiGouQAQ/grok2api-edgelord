@@ -14,12 +14,14 @@ class ModeId(IntEnum):
     HEAVY = 3
     GROK_4_3 = 4
     CONSOLE = 5  # console.x.ai 独立配额
+    BUILD = 6  # grok.com build 端点
 
 
 class PoolId(IntEnum):
     BASIC = 0
     SUPER = 1
     HEAVY = 2
+    BUILD = 3
 
 
 class StatusId(IntEnum):
@@ -36,6 +38,7 @@ POOL_STR_TO_ID: dict[str, int] = {
     "basic": int(PoolId.BASIC),
     "super": int(PoolId.SUPER),
     "heavy": int(PoolId.HEAVY),
+    "build": int(PoolId.BUILD),
 }
 
 POOL_ID_TO_STR: dict[int, str] = {v: k for k, v in POOL_STR_TO_ID.items()}
@@ -55,6 +58,7 @@ ALL_MODE_IDS: tuple[int, ...] = (
     int(ModeId.HEAVY),
     int(ModeId.GROK_4_3),
     int(ModeId.CONSOLE),
+    int(ModeId.BUILD),
 )
 
 __all__ = [

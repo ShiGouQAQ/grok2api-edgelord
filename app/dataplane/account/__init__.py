@@ -284,7 +284,11 @@ class AccountDirectory:
 
             # Quota strategy may receive authoritative quota data from upstream
             # response headers; the random strategy ignores this entirely.
-            if strategy == "quota" and remaining is not None and reset_at_ms is not None:
+            if (
+                strategy == "quota"
+                and remaining is not None
+                and reset_at_ms is not None
+            ):
                 reset_s = int(reset_at_ms // 1000)
                 fb.apply_quota_update(table, idx, mode_id, remaining, reset_s)
 
@@ -310,6 +314,7 @@ _POOL_INTERVAL_CONFIG: dict[str, tuple[str, int]] = {
     "basic": ("account.refresh.basic_interval_sec", 86_400),
     "super": ("account.refresh.super_interval_sec", 7_200),
     "heavy": ("account.refresh.heavy_interval_sec", 7_200),
+    "build": ("account.refresh.build_interval_sec", 21_600),
 }
 
 # Console (mode_id=5) 窗口仅 3600s，使用 4 小时冷却（远大于窗口，
