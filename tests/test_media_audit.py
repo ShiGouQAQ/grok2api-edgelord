@@ -6,11 +6,14 @@ responses_input.go.
 """
 
 import json
+from types import SimpleNamespace
 
+import orjson
 import pytest
 
 from app.platform.storage.media_audit import (
     is_function_call_output_content_array,
+    log_media_input_summary,
     log_response_media_summary,
     normalize_function_call_output_input,
     normalize_input_image_part,
@@ -18,14 +21,18 @@ from app.platform.storage.media_audit import (
 )
 
 
+async def _async_noop(*args, **kwargs):
+    return None
+
+
 class _FakeLogger:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, tuple]] = []
 
-    def debug(self, message: str, *args: object) -> None:
+    def debug(self, message: str, *args: object, **kwargs: object) -> None:
         self.calls.append(("debug", message, args))
 
-    def warning(self, message: str, *args: object) -> None:
+    def warning(self, message: str, *args: object, **kwargs: object) -> None:
         self.calls.append(("warning", message, args))
 
 
@@ -345,3 +352,136 @@ class TestNormalizeFunctionCallOutputInput:
             normalize_function_call_output_input(
                 {"call_id": "  ", "output": "x"}, "input[0]"
             )
+
+
+class TestLogMediaInputSummaryRealBody:
+    """G2-1: the audit is fed the REAL request body, so image-bearing requests
+    emit the DEBUG record (Go c936ab1 gateway/service.go audits input.Body)."""
+
+    def test_real_messages_body_with_images_emits_debug_record(self):
+        logger = _FakeLogger()
+        body = orjson.dumps(
+            {
+                "model": "grok-4.20",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "data:image/png;base64,aGVsbG8="},
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+        log_media_input_summary(logger, "req-real", body)
+        assert len(logger.calls) == 1
+        level, message, args = logger.calls[0]
+        assert level == "debug"
+        assert "request_media_input_summary" in message
+        assert args[1] == 1  # media_input_images
+
+    def test_real_text_body_without_images_stays_silent(self):
+        logger = _FakeLogger()
+        body = orjson.dumps(
+            {"model": "grok-4.20", "messages": [{"role": "user", "content": "hi"}]}
+        )
+        log_media_input_summary(logger, "req-text", body)
+        assert logger.calls == []
+
+
+class TestRealBodyAuditWiring:
+    """G2-1: image/video entry points audit the actual request payload, not a
+    synthetic {"model","prompt","n"} / {"input_references"} subset."""
+
+    def test_generate_audits_full_request_body(self, monkeypatch):
+        import asyncio
+
+        from app.products.openai import images as images_mod
+
+        spec = SimpleNamespace(
+            mode_id=2,
+            pool_candidates=lambda: ["super"],
+            model_name="grok-imagine-image",
+        )
+        monkeypatch.setattr(images_mod, "resolve_model", lambda model: spec)
+        monkeypatch.setattr(images_mod, "selection_max_retries", lambda: 1)
+
+        class _Dir:
+            async def reserve_any(self, *args, **kwargs):
+                raise RuntimeError("downstream not reached in this test")
+
+        monkeypatch.setattr("app.dataplane.account._directory", _Dir())
+
+        bodies: list[bytes] = []
+        monkeypatch.setattr(
+            images_mod,
+            "log_media_input_summary",
+            lambda logger_obj, request_id, body: bodies.append(body),
+        )
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(
+                images_mod.generate(
+                    model="grok-imagine-image",
+                    prompt="draw a cat",
+                    n=2,
+                    size="1024x1024",
+                    response_format="b64_json",
+                    stream=False,
+                )
+            )
+
+        assert len(bodies) == 1
+        payload = json.loads(bodies[0])
+        assert payload == {
+            "model": "grok-imagine-image",
+            "prompt": "draw a cat",
+            "n": 2,
+            "size": "1024x1024",
+            "response_format": "b64_json",
+            "stream": False,
+        }
+
+    def test_create_video_audits_full_request_body(self, monkeypatch):
+        import asyncio
+
+        from app.products.openai import video as video_mod
+
+        spec = SimpleNamespace(enabled=True, is_video=lambda: True)
+        monkeypatch.setattr(
+            video_mod, "model_registry", SimpleNamespace(get=lambda _: spec)
+        )
+        monkeypatch.setattr(video_mod, "_put_video_job", _async_noop)
+        monkeypatch.setattr(video_mod, "_run_video_job", _async_noop)
+        monkeypatch.setattr(video_mod, "_expire_video_job", _async_noop)
+
+        bodies: list[bytes] = []
+        monkeypatch.setattr(
+            video_mod,
+            "log_media_input_summary",
+            lambda logger_obj, request_id, body: bodies.append(body),
+        )
+
+        asyncio.run(
+            video_mod.create_video(
+                model="grok-imagine-video",
+                prompt="a cat walking",
+                seconds=6,
+                size="720x1280",
+                input_references=[{"image_url": "data:image/png;base64,aGVsbG8="}],
+            )
+        )
+
+        assert len(bodies) == 1
+        payload = json.loads(bodies[0])
+        assert payload["model"] == "grok-imagine-video"
+        assert payload["prompt"] == "a cat walking"
+        assert payload["seconds"] == "6"
+        assert payload["size"] == "720x1280"
+        assert payload["input_references"] == [
+            {"image_url": "data:image/png;base64,aGVsbG8="}
+        ]

@@ -348,7 +348,16 @@ async def generate(
     log_media_input_summary(
         logger,
         response_id,
-        orjson.dumps({"model": model, "prompt": prompt, "n": n}),
+        orjson.dumps(
+            {
+                "model": model,
+                "prompt": prompt,
+                "n": n,
+                "size": size,
+                "response_format": response_format,
+                "stream": stream,
+            }
+        ),
     )
     enable_pro = model in _PRO_IMAGE_MODELS
     _ws_mode_id = int(spec.mode_id)
@@ -526,7 +535,9 @@ async def generate(
         except UpstreamError as exc:
             fail_exc = exc
             if _should_retry_upstream(exc, retry_codes):
-                last_credential_error = exc
+                is_credential = _feedback_kind(exc) == FeedbackKind.UNAUTHORIZED
+                if is_credential:
+                    last_credential_error = exc
                 if policy.has_next(attempt):
                     retry = True
                     logger.warning(
@@ -535,7 +546,12 @@ async def generate(
                         policy.retry_budget,
                         token[:8],
                     )
-                # Final attempt: fall through to the post-loop 503 audit.
+                elif not is_credential:
+                    # Final attempt, upstream failure: propagate the ORIGINAL
+                    # error with its original status — Go executeImage (8004840)
+                    # fails immediately on upstream execution failure; only
+                    # credential exhaustion wraps 503.
+                    raise
             else:
                 raise
         except BaseException as exc:
@@ -613,7 +629,15 @@ async def _generate_lite(
     log_media_input_summary(
         logger,
         response_id,
-        orjson.dumps({"model": spec.model_name, "prompt": prompt, "n": n}),
+        orjson.dumps(
+            {
+                "model": spec.model_name,
+                "prompt": prompt,
+                "n": n,
+                "response_format": response_format,
+                "stream": stream,
+            }
+        ),
     )
     logger.debug(
         "lite image fan-out started: request_count={} mode={}",

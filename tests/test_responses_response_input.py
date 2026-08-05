@@ -118,3 +118,94 @@ def test_input_unknown_passthrough():
     items = [{"type": "unknown_new_type", "data": "test"}]
     result = normalize_input_items(items)
     assert len(result) == 1
+
+
+# --- G2-2: Build request-path normalization wiring (Go c936ab1) ---
+
+
+def test_input_function_call_output_content_array_normalized():
+    """Content-array output is normalized (not passed through raw): image
+    blocks keep their structure and detail=original is downgraded to high."""
+    items = [
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": [
+                {"type": "input_text", "text": "tool result"},
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,x",
+                    "detail": "original",
+                },
+            ],
+        }
+    ]
+    result = normalize_input_items(items)
+    item = result[0]
+    assert item["type"] == "function_call_output"
+    assert item["call_id"] == "call_1"
+    assert item["output"] == [
+        {"type": "input_text", "text": "tool result"},
+        {
+            "type": "input_image",
+            "detail": "high",
+            "image_url": "data:image/png;base64,x",
+        },
+    ]
+
+
+def test_input_function_call_output_json_string_encoded():
+    """Plain structured output is JSON-stringified (encodeToolOutput)."""
+    items = [{"type": "function_call_output", "call_id": "call_1", "output": {"ok": 1}}]
+    result = normalize_input_items(items)
+    assert result[0]["output"] == '{"ok": 1}'
+
+
+def test_input_function_call_output_string_passes_through():
+    items = [{"type": "function_call_output", "call_id": "call_1", "output": "done"}]
+    result = normalize_input_items(items)
+    assert result[0]["output"] == "done"
+
+
+def test_input_message_image_detail_original_downgraded(monkeypatch):
+    """Message content input_image parts are normalized: original -> high."""
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "app.platform.storage.media_audit.logger.warning",
+        lambda message, *args: warnings.append(message),
+    )
+    items = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "look"},
+                {"type": "input_image", "image_url": "u", "detail": "original"},
+            ],
+        }
+    ]
+    result = normalize_input_items(items)
+    content = result[0]["content"]
+    assert content[0] == {"type": "input_text", "text": "look"}
+    assert content[1]["type"] == "input_image"
+    assert content[1]["detail"] == "high"
+    assert content[1]["image_url"] == "u"
+    assert warnings
+
+
+def test_input_message_image_auto_detail_kept():
+    items = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_image", "image_url": "u", "detail": "auto"}],
+        }
+    ]
+    result = normalize_input_items(items)
+    assert result[0]["content"][0]["detail"] == "auto"
+
+
+def test_input_message_string_content_untouched():
+    items = [{"type": "message", "role": "user", "content": "plain text"}]
+    result = normalize_input_items(items)
+    assert result[0]["content"] == "plain text"

@@ -264,7 +264,9 @@ class TestGenerateRetryExhaustionAudit:
             token = "tok_abc12345678"
 
         class _Dir:
-            async def reserve_any(self, pool_candidates, now_s_override=None, exclude_tokens=None):
+            async def reserve_any(
+                self, pool_candidates, now_s_override=None, exclude_tokens=None
+            ):
                 calls["reserves"] += 1
                 return _Acct()
 
@@ -277,9 +279,7 @@ class TestGenerateRetryExhaustionAudit:
         monkeypatch.setattr("app.dataplane.account._directory", _Dir())
 
         async def _failing_stream(*args, **kwargs):
-            raise UpstreamError(
-                "Image generation failed: 401 unauthorized", status=401
-            )
+            raise UpstreamError("Image generation failed: 401 unauthorized", status=401)
             yield  # unreachable: make it an async generator for `async for`
 
         monkeypatch.setattr(images_mod, "stream_images", _failing_stream)
@@ -302,5 +302,72 @@ class TestGenerateRetryExhaustionAudit:
         assert calls["reserves"] == 2
         assert calls["releases"] == 2
         # A 503 upstream_unavailable audit line was emitted.
-        assert any("upstream_unavailable" in line and "status=503" in line
-                   for line in audit_lines)
+        assert any(
+            "upstream_unavailable" in line and "status=503" in line
+            for line in audit_lines
+        )
+
+    @pytest.mark.asyncio
+    async def test_upstream_429_propagates_original_status(self, monkeypatch):
+        """G2-3 (Go 8004840): a retryable UPSTREAM failure on the final attempt
+        propagates its original status (429), never a 503 wrap — only
+        credential exhaustion wraps 503."""
+        from types import SimpleNamespace
+
+        from app.platform.errors import UpstreamError
+        from app.products.openai import images as images_mod
+
+        spec = SimpleNamespace(
+            mode_id=2,
+            pool_candidates=lambda: ["super"],
+            model_name="grok-imagine-image",
+        )
+        monkeypatch.setattr(images_mod, "resolve_model", lambda model: spec)
+        monkeypatch.setattr(images_mod, "selection_max_retries", lambda: 1)
+        monkeypatch.setattr(images_mod, "_configured_retry_codes", lambda cfg: {429})
+        monkeypatch.setattr(
+            images_mod, "_should_retry_upstream", lambda exc, codes: True
+        )
+
+        calls = {"reserves": 0, "releases": 0}
+
+        class _Acct:
+            token = "tok_abc12345678"
+
+        class _Dir:
+            async def reserve_any(
+                self, pool_candidates, now_s_override=None, exclude_tokens=None
+            ):
+                calls["reserves"] += 1
+                return _Acct()
+
+            async def release(self, acct):
+                calls["releases"] += 1
+
+            async def feedback(self, token, kind, mode):
+                pass
+
+        monkeypatch.setattr("app.dataplane.account._directory", _Dir())
+
+        async def _failing_stream(*args, **kwargs):
+            raise UpstreamError("Image generation failed: 429 rate limited", status=429)
+            yield  # unreachable: make it an async generator for `async for`
+
+        monkeypatch.setattr(images_mod, "stream_images", _failing_stream)
+
+        audit_lines: list[str] = []
+        monkeypatch.setattr(
+            images_mod.logger,
+            "warning",
+            lambda message, *args: audit_lines.append(message),
+        )
+
+        with pytest.raises(UpstreamError) as excinfo:
+            await images_mod.generate(model="grok-imagine-image", prompt="draw a cat")
+
+        err = excinfo.value
+        assert err.status == 429
+        assert "rate limited" in err.message
+        assert calls["reserves"] == 2
+        assert calls["releases"] == 2
+        assert not any("status=503" in line for line in audit_lines)

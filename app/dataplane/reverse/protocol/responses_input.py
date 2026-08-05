@@ -10,6 +10,10 @@ from app.dataplane.reverse.protocol.tool_parser import (
     normalize_function_arguments,
     schema_contains_reachable_integer,
 )
+from app.platform.storage.media_audit import (
+    normalize_function_call_output_input,
+    normalize_input_image_part,
+)
 
 
 def normalize_input_items(
@@ -47,17 +51,19 @@ def _normalize_input_item(
 
     item_type = item.get("type", "")
 
-    # Message items pass through
+    # Message items: normalize content blocks (Go normalizeMessageContent).
     if item_type == "message":
-        return item
+        return _normalize_message_content(item)
 
     # Function call: normalize arguments when the tool schema requires integers
     if item_type == "function_call":
         return _normalize_function_call_arguments(item, schemas)
 
-    # Function call output: pass through
+    # Function call output: content arrays stay structured (input_image
+    # normalized), everything else is JSON-stringified (Go
+    # normalizeFunctionCallOutputInput / encodeToolOutput).
     if item_type == "function_call_output":
-        return item
+        return normalize_function_call_output_input(item)
 
     # Reasoning: pass through
     if item_type == "reasoning":
@@ -112,6 +118,24 @@ def _normalize_input_item(
 
     # Unknown: pass through
     return item
+
+
+def _normalize_message_content(item: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a message item's content blocks (Go normalizeMessageContent).
+
+    ``input_image`` parts are normalized (detail ``original`` → ``high``,
+    Build 0.2.103); all other blocks pass through untouched.
+    """
+    content = item.get("content")
+    if not isinstance(content, list):
+        return item
+    normalized: list[Any] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "input_image":
+            normalized.append(normalize_input_image_part(block))
+        else:
+            normalized.append(block)
+    return {**item, "content": normalized}
 
 
 def _normalize_function_call_arguments(

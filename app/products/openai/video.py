@@ -1017,7 +1017,17 @@ async def create_video(
     log_media_input_summary(
         logger,
         job.id,
-        orjson.dumps({"input_references": input_references or []}),
+        orjson.dumps(
+            {
+                "model": model,
+                "prompt": cleaned_prompt,
+                "seconds": str(normalized_seconds),
+                "size": normalized_size,
+                "resolution_name": resolution_name,
+                "preset": preset,
+                "input_references": input_references or [],
+            }
+        ),
     )
     asyncio.create_task(
         _run_video_job(
