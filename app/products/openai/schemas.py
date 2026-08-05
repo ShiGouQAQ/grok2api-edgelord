@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class MessageItem(BaseModel):
@@ -88,8 +88,7 @@ class ResponsesCreateRequest(BaseModel):
     include: list[str] | None = None
     background: bool | None = None
 
-    class Config:
-        extra = "ignore"
+    model_config = ConfigDict(extra="ignore")
 
 
 __all__ = [
