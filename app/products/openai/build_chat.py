@@ -301,9 +301,8 @@ async def completions(
 
                     except UpstreamError as exc:
                         fail_exc = exc
-                        if (
-                            _should_retry_upstream(exc, retry_codes)
-                            and policy.has_next(attempt)
+                        if _should_retry_upstream(exc, retry_codes) and policy.has_next(
+                            attempt
                         ):
                             _retry = True
                             logger.warning(
@@ -432,7 +431,9 @@ async def completions(
 
             except UpstreamError as exc:
                 fail_exc = exc
-                if _should_retry_upstream(exc, retry_codes) and policy.has_next(attempt):
+                if _should_retry_upstream(exc, retry_codes) and policy.has_next(
+                    attempt
+                ):
                     logger.warning(
                         "build chat non-stream retry: attempt={}/{} status={} body={}",
                         attempt + 1,
@@ -553,6 +554,19 @@ async def stream_build_chat(
                 elif kind == "done":
                     return
         except Exception as exc:
+            # Go 0893557a isUpstreamStreamFailure: a body stream that fails
+            # AFTER a successful response header marks node failure on a fresh
+            # baseline (MarkFailureAfterSuccess, status 502). A client cancel
+            # (CancelledError, a BaseException) never reaches here.
+            from app.control.proxy.models import (
+                ProxyFeedback,
+                ProxyFeedbackKind,
+            )
+
+            await proxy.mark_failure_after_success(
+                lease,
+                ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR, status_code=502),
+            )
             raise UpstreamError(f"Build stream read failed: {exc}", status=502) from exc
 
 

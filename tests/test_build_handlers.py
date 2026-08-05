@@ -3,9 +3,14 @@
 Tests payload construction, headers, BuildStreamAdapter, and basic flow.
 """
 
+import asyncio
+from contextlib import contextmanager
+from typing import AsyncGenerator, Iterator
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from app.control.proxy.models import ProxyFeedbackKind
 from app.dataplane.reverse.protocol.xai_build import (
     build_build_responses_payload,
     BuildStreamAdapter,
@@ -232,3 +237,91 @@ def test_build_messages_create_importable():
     from app.products.anthropic.build_messages import create
 
     assert callable(create)
+
+
+# ---------------------------------------------------------------------------
+# 0893557a — mark_failure_after_success in the Build stream seam
+# ---------------------------------------------------------------------------
+
+
+class TestBuildStreamFailureAfterSuccessWiring:
+    """A Build body stream that fails AFTER a successful 200 header must reach
+    mark_failure_after_success (Go 0893557a isUpstreamStreamFailure →
+    MarkFailureAfterSuccess(502)); a client cancel must not."""
+
+    @contextmanager
+    def _patched_stream(
+        self, aiter_lines
+    ) -> Iterator[tuple[AsyncMock, AsyncGenerator[tuple[str, str], None]]]:
+        from app.products.openai.build_chat import stream_build_chat
+
+        mock_proxy = AsyncMock()
+        mock_lease = MagicMock()
+        mock_lease.clearance_host = "cli-chat-proxy.grok.com"
+        mock_proxy.acquire.return_value = mock_lease
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.aiter_lines = aiter_lines
+
+        mock_session = AsyncMock()
+        mock_session.post.return_value = mock_response
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("app.dataplane.proxy.get_proxy_runtime", return_value=mock_proxy),
+            patch(
+                "app.dataplane.proxy.adapters.session.ResettableSession",
+                return_value=mock_session,
+            ),
+            patch(
+                "app.dataplane.proxy.adapters.headers.build_build_headers",
+                return_value={},
+            ),
+            patch(
+                "app.dataplane.proxy.adapters.session.build_session_kwargs",
+                return_value={},
+            ),
+        ):
+            payload = {"model": "grok-4.5", "input": []}
+            yield mock_proxy, stream_build_chat("test-token", "agent", payload)
+
+    @pytest.mark.asyncio
+    async def test_build_stream_read_failure_after_200_marks_failure(self):
+        from app.platform.errors import UpstreamError
+
+        async def broken_lines():
+            yield b"data: {}"
+            raise OSError("connection reset")
+
+        with self._patched_stream(broken_lines) as (mock_proxy, gen):
+            with pytest.raises(UpstreamError, match="Build stream read failed"):
+                async for _ in gen:
+                    pass
+
+            # 200 header → success feedback first, then mark_failure_after_success.
+            assert mock_proxy.feedback.call_count == 1
+            assert mock_proxy.feedback.call_args[0][1].kind == ProxyFeedbackKind.SUCCESS
+            assert mock_proxy.mark_failure_after_success.call_count == 1
+            fb = mock_proxy.mark_failure_after_success.call_args[0][1]
+            assert fb.kind == ProxyFeedbackKind.TRANSPORT_ERROR
+            assert fb.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_build_stream_cancel_after_200_does_not_mark_failure(self):
+        """G1-2(a): asyncio.CancelledError is a BaseException — the seam's
+        `except Exception` must not catch it, so a cancelled stream sends no
+        failure feedback (Go f1867395 499/cancel skip)."""
+
+        async def cancelled_lines():
+            yield b"data: {}"
+            raise asyncio.CancelledError
+
+        with self._patched_stream(cancelled_lines) as (mock_proxy, gen):
+            with pytest.raises(asyncio.CancelledError):
+                async for _ in gen:
+                    pass
+
+            assert mock_proxy.feedback.call_count == 1  # success only
+            assert mock_proxy.mark_failure_after_success.call_count == 0
