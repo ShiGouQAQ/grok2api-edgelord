@@ -365,6 +365,14 @@ basic 表示 free 账号，super 和 heavy 为付费。
 | `grok-imagine-image-edit` | 图像编辑 | super |
 | `grok-imagine-video` | 文生视频 | super |
 
+### Image / Video（console.x.ai）
+
+| 模型名 | 能力 | 账号等级 |
+| :-- | :-- | :-- |
+| `grok-imagine-image-quality-console` | 文生图（console，高质） | basic |
+| `grok-imagine-image-console` | 文生图（console） | basic |
+| `grok-imagine-video-console` | 文生视频（console） | basic |
+
 ---
 
 ## 账号配置

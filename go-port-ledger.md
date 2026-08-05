@@ -727,3 +727,25 @@ Go `QuotaMode()`：chat 模型 → "console"，Image/ImageEdit → "console_imag
 4. **consoleMediaBodyLimit 2MiB**：图片/视频响应整体读取由 curl_cffi 管理，未逐字节限 2MiB（Go 的 ReadAll+LimitReader 防御；Python 侧视频轮询响应天然小于该值）。
 
 **测试**：`tests/test_console_media.py` 新增 16 用例（registry/路由分派/协议端点/视频轮询/配额映射/白名单）；全量 **1683 passed / 1 skipped**（基线 1667 + 16 新增）。
+
+## 2026-08-05 Build billing 端点修复（真实浏览器实测）
+
+**问题**：`fetch_build_billing`（本地自创，非 Go 移植）请求 `https://api.x.ai/billing/usage` → 恒 404 → `Build billing upstream error: HTTP 404`（`xai_billing.py:237`，refresh.py `_refresh_build_billing` + tokens.py `build_refresh_billing` smoke 验证均受影响）。
+
+**真实浏览器验证**（patchright + channel=chrome + 20211 代理，minted 真实 Build OAuth token，`eyJ0eXAiOiJhdCtqd3Qi` ES256，scope 含 grok-cli:access + api:access）：
+
+| 端点 | 结果 |
+|---|---|
+| `api.x.ai/billing/usage`（旧） | **404** `The requested resource was not found` |
+| `api.x.ai/v1/billing/usage` | 404 |
+| `cli-chat-proxy.grok.com/v1/billing` | **200** `{"config":{"monthlyLimit":{"val":0},"used":{"val":0},"onDemandCap":{"val":0},"billingPeriodStart":...}}` |
+| `cli-chat-proxy.grok.com/v1/billing?format=credits` | 200（credits 变体：`config.onDemandUsed.val`/`config.prepaidBalance.val`） |
+
+**修复**（commit `0e66dfee`）：
+1. 端点改 `https://cli-chat-proxy.grok.com/v1/billing`（`endpoint_table.py` BUILD_BILLING 已有定义但从未被用）。
+2. `parse_billing` 新增 `_val()`：兼容 `{"val": int}` 对象（真实上游形状）与裸 int（旧测试/旧形状）。
+3. 测试：`test_fetch_build_billing_ok` 更新为真实结构 + URL 断言；新增 `test_parse_billing_real_upstream_shape`（实测形状固化）。
+
+**经验**：cli-chat-proxy.grok.com 是 Build provider 真实后端（Go 上游 Build 请求同域）；api.x.ai 无 billing 端点。免费账号 `monthlyLimit=0` → `is_paid=False` → 正确进入 free 池。
+
+**验证**：端到端 `fetch_build_billing(minted_token, proxy_url=20211)` → 200 解析成功；全量 **1684 passed / 1 skipped**。
