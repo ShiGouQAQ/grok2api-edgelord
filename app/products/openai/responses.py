@@ -335,6 +335,7 @@ async def create(
             message_id=message_id,
             tools=tools,
             tool_choice=tool_choice,
+            previous_response_id=previous_response_id,
         )
 
     # -------------------------------------------------------------------------
@@ -355,6 +356,7 @@ async def create(
             message_id=message_id,
             tools=tools,
             tool_choice=tool_choice,
+            previous_response_id=previous_response_id,
         )
 
     # -------------------------------------------------------------------------
@@ -409,6 +411,11 @@ async def create(
                         message=message,
                         files=files,
                         timeout_s=timeout_s,
+                        request_overrides=(
+                            {"previous_response_id": previous_response_id}
+                            if previous_response_id
+                            else None
+                        ),
                     ):
                         if tool_calls_emitted:
                             break

@@ -82,6 +82,7 @@ def build_build_responses_payload(
     temperature: float = 0.7,
     top_p: float = 0.95,
     prompt_cache_key: str | None = None,
+    previous_response_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the JSON payload for Build API POST /v1/responses.
 
@@ -132,6 +133,9 @@ def build_build_responses_payload(
 
     if prompt_cache_key:
         payload = inject_prompt_cache_key(payload, prompt_cache_key)
+
+    if previous_response_id:
+        payload["previous_response_id"] = previous_response_id
 
     return payload
 

@@ -41,17 +41,9 @@ _CONSOLE_CLEARANCE_ORIGIN = "https://console.x.ai"
 _PROXY_ACCOUNT_PLACEHOLDER = "{account}"
 BundleKey = tuple[str, str]
 
-# Egress-node health machine (mirrors account-level feedback.py factors).
-_NODE_SUCCESS_STEP = 0.12
-_NODE_FAILURE_FACTORS = {
-    ProxyFeedbackKind.UNAUTHORIZED: 0.55,
-    ProxyFeedbackKind.FORBIDDEN: 0.25,
-    ProxyFeedbackKind.RATE_LIMITED: 0.45,
-    ProxyFeedbackKind.UPSTREAM_5XX: 0.75,
-    ProxyFeedbackKind.CHALLENGE: 0.55,
-    ProxyFeedbackKind.NODE_BANNED: 0.3,
-    ProxyFeedbackKind.TRANSPORT_ERROR: 0.5,
-}
+# Egress-node health machine (Go egress manager.go FeedbackForScope @75f4f7a7).
+_NODE_SUCCESS_STEP = 0.10
+_NODE_FAILURE_FACTOR = 0.7
 _NODE_MIN_HEALTH = 0.05
 _NODE_DEGRADED_HEALTH = 0.6
 _NODE_UNHEALTHY_HEALTH = 0.3
@@ -289,7 +281,7 @@ class ProxyDirectory:
         """Apply upstream feedback to the appropriate egress node."""
         if result.kind == ProxyFeedbackKind.SUCCESS:
             await self._apply_node_success(lease)
-        elif result.kind in _NODE_FAILURE_FACTORS:
+        else:
             await self._apply_node_failure(lease, result, after_success=False)
         if result.kind in (
             ProxyFeedbackKind.CHALLENGE,
@@ -379,11 +371,39 @@ class ProxyDirectory:
             node.health = min(1.0, float(node.health) + _NODE_SUCCESS_STEP)
             node.state = _node_state_for_health(node.health)
 
+    def _is_proxy_pool_node(self, node: EgressNode) -> bool:
+        """Go isProxyPoolNode: pool nodes and sticky {account}-pinned nodes
+        are exempt from request-level 403/transport health writes."""
+        if self._egress_mode == EgressMode.PROXY_POOL and node.proxy_url:
+            return True
+        return _PROXY_ACCOUNT_PLACEHOLDER in (node.proxy_url or "")
+
     async def _apply_node_failure(
         self, lease: ProxyLease, result: ProxyFeedback, *, after_success: bool
     ) -> None:
-        factor = _NODE_FAILURE_FACTORS.get(result.kind)
-        if factor is None:
+        kind = result.kind
+        status = result.status_code
+        # Go FeedbackForScope @75f4f7a7: 499 (f1867395) and 401/429 are
+        # account-level concerns — node health never moves.
+        if status == 499 or kind in (
+            ProxyFeedbackKind.UNAUTHORIZED,
+            ProxyFeedbackKind.RATE_LIMITED,
+        ):
+            return
+        # Go: Build-scope 403/400 are protocol states (quota, Device OAuth
+        # authorization_pending polls) — not egress failures.
+        if lease.scope == ProxyScope.BUILD and status in (403, 400):
+            return
+        # Go: only 403 and transport errors mutate health, via a single 0.7
+        # factor; every other status hits the default branch (return).
+        is_forbidden = kind in (
+            ProxyFeedbackKind.FORBIDDEN,
+            ProxyFeedbackKind.CHALLENGE,
+            ProxyFeedbackKind.NODE_BANNED,
+        )
+        if is_forbidden and status is not None and status != 403:
+            return
+        if not is_forbidden and kind != ProxyFeedbackKind.TRANSPORT_ERROR:
             return
         async with self._lock:
             node = self._find_node_locked(lease.proxy_url)
@@ -395,13 +415,17 @@ class ProxyDirectory:
                     logger.warning(
                         "proxy node failure write failed: proxy_url={} kind={}",
                         lease.proxy_url,
-                        result.kind,
+                        kind,
                     )
+                return
+            if self._is_proxy_pool_node(node):
                 return
             node.failure_count = (
                 1 if after_success else min(int(node.failure_count) + 1, 65535)
             )
-            node.health = max(_NODE_MIN_HEALTH, float(node.health) * factor)
+            node.health = max(
+                _NODE_MIN_HEALTH, float(node.health) * _NODE_FAILURE_FACTOR
+            )
             node.state = _node_state_for_health(node.health)
             logger.debug(
                 "proxy node health updated: node={} state={} health={:.2f} "
@@ -410,7 +434,7 @@ class ProxyDirectory:
                 node.state.value,
                 node.health,
                 node.failure_count,
-                result.kind,
+                kind,
             )
 
     # ------------------------------------------------------------------

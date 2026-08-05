@@ -21,6 +21,7 @@ def build_chat_payload(
     tool_overrides: dict[str, Any] | None = None,
     model_config_override: dict[str, Any] | None = None,
     request_overrides: dict[str, Any] | None = None,
+    previous_response_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the JSON payload for POST /rest/app-chat/conversations/new."""
     cfg = get_config()
@@ -76,6 +77,9 @@ def build_chat_payload(
 
     if request_overrides:
         payload.update({k: v for k, v in request_overrides.items() if v is not None})
+
+    if previous_response_id:
+        payload["previous_response_id"] = previous_response_id
 
     logger.debug(
         "chat payload built: mode={} message_len={} file_count={}",

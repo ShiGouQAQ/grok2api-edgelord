@@ -517,6 +517,7 @@ async def responses_endpoint(req: ResponsesCreateRequest):
         top_p=req.top_p or 0.95,
         tools=req.tools or None,
         tool_choice=req.tool_choice,
+        previous_response_id=req.previous_response_id,
     )
 
     if isinstance(result, dict):

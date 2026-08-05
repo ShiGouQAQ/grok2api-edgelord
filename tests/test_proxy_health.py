@@ -1,13 +1,17 @@
 """ProxyDirectory egress-node health machine + tunnel rotation tests.
 
 Ports of Go upstream commits:
-- 75f4f7a7  rotate Build proxy-pool tunnels per request (fresh_tunnel)
+- 75f4f7a7  rotate Build proxy-pool tunnels per request (fresh_tunnel);
+           FeedbackForScope single-0.7 health factor + 401/429/Build/pool skips
 - 0893557a  MarkFailureAfterSuccess + node health state machine
 - f1867395  cancelled requests must not cool down proxy nodes
+- G1-4      3xx classifies as success (Go status >= 200 && status < 400)
 """
 
 import asyncio
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
+from contextlib import contextmanager
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from curl_cffi.const import CurlOpt
@@ -29,27 +33,42 @@ from app.dataplane.proxy.table import snapshot_from_directory
 POOL_URLS = ["http://proxy-a", "http://proxy-b", "http://proxy-c"]
 
 
-def _lease(url: str = POOL_URLS[0]) -> ProxyLease:
-    return ProxyLease(lease_id="t", proxy_url=url)
+def _lease(url: str = POOL_URLS[0], scope: ProxyScope = ProxyScope.APP) -> ProxyLease:
+    return ProxyLease(lease_id="t", proxy_url=url, scope=scope)
 
 
-@pytest.fixture
-def pool_directory() -> ProxyDirectory:
-    """PROXY_POOL-mode ProxyDirectory with three nodes, no clearance."""
+def _make_directory(egress_mode: EgressMode, urls: list[str]) -> ProxyDirectory:
     directory = ProxyDirectory.__new__(ProxyDirectory)
     directory._nodes = [
-        EgressNode(node_id=f"pool-{i}", proxy_url=url)
-        for i, url in enumerate(POOL_URLS)
+        EgressNode(node_id=f"n-{i}", proxy_url=url) for i, url in enumerate(urls)
     ]
     directory._resource_nodes = []
     directory._bundles = {}
     directory._refresh_events = {}
     directory._lock = asyncio.Lock()
-    directory._egress_mode = EgressMode.PROXY_POOL
+    directory._egress_mode = egress_mode
     directory._clearance_mode = ClearanceMode.NONE
     directory._pool_cursor = 0
     directory._mihomo = MihomoClient()
     return directory
+
+
+@pytest.fixture
+def pool_directory() -> ProxyDirectory:
+    """PROXY_POOL-mode ProxyDirectory with three nodes, no clearance."""
+    return _make_directory(EgressMode.PROXY_POOL, POOL_URLS)
+
+
+@pytest.fixture
+def single_directory() -> ProxyDirectory:
+    """SINGLE_PROXY-mode ProxyDirectory — one non-pool node."""
+    return _make_directory(EgressMode.SINGLE_PROXY, POOL_URLS[:1])
+
+
+@pytest.fixture
+def multi_directory() -> ProxyDirectory:
+    """SINGLE_PROXY-mode ProxyDirectory with two non-pool nodes."""
+    return _make_directory(EgressMode.SINGLE_PROXY, POOL_URLS[:2])
 
 
 # ---------------------------------------------------------------------------
@@ -118,78 +137,87 @@ class TestBuildTunnelRotation:
 
 
 # ---------------------------------------------------------------------------
-# 0893557a — EgressNode health state machine
+# 0893557a / 75f4f7a7 — EgressNode health state machine (Go FeedbackForScope)
 # ---------------------------------------------------------------------------
 
 
 class TestNodeHealthMachine:
     @pytest.mark.asyncio
-    async def test_node_banned_degrades_node_and_advances_cursor(self, pool_directory):
+    async def test_pool_node_403_skips_health_but_advances_cursor(self, pool_directory):
+        """G1-1: Go isProxyPoolNode — a request-level 403 (even NODE_BANNED)
+        does not prove a shared pool node unhealthy. Rotation still advances."""
         await pool_directory.feedback(
-            _lease(), ProxyFeedback(kind=ProxyFeedbackKind.NODE_BANNED)
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.NODE_BANNED, status_code=403),
         )
         node = pool_directory._nodes[0]
-        assert node.state == EgressNodeState.DEGRADED
-        assert node.health == pytest.approx(0.3)
-        assert node.failure_count == 1
+        assert node.state == EgressNodeState.HEALTHY
+        assert node.health == 1.0
+        assert node.failure_count == 0
         assert pool_directory._pool_cursor == 1
 
     @pytest.mark.asyncio
     async def test_success_repairs_health_and_resets_failure_count(
-        self, pool_directory
+        self, single_directory
     ):
-        await pool_directory.feedback(
-            _lease(), ProxyFeedback(kind=ProxyFeedbackKind.NODE_BANNED)
+        await single_directory.feedback(
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.FORBIDDEN, status_code=403),
         )
-        await pool_directory.feedback(
+        node = single_directory._nodes[0]
+        assert node.failure_count == 1
+        assert node.health == pytest.approx(0.7)
+        await single_directory.feedback(
             _lease(), ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS)
         )
-        node = pool_directory._nodes[0]
         assert node.failure_count == 0
-        assert node.health == pytest.approx(0.3 + 0.12)
-        assert node.state == EgressNodeState.DEGRADED
+        assert node.health == pytest.approx(0.7 + 0.10)
 
     @pytest.mark.asyncio
-    async def test_success_heals_back_to_healthy(self, pool_directory):
-        node = pool_directory._nodes[0]
-        for _ in range(3):
-            await pool_directory.feedback(
+    async def test_success_heals_back_to_healthy(self, single_directory):
+        node = single_directory._nodes[0]
+        for _ in range(4):
+            await single_directory.feedback(
                 _lease(), ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
             )
         assert node.state == EgressNodeState.UNHEALTHY
-        assert node.health == pytest.approx(0.125)
-        for _ in range(6):
-            await pool_directory.feedback(
+        assert node.health == pytest.approx(0.7**4)
+        for _ in range(4):
+            await single_directory.feedback(
                 _lease(), ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS)
             )
         assert node.state == EgressNodeState.HEALTHY
-        assert node.health > 0.125
+        assert node.health == pytest.approx(0.7**4 + 4 * 0.10)
 
     @pytest.mark.asyncio
-    async def test_mark_failure_after_success_sets_baseline_one(self, pool_directory):
+    async def test_mark_failure_after_success_sets_baseline_one(self, single_directory):
         """Stream failure after a successful response header must start a FRESH
         baseline (failure_count=1), not compound prior failures (Go
         MarkFailureAfterSuccess)."""
-        node = pool_directory._nodes[0]
+        node = single_directory._nodes[0]
         for _ in range(2):
-            await pool_directory.feedback(
+            await single_directory.feedback(
                 _lease(), ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
             )
         assert node.failure_count == 2
-        await pool_directory.mark_failure_after_success(
-            _lease(), ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
+        await single_directory.mark_failure_after_success(
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR, status_code=502),
         )
         assert node.failure_count == 1  # baseline, not 3
-        assert node.health < 1.0
+        assert node.health == pytest.approx(0.7**3)
 
     @pytest.mark.asyncio
-    async def test_healthy_nodes_excludes_degraded(self, pool_directory):
-        await pool_directory.feedback(
-            _lease(), ProxyFeedback(kind=ProxyFeedbackKind.NODE_BANNED)
+    async def test_healthy_nodes_excludes_degraded(self, multi_directory):
+        await multi_directory.feedback(
+            _lease(), ProxyFeedback(kind=ProxyFeedbackKind.FORBIDDEN, status_code=403)
         )
-        table = snapshot_from_directory(pool_directory)
+        await multi_directory.feedback(
+            _lease(), ProxyFeedback(kind=ProxyFeedbackKind.FORBIDDEN, status_code=403)
+        )
+        table = snapshot_from_directory(multi_directory)
         healthy = table.healthy_nodes()
-        assert [n.node_id for n in healthy] == ["pool-1", "pool-2"]
+        assert [n.node_id for n in healthy] == ["n-1"]
 
     @pytest.mark.asyncio
     async def test_feedback_without_node_logs_instead_of_silent_drop(
@@ -209,6 +237,158 @@ class TestNodeHealthMachine:
         )
         assert any("proxy node failure write failed" in str(w) for w in warnings)
         assert pool_directory._pool_cursor == 1  # rotation still applies
+
+
+class TestGoFeedbackForScopeSemantics:
+    """G1-1: node health follows Go egress FeedbackForScope @75f4f7a7 —
+    single 0.7 factor; 401/429, Build-scope 403/400, and pool/sticky nodes
+    never move node health."""
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_leaves_health_unchanged(self, single_directory):
+        await single_directory.feedback(
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.UNAUTHORIZED, status_code=401),
+        )
+        node = single_directory._nodes[0]
+        assert node.health == 1.0
+        assert node.failure_count == 0
+        assert node.state == EgressNodeState.HEALTHY
+
+    @pytest.mark.asyncio
+    async def test_rate_limited_leaves_health_unchanged(self, single_directory):
+        await single_directory.feedback(
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.RATE_LIMITED, status_code=429),
+        )
+        node = single_directory._nodes[0]
+        assert node.health == 1.0
+        assert node.failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_build_scope_403_leaves_health_unchanged(self, single_directory):
+        await single_directory.feedback(
+            _lease(scope=ProxyScope.BUILD),
+            ProxyFeedback(kind=ProxyFeedbackKind.FORBIDDEN, status_code=403),
+        )
+        node = single_directory._nodes[0]
+        assert node.health == 1.0
+        assert node.failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_build_scope_400_leaves_health_unchanged(self, single_directory):
+        """Go: Build 400 is a protocol state (Device OAuth
+        authorization_pending polls), not an egress failure."""
+        await single_directory.feedback(
+            _lease(scope=ProxyScope.BUILD),
+            ProxyFeedback(kind=ProxyFeedbackKind.FORBIDDEN, status_code=400),
+        )
+        node = single_directory._nodes[0]
+        assert node.health == 1.0
+        assert node.failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_proxy_pool_node_403_skips_health(self, pool_directory):
+        await pool_directory.feedback(
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.FORBIDDEN, status_code=403),
+        )
+        node = pool_directory._nodes[0]
+        assert node.health == 1.0
+        assert node.failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_proxy_pool_node_transport_error_skips_health(self, pool_directory):
+        await pool_directory.feedback(
+            _lease(), ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
+        )
+        node = pool_directory._nodes[0]
+        assert node.health == 1.0
+        assert node.failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_sticky_account_node_skips_health(self):
+        """Go isStickyProxyNode: {account}-pinned URLs are exempt too."""
+        directory = _make_directory(
+            EgressMode.SINGLE_PROXY, ["http://proxy-a/{account}"]
+        )
+        await directory.feedback(
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.FORBIDDEN, status_code=403),
+        )
+        node = directory._nodes[0]
+        assert node.health == 1.0
+        assert node.failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_non_pool_forbidden_applies_0_7(self, single_directory):
+        await single_directory.feedback(
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.FORBIDDEN, status_code=403),
+        )
+        node = single_directory._nodes[0]
+        assert node.health == pytest.approx(0.7)
+        assert node.failure_count == 1
+
+    @pytest.mark.asyncio
+    async def test_transport_error_applies_0_7(self, single_directory):
+        await single_directory.feedback(
+            _lease(), ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR)
+        )
+        node = single_directory._nodes[0]
+        assert node.health == pytest.approx(0.7)
+        assert node.failure_count == 1
+
+    @pytest.mark.asyncio
+    async def test_challenge_and_node_banned_follow_403_branch(self, single_directory):
+        """Go has no CHALLENGE/NODE_BANNED kinds — both are 403s and hit the
+        FORBIDDEN branch (×0.7)."""
+        await single_directory.feedback(
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.CHALLENGE, status_code=403),
+        )
+        await single_directory.feedback(
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.NODE_BANNED, status_code=403),
+        )
+        node = single_directory._nodes[0]
+        assert node.health == pytest.approx(0.7**2)
+        assert node.failure_count == 2
+
+    @pytest.mark.asyncio
+    async def test_upstream_5xx_leaves_health_unchanged(self, single_directory):
+        """Go default branch: HTTP statuses describe the upstream response,
+        not proxy endpoint health (account routing handles them)."""
+        await single_directory.feedback(
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.UPSTREAM_5XX, status_code=500),
+        )
+        node = single_directory._nodes[0]
+        assert node.health == 1.0
+        assert node.failure_count == 0
+
+    @pytest.mark.asyncio
+    async def test_499_leaves_health_unchanged(self, single_directory):
+        """Go f1867395: clientClosedRequestStatus (499) never cools a node."""
+        await single_directory.feedback(
+            _lease(),
+            ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR, status_code=499),
+        )
+        node = single_directory._nodes[0]
+        assert node.health == 1.0
+        assert node.failure_count == 0
+
+
+class TestClassifyStatusCodeGoSemantics:
+    """G1-4: Go `status >= 200 && status < 400` → success, not FORBIDDEN."""
+
+    def test_3xx_classifies_as_success(self):
+        from app.control.proxy.feedback import classify_status_code
+
+        for code in (200, 204, 301, 302, 304, 399):
+            assert classify_status_code(code) == ProxyFeedbackKind.SUCCESS
+        assert classify_status_code(400) == ProxyFeedbackKind.FORBIDDEN
+        assert classify_status_code(404) == ProxyFeedbackKind.FORBIDDEN
 
 
 # ---------------------------------------------------------------------------
@@ -250,3 +430,123 @@ class TestCancelNoCooldown:
         assert node.failure_count == 0
         assert pool_directory._pool_cursor == 0
         assert pool_directory._mihomo._blacklist == set()
+
+
+# ---------------------------------------------------------------------------
+# 0893557a — mark_failure_after_success wired into the stream seam
+# ---------------------------------------------------------------------------
+
+
+class TestStreamFailureAfterSuccessWiring:
+    """G1-2(b): a body stream that fails AFTER a successful response header
+    must reach mark_failure_after_success (Go 0893557a isUpstreamStreamFailure
+    → MarkFailureAfterSuccess(502)); a client cancel must not."""
+
+    @pytest.fixture
+    def _bypass_dpop_exchange(self, monkeypatch):
+        """Serve a ready DPoP session instead of running the token exchange."""
+        import time
+
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        from app.dataplane.reverse.protocol.dpop import (
+            DPoPSession,
+            public_dpop_jwk,
+        )
+
+        key = ec.generate_private_key(ec.SECP256R1())
+        session = DPoPSession(
+            access_token="fake-at",
+            private_key=key,
+            public_jwk=public_dpop_jwk(key),
+            expires_at=int(time.time() * 1000) + 3_600_000,
+        )
+        fake = MagicMock()
+        fake.get_or_fetch = AsyncMock(return_value=session)
+        monkeypatch.setattr(
+            "app.dataplane.reverse.protocol.xai_console_chat._get_dpop_manager",
+            lambda token, lease: fake,
+        )
+
+    @contextmanager
+    def _patched_stream(
+        self, aiter_lines
+    ) -> Iterator[tuple[AsyncMock, AsyncGenerator[tuple[str, str], None]]]:
+        from app.dataplane.reverse.protocol.xai_console_chat import (
+            stream_console_chat,
+        )
+
+        mock_proxy = AsyncMock()
+        mock_lease = MagicMock()
+        mock_lease.clearance_host = "console.x.ai"
+        mock_proxy.acquire.return_value = mock_lease
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.aiter_lines = aiter_lines
+
+        mock_session = AsyncMock()
+        mock_session.post.return_value = mock_response
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("app.dataplane.proxy.get_proxy_runtime", return_value=mock_proxy),
+            patch(
+                "app.dataplane.proxy.adapters.session.ResettableSession",
+                return_value=mock_session,
+            ),
+            patch(
+                "app.dataplane.proxy.adapters.headers.build_console_headers",
+                return_value={},
+            ),
+            patch(
+                "app.dataplane.proxy.adapters.session.build_session_kwargs",
+                return_value={},
+            ),
+        ):
+            payload = {"model": "grok-4.3", "input": []}
+            yield mock_proxy, stream_console_chat("test-token", payload)
+
+    @pytest.mark.asyncio
+    async def test_stream_read_failure_after_200_marks_failure(
+        self, _bypass_dpop_exchange
+    ):
+        from app.platform.errors import UpstreamError
+
+        async def broken_lines():
+            yield b"data: {}"
+            raise OSError("connection reset")
+
+        with self._patched_stream(broken_lines) as (mock_proxy, gen):
+            with pytest.raises(UpstreamError, match="Console stream read failed"):
+                async for _ in gen:
+                    pass
+
+            # 200 header → success feedback first, then mark_failure_after_success.
+            assert mock_proxy.feedback.call_count == 1
+            assert mock_proxy.feedback.call_args[0][1].kind == ProxyFeedbackKind.SUCCESS
+            assert mock_proxy.mark_failure_after_success.call_count == 1
+            fb = mock_proxy.mark_failure_after_success.call_args[0][1]
+            assert fb.kind == ProxyFeedbackKind.TRANSPORT_ERROR
+            assert fb.status_code == 502
+
+    @pytest.mark.asyncio
+    async def test_stream_cancel_after_200_does_not_mark_failure(
+        self, _bypass_dpop_exchange
+    ):
+        """G1-2(a): asyncio.CancelledError is a BaseException — the seam's
+        `except Exception` must not catch it, so a cancelled stream sends no
+        failure feedback (Go f1867395 499/cancel skip)."""
+
+        async def cancelled_lines():
+            yield b"data: {}"
+            raise asyncio.CancelledError
+
+        with self._patched_stream(cancelled_lines) as (mock_proxy, gen):
+            with pytest.raises(asyncio.CancelledError):
+                async for _ in gen:
+                    pass
+
+            assert mock_proxy.mark_failure_after_success.call_count == 0
+            assert mock_proxy.feedback.call_count == 1  # only the 200 header

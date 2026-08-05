@@ -38,7 +38,10 @@ from app.dataplane.reverse.protocol.tool_prompt import (
     inject_into_message,
 )
 from app.dataplane.reverse.protocol.tool_parser import parse_tool_calls
-from app.products._routing_policy import routing_attempt_policy
+from app.products._routing_policy import (
+    new_routing_attempt_policy,
+    routing_attempt_policy,
+)
 
 from app.products._account_selection import reserve_account, selection_max_retries
 from app.products.openai.chat import _configured_retry_codes, _should_retry_upstream
@@ -107,13 +110,26 @@ async def create(
     message_id: str,
     tools: list[dict] | None = None,
     tool_choice: Any = None,
+    previous_response_id: str | None = None,
 ) -> dict | AsyncGenerator[str, None]:
     """Console models /v1/responses handler."""
 
     cfg = get_config()
     spec = resolve_model(model)
     timeout_s = cfg.get_float("chat.timeout", 120.0)
-    policy = routing_attempt_policy(selection_max_retries())
+    # Go service.go: ownership != nil → newRoutingAttemptPolicy(1). Console
+    # does not retain Response state (Go clears previous_response_id → stateless
+    # replay), but a chained request must still never swap accounts mid-chain.
+    if previous_response_id:
+        policy = new_routing_attempt_policy(1)
+        logger.warning(
+            "console responses: previous_response_id={} — Console is a stateless "
+            "replay provider (Go: id cleared, no stored responses); id not "
+            "forwarded upstream",
+            previous_response_id,
+        )
+    else:
+        policy = routing_attempt_policy(selection_max_retries())
     retry_codes = _configured_retry_codes(cfg)
 
     # ── Tool call setup ───────────────────────────────────────────────────────
@@ -433,9 +449,8 @@ async def create(
 
                     except UpstreamError as exc:
                         fail_exc = exc
-                        if (
-                            _should_retry_upstream(exc, retry_codes)
-                            and policy.has_next(attempt)
+                        if _should_retry_upstream(exc, retry_codes) and policy.has_next(
+                            attempt
                         ):
                             _retry = True
                             logger.warning(
@@ -578,7 +593,9 @@ async def create(
 
             except UpstreamError as exc:
                 fail_exc = exc
-                if _should_retry_upstream(exc, retry_codes) and policy.has_next(attempt):
+                if _should_retry_upstream(exc, retry_codes) and policy.has_next(
+                    attempt
+                ):
                     logger.warning(
                         "console responses non-stream retry: attempt={}/{} status={}",
                         attempt + 1,

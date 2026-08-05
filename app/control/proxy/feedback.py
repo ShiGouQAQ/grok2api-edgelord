@@ -4,7 +4,8 @@ from .models import ProxyFeedback, ProxyFeedbackKind
 
 
 def classify_status_code(status_code: int) -> ProxyFeedbackKind:
-    if status_code == 200:
+    # Go FeedbackForScope @75f4f7a7: succeeded := status >= 200 && status < 400
+    if 200 <= status_code < 400:
         return ProxyFeedbackKind.SUCCESS
     if status_code == 401:
         return ProxyFeedbackKind.UNAUTHORIZED
