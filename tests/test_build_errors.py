@@ -56,9 +56,26 @@ def test_invalidate_no_match():
     )
 
 
-def test_invalidate_requires_account_scoped():
-    # Non-account-scoped 403 (e.g. request-level policy denial) must NOT invalidate.
-    assert not should_invalidate_build_forbidden(403, "blocked-user", "")
+def test_invalidate_default_permission_denied():
+    # Go config.go:685 default BuildForbiddenReauthCodes=["permission-denied"]
+    assert should_invalidate_build_forbidden(403, "permission-denied", "")
+
+
+def test_invalidate_exact_code_not_substring():
+    # Code present → exact set membership only; message wording must not match.
+    assert not should_invalidate_build_forbidden(
+        403, "forbidden", "blocked-user", account_scoped=True
+    )
+    assert not should_invalidate_build_forbidden(
+        403, "permission-denied-prefix", "", account_scoped=True
+    )
+
+
+def test_invalidate_code_match_does_not_require_prescoped():
+    # Go service.go:895-897 forces AccountScoped=true after a code match — the
+    # match itself establishes scope; no pre-requisite gate here.
+    assert should_invalidate_build_forbidden(403, "blocked-user", "")
+    assert should_invalidate_build_forbidden(403, "", "user is blocked")
 
 
 def test_invalidate_safety_rejection_never_invalidates():

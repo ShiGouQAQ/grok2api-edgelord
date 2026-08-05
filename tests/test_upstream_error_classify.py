@@ -347,6 +347,42 @@ class TestClassifyUpstream403:
         _, kw = _classify_upstream_status(403, "", "", "blocked-user")
         assert kw["credential_rejected"] is True
 
+    # --- AccountBlocked 作用域（Go d1205d85: isDefinitiveAccountBlock → AccountScoped，
+    #     与 CredentialRejected 分离：仅 blocked-user 码同时标记 credential） ---
+
+    def test_user_is_blocked_message_sets_account_scoped(self):
+        """403 + 'user is blocked'（仅 message，无 code）→ account_scoped=True、credential_rejected=False"""
+        _, kw = _classify_upstream_status(403, "", "", "user is blocked")
+        assert kw["account_scoped"] is True
+        assert kw["credential_rejected"] is False
+        assert kw["permanent_account_denial"] is False
+
+    def test_user_blocked_message_sets_account_scoped(self):
+        """403 + 'user blocked'（仅 message）→ account_scoped=True、credential_rejected=False"""
+        _, kw = _classify_upstream_status(403, "", "", "user blocked")
+        assert kw["account_scoped"] is True
+        assert kw["credential_rejected"] is False
+
+    def test_user_is_blocked_via_from_http_response(self):
+        """完整 body：'user is blocked' 403 → account_scoped（Go AccountBlocked 不标记 credential）"""
+        err = UpstreamError.from_http_response(
+            "test",
+            status=403,
+            body='{"error":{"message":"This user is blocked from using the service"}}',
+        )
+        assert err.account_scoped is True
+        assert err.credential_rejected is False
+
+    # --- G1-M2：裸 token 不再判账号作用域（Go 用精确短语，不匹配 token count/limit 等） ---
+
+    def test_bare_token_keyword_does_not_set_account_scoped(self):
+        """403 + 'token count'（非账号类 token 文案）→ 不再 account_scoped"""
+        _, kw = _classify_upstream_status(
+            403, "", "", "token count exceeds the limit for this model"
+        )
+        assert kw["account_scoped"] is False
+        assert kw["credential_rejected"] is False
+
     # --- 未分类 ---
 
     def test_unclassified_403_all_false(self):

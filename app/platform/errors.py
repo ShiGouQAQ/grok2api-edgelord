@@ -314,10 +314,15 @@ def _classify_upstream_status(
                 "billing",
                 "subscription",
                 "entitlement",
-                "token",
+                "invalid token",
+                "token expired",
                 "usage-exhausted",
                 "insufficient",
                 "spending-limit",
+                # Go AccountBlocked (failure.go:127): the message-only forms
+                # scope the account without marking credentials.
+                "user is blocked",
+                "user blocked",
             ):
                 kw["account_scoped"] = True
     elif status == 429:
@@ -356,6 +361,8 @@ def _contains_any(text: str, *signals: str) -> bool:
 
 _DEFAULT_403_INVALIDATION_CODES: frozenset[str] = frozenset(
     {
+        # Go config.go:685 default BuildForbiddenReauthCodes.
+        "permission-denied",
         "blocked-user",
         "user is blocked",
         "email-domain-rejected",
@@ -375,17 +382,15 @@ def should_invalidate_build_forbidden(
 ) -> bool:
     """Check if a 403 error should trigger account invalidation.
 
-    Port of 09388e5 + d00698ac: configurable Grok Build 403 invalidation rules.
-    Safety rejections are request-scoped and must never invalidate; only
-    account-scoped failures (quota / credential / permanent denial) qualify.
-    Matches upstream_code and upstream_message against configurable error codes
-    (features.build_403_invalidation_codes) or the built-in default list.
+    Port of d1205d85 service.go:210-228: exact set membership on the upstream
+    code (never substring), with a message-only fallback when no code was
+    extracted. Go forces AccountScoped=true after a match (service.go:895-897),
+    so the match itself establishes scope — there is no pre-requisite here.
+    Safety rejections are request-scoped and never invalidate.
     """
     if status != 403:
         return False
     if safety_rejected:
-        return False
-    if not account_scoped:
         return False
     from app.platform.config.snapshot import get_config
 
@@ -394,8 +399,11 @@ def should_invalidate_build_forbidden(
         codes = {c.strip().lower() for c in custom.split(",") if c.strip()}
     else:
         codes = set(_DEFAULT_403_INVALIDATION_CODES)
-    text = f"{upstream_code} {upstream_message}".lower()
-    return any(code in text for code in codes)
+    code = upstream_code.strip().lower() if upstream_code else ""
+    if code:
+        return code in codes
+    lower_message = upstream_message.lower()
+    return any(sig in lower_message for sig in codes)
 
 
 class StreamIdleTimeout(AppError):
