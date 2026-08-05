@@ -69,7 +69,6 @@ CREATE_COOKIE_SETTER_RPC = (
 )
 
 
-
 class SSOCredentialRejected(UpstreamError):
     """SSO credential hard-rejected by upstream.
 
@@ -866,6 +865,13 @@ async def _mint_via_device_flow(sso_token: str) -> BuildCredentialSeed:
                     )
                 else:
                     if resp.status >= 400:
+                        # x.ai may surface credential denials as a non-standard
+                        # error code with an 'Access denied' description.
+                        deny_hint = f"{error} {error_desc}".lower()
+                        if "access denied" in deny_hint or "access_denied" in deny_hint:
+                            raise PermissionError(
+                                f"SSO→Build conversion denied: {error_desc or error}"
+                            )
                         raise RuntimeError(
                             "SSO→Build Device Flow poll failed "
                             f"({resp.status}): {error_desc or error or json.dumps(body)[:200]}"
