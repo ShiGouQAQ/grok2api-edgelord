@@ -8,15 +8,18 @@ DPoP manager factory, the proxy runtime and the HTTP session are all mocked.
 
 import time
 from contextlib import contextmanager
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from app.control.proxy.models import ProxyFeedbackKind
+from app.dataplane.reverse.protocol import xai_console_chat as chat_module
 from app.dataplane.reverse.protocol.dpop import (
     DPoPError,
     DPoPSession,
+    DPoPSessionManager,
     DPoPTokenEndpointError,
     dpop_session_cache_key,
     public_dpop_jwk,
@@ -36,6 +39,28 @@ class _Profile:
     browser = "chrome120"
     cf_cookies = ""
     cf_clearance = ""
+
+
+class _LeaseProfile:
+    """Per-lease clearance profile so tests can vary cf_clearance per lease."""
+
+    def __init__(self, cf_clearance: str = "") -> None:
+        self.user_agent = CONSOLE_UA
+        self.browser = "chrome120"
+        self.cf_cookies = ""
+        self.cf_clearance = cf_clearance
+
+
+@pytest.fixture(autouse=True)
+def _reset_chat_dpop_globals():
+    """The chat path caches one manager per SSO token at module scope."""
+    chat_module._dpop_manager = None
+    chat_module._dpop_manager_token = None
+    chat_module._dpop_manager_lease = None
+    yield
+    chat_module._dpop_manager = None
+    chat_module._dpop_manager_token = None
+    chat_module._dpop_manager_lease = None
 
 
 def _fake_session(access_token: str = "at-123") -> DPoPSession:
@@ -149,6 +174,9 @@ async def test_success_sends_dpop_headers_and_streams():
     assert headers["DPoP"].count(".") == 2  # ES256 proof JWT
     assert headers["Cache-Control"] == "no-cache"
     assert headers["Pragma"] == "no-cache"
+    assert (
+        headers["x-cluster"] == "https://us-east-1.api.x.ai"
+    )  # G6-M2: /responses only
     manager.get_or_fetch.assert_awaited_once_with(CONSOLE_BASE, 0, 0, "sso-tok")
 
 
@@ -255,3 +283,160 @@ async def test_dpop_error_raises_502():
     assert exc_info.value.status == 502
     assert http.post.await_count == 0
     proxy.feedback.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# G6-I1: definitive-block predicate wired into the chat-path manager
+# ---------------------------------------------------------------------------
+
+
+def _build_chat_manager(token: str, lease):
+    """Real ``_get_dpop_manager`` (not patched); caller patches the exchange."""
+    return chat_module._get_dpop_manager(token, lease)
+
+
+@pytest.mark.asyncio
+async def test_chat_manager_definitive_block_403_keeps_clearance():
+    """G6-I1: a blocked-user 403 on /dpop/token must NOT invalidate clearance.
+
+    Mirrors Go fetchDPoPSession: only 403s that are *not* a definitive account
+    block call lease.InvalidateClearance().
+    """
+    with (
+        patch.object(
+            chat_module,
+            "_post_dpop_token",
+            AsyncMock(return_value=(403, {"raw_body": '{"error": "user is blocked"}'})),
+        ),
+        patch(
+            "app.dataplane.proxy.adapters.headers._resolve_profile",
+            return_value=_Profile(),
+        ),
+    ):
+        manager = _build_chat_manager("sso-tok", MagicMock(proxy_url=None))
+        with pytest.raises(DPoPTokenEndpointError) as exc_info:
+            await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok")
+
+    assert exc_info.value.status == 403
+    assert exc_info.value.invalidate_clearance is False
+
+
+@pytest.mark.asyncio
+async def test_chat_manager_non_definitive_403_invalidates_clearance():
+    """G6-I1: a plain (CF/other) 403 still invalidates clearance."""
+    with (
+        patch.object(
+            chat_module,
+            "_post_dpop_token",
+            AsyncMock(return_value=(403, {"raw_body": '{"error": "cf-challenge"}'})),
+        ),
+        patch(
+            "app.dataplane.proxy.adapters.headers._resolve_profile",
+            return_value=_Profile(),
+        ),
+    ):
+        manager = _build_chat_manager("sso-tok", MagicMock(proxy_url=None))
+        with pytest.raises(DPoPTokenEndpointError) as exc_info:
+            await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok")
+
+    assert exc_info.value.status == 403
+    assert exc_info.value.invalidate_clearance is True
+
+
+# ---------------------------------------------------------------------------
+# G6-I2: token-exchange browser headers follow the current lease
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_manager_browser_headers_callable_rebuilt_per_fetch():
+    """dpop.py contract: a callable browser_headers is resolved per exchange."""
+    box = ["c1"]
+    captured: list[dict[str, str]] = []
+
+    async def post_json(
+        _url: str, headers: dict[str, str], _payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        captured.append(headers)
+        raise DPoPTokenEndpointError(403, b"{}", invalidate_clearance=False)
+
+    manager = DPoPSessionManager(
+        post_json, browser_headers=lambda: {"Cookie": f"cf_clearance={box[0]}"}
+    )
+    with pytest.raises(DPoPTokenEndpointError):
+        await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "tok")
+    box[0] = "c2"
+    with pytest.raises(DPoPTokenEndpointError):
+        await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "tok-other")
+
+    assert captured[0]["Cookie"] == "cf_clearance=c1"
+    assert captured[1]["Cookie"] == "cf_clearance=c2"
+    assert captured[0]["Content-Type"] == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_chat_exchange_headers_follow_current_lease():
+    """G6-I2: a re-exchange after the lease changed carries the new cf_clearance.
+
+    The manager is cached per SSO token, but the token-exchange headers must be
+    derived from the *current* lease (Go applies per-request browser headers).
+    """
+    captured: list[dict[str, str]] = []
+
+    async def fake_post(
+        _url: str, headers: dict[str, str], _payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        captured.append(headers)
+        raise DPoPTokenEndpointError(403, b"{}", invalidate_clearance=False)
+
+    lease1 = MagicMock(proxy_url=None, cf_clearance="c1")
+    lease2 = MagicMock(proxy_url=None, cf_clearance="c2")
+    with (
+        patch.object(chat_module, "_post_dpop_token", fake_post),
+        patch(
+            "app.dataplane.proxy.adapters.headers._resolve_profile",
+            side_effect=lambda lease: _LeaseProfile(cf_clearance=lease.cf_clearance),
+        ),
+    ):
+        manager = chat_module._get_dpop_manager("sso-tok", lease1)
+        with pytest.raises(DPoPTokenEndpointError):
+            await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok")
+
+        # Same token → same manager, but the lease moved on.
+        manager2 = chat_module._get_dpop_manager("sso-tok", lease2)
+        assert manager2 is manager
+        with pytest.raises(DPoPTokenEndpointError):
+            await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok")
+
+    assert "cf_clearance=c1" in captured[0]["Cookie"]
+    assert "cf_clearance=c2" in captured[1]["Cookie"]
+
+
+# ---------------------------------------------------------------------------
+# G6-M2: x-cluster only on /responses (never on the /dpop/token exchange)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_chat_dpop_exchange_has_no_x_cluster():
+    """G6-M2: the token exchange must not carry x-cluster (Go doDPoPRequest)."""
+    captured: list[dict[str, str]] = []
+
+    async def fake_post(
+        _url: str, headers: dict[str, str], _payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        captured.append(headers)
+        raise DPoPTokenEndpointError(403, b"{}", invalidate_clearance=False)
+
+    with (
+        patch.object(chat_module, "_post_dpop_token", fake_post),
+        patch(
+            "app.dataplane.proxy.adapters.headers._resolve_profile",
+            return_value=_Profile(),
+        ),
+    ):
+        manager = chat_module._get_dpop_manager("sso-tok", MagicMock(proxy_url=None))
+        with pytest.raises(DPoPTokenEndpointError):
+            await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok")
+
+    assert "x-cluster" not in captured[0]

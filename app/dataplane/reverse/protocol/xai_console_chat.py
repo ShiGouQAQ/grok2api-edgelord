@@ -31,6 +31,7 @@
 from typing import Any, AsyncGenerator
 
 import orjson
+import zlib
 
 from app.dataplane.proxy.adapters import session as _session_adapter
 from app.dataplane.reverse.protocol.dpop import (
@@ -38,9 +39,11 @@ from app.dataplane.reverse.protocol.dpop import (
     DPoPSession,
     DPoPSessionManager,
     DPoPTokenEndpointError,
+    _X_CLUSTER_HEADER,
     dpop_session_cache_key,
     sign_dpop_proof,
 )
+from app.dataplane.reverse.protocol.xai_console_usage import _is_definitive_block_body
 from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
 
@@ -325,7 +328,9 @@ async def stream_console_chat(
 
     async with _session_adapter.ResettableSession(**session_kwargs) as session:
         try:
-            dpop_session = await manager.get_or_fetch(CONSOLE_BASE, 0, 0, token)
+            dpop_session = await manager.get_or_fetch(
+                CONSOLE_BASE, 0, _lease_node_id(lease), token
+            )
         except DPoPTokenEndpointError as exc:
             if exc.invalidate_clearance:
                 await proxy.feedback(lease, _forbidden_feedback(403))
@@ -391,6 +396,19 @@ async def stream_console_chat(
                 elif kind == "done":
                     return
         except Exception as exc:
+            # Go 0893557a isUpstreamStreamFailure: a body stream that fails
+            # AFTER a successful response header marks node failure on a fresh
+            # baseline (MarkFailureAfterSuccess, status 502). A client cancel
+            # (CancelledError, a BaseException) never reaches here.
+            from app.control.proxy.models import (
+                ProxyFeedback,
+                ProxyFeedbackKind,
+            )
+
+            await proxy.mark_failure_after_success(
+                lease,
+                ProxyFeedback(kind=ProxyFeedbackKind.TRANSPORT_ERROR, status_code=502),
+            )
             raise UpstreamError(
                 f"Console stream read failed: {exc}", status=502
             ) from exc
@@ -442,6 +460,17 @@ async def _post_dpop_token(
 
 _dpop_manager = None  # DPoPSessionManager — built lazily, one per SSO token
 _dpop_manager_token: str | None = None
+_dpop_manager_lease = None  # most recent lease, used for token-exchange headers
+
+
+def _lease_node_id(lease) -> int:
+    """Egress-node identifier for the DPoP cache key (Go ``lease.NodeID``).
+
+    ProxyLease exposes the egress ``proxy_url`` (no numeric node id), so hash
+    it to a stable int; direct (no proxy) leases share the default 0.
+    """
+    url = getattr(lease, "proxy_url", None)
+    return zlib.crc32(url.encode()) if isinstance(url, str) and url else 0
 
 
 def _get_dpop_manager(token: str, lease) -> "DPoPSessionManager":
@@ -449,16 +478,23 @@ def _get_dpop_manager(token: str, lease) -> "DPoPSessionManager":
 
     One manager per SSO token so the token-exchange browser headers (sso
     cookie) match the account; the cached DPoP session survives across calls.
+    Token-exchange headers are re-derived from the most recent lease — Go
+    fetchDPoPSession applies the *current* lease's browser headers per
+    exchange, not the first request's.
     """
-    global _dpop_manager, _dpop_manager_token
+    global _dpop_manager, _dpop_manager_token, _dpop_manager_lease
     if _dpop_manager is None or _dpop_manager_token != token:
         from app.dataplane.proxy.adapters.headers import build_console_headers
 
         _dpop_manager = DPoPSessionManager(
             _post_dpop_token,
-            browser_headers=build_console_headers(token, lease=lease),
+            browser_headers=lambda: build_console_headers(
+                token, lease=_dpop_manager_lease
+            ),
+            is_definitive_block=_is_definitive_block_body,
         )
         _dpop_manager_token = token
+    _dpop_manager_lease = lease
     return _dpop_manager
 
 
@@ -487,6 +523,8 @@ async def _post_console_with_dpop(
             access_token=dpop_sess.access_token,
             dpop_proof=sign_dpop_proof(dpop_sess, method="POST", url=CONSOLE_RESPONSES),
         )
+        # Go doDPoPRequest sets x-cluster only for paths ending in /responses.
+        headers["x-cluster"] = _X_CLUSTER_HEADER
         return await session.post(
             CONSOLE_RESPONSES,
             headers=headers,
@@ -499,10 +537,12 @@ async def _post_console_with_dpop(
     if response.status_code != 401:
         return response
     manager.invalidate(
-        dpop_session_cache_key(CONSOLE_BASE, 0, 0, token),
+        dpop_session_cache_key(CONSOLE_BASE, 0, _lease_node_id(lease), token),
         dpop_session.access_token,
     )
-    refreshed = await manager.get_or_fetch(CONSOLE_BASE, 0, 0, token)
+    refreshed = await manager.get_or_fetch(
+        CONSOLE_BASE, 0, _lease_node_id(lease), token
+    )
     return await _post(refreshed)
 
 

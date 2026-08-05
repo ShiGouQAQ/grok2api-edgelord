@@ -948,9 +948,10 @@ class TestBuildConsoleHeaders:
         result = self._build()
         assert result["Referer"] == "https://console.x.ai/"
 
-    def test_x_cluster_header(self):
+    def test_x_cluster_not_in_builder(self):
+        """G6-M2: x-cluster is added at the /responses request site, not here."""
         result = self._build()
-        assert result["x-cluster"] == "https://us-east-1.api.x.ai"
+        assert "x-cluster" not in result
 
     def test_accept_header(self):
         result = self._build()

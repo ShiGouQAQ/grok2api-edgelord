@@ -376,7 +376,6 @@ def build_console_headers(
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/136.0.0.0 Safari/537.36"
         ),
-        "x-cluster": "https://us-east-1.api.x.ai",
     }
     if access_token is not None and dpop_proof is not None:
         headers["Authorization"] = f"DPoP {access_token}"

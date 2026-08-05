@@ -235,21 +235,32 @@ class DPoPSessionManager:
     ``post_json_fn`` performs the actual ``POST {base}/v1/dpop/token`` call;
     ``browser_headers`` are merged into every request (cookies, UA, …) and
     ``is_definitive_block`` classifies 403 bodies (Go
-    ``provider.IsDefinitiveAccountBlockBody``).
+    ``provider.IsDefinitiveAccountBlockBody``). ``browser_headers`` may be a
+    callable re-derived at each exchange, mirroring Go's per-request
+    ``applyBrowserHeaders`` with the current lease.
     """
 
     def __init__(
         self,
         post_json_fn: PostJsonFn,
         *,
-        browser_headers: dict[str, str] | None = None,
+        browser_headers: dict[str, str] | Callable[[], dict[str, str]] | None = None,
         is_definitive_block: Callable[[str], bool] | None = None,
     ) -> None:
         self._post_json_fn: PostJsonFn = post_json_fn
         self._is_definitive_block: Callable[[str], bool] | None = is_definitive_block
-        self.browser_headers: dict[str, str] = dict(browser_headers or {})
+        self.browser_headers: dict[str, str] | Callable[[], dict[str, str]] = (
+            browser_headers or {}
+        )
         self._cache: OrderedDict[str, DPoPSession] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[DPoPSession]] = {}
+
+    def resolve_browser_headers(self) -> dict[str, str]:
+        """Headers for the next token exchange — a callable is resolved fresh."""
+        headers = self.browser_headers
+        if isinstance(headers, dict):
+            return headers.copy()
+        return dict(headers())
 
     # -- cache --------------------------------------------------------------
 
@@ -318,7 +329,7 @@ class DPoPSessionManager:
         endpoint = console_v1_endpoint(base_url, DPOP_DPOP_TOKEN_PATH)
         status, data = await self._post_json_fn(
             endpoint,
-            {"Content-Type": "application/json", **self.browser_headers},
+            {"Content-Type": "application/json", **self.resolve_browser_headers()},
             {"jwk": public_jwk},
         )
         if status < 200 or status >= 300:
@@ -438,7 +449,7 @@ async def do_dpop_request(
         session = await manager.get_or_fetch(
             base_url, credential_id, node_id, sso_token
         )
-        headers = dict(manager.browser_headers)
+        headers = manager.resolve_browser_headers()
         headers["Authorization"] = f"DPoP {session.access_token}"
         headers["DPoP"] = sign_dpop_proof(session, method=method, url=url)
         if body:
