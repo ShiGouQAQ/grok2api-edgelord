@@ -364,7 +364,9 @@
         "imageProtocol": "NSFW et streaming d'images",
         "logging": "Journalisation",
         "localMediaCache": "Cache multimédia local",
-        "buildProvider": "Build Provider"
+        "buildProvider": "Build Provider",
+        "routing": "Politique de routage",
+        "buildDetect": "Détection des comptes Build"
       },
       "options": {
         "imageFormat": {
@@ -410,7 +412,11 @@
         "imageFormat": { "label": "Format de sortie image", "desc": "grok_url et grok_md renvoient directement l’adresse CDN native de Grok par défaut. Les modes local_* téléchargent d’abord les ressources sur le serveur puis les redistribuent via le proxy local. base64 renvoie une Data URI intégrée. Lorsque le proxy d’images Imagine Public est activé, les images imagine-public renvoyées par le WebSocket sont également servies via le proxy local." },
         "imaginePublicImageProxy": { "label": "Proxy d’images Imagine Public", "desc": "Lorsque cette option est activée, les images imagine-public renvoyées par le WebSocket sont téléchargées sur le serveur puis distribuées via le proxy local. Lorsqu’elle est désactivée, les images publiques sont renvoyées directement." },
         "videoFormat": { "label": "Format de sortie vidéo" },
-        "refreshEnabled": { "label": "Activer l’actualisation du quota", "desc": "Lorsqu’il est activé, le système passe automatiquement en mode d’actualisation du quota. Lorsqu’il est désactivé, il passe automatiquement en mode de relance automatique.", "help": "Activé : mode d’actualisation du quota. Le scheduler synchronise périodiquement le quota réel et la sélection utilise un score.\nDésactivé : mode de relance automatique. Aucune sonde upstream active, sélection aléatoire et changement automatique de compte en cas d’erreur jusqu’à 5 relances.\nRecommandation : désactivez-le au-delà de 10 000 comptes pour éviter de déclencher des 429 upstream par les sondes actives." },
+        "refreshEnabled": {
+          "label": "Activer l’actualisation du quota",
+          "desc": "Lorsqu’il est activé, le système passe automatiquement en mode d’actualisation du quota. Lorsqu’il est désactivé, il passe automatiquement en mode de relance automatique.",
+          "help": "Activé : mode d’actualisation du quota. Le scheduler synchronise périodiquement le quota réel et la sélection utilise un score.\nDésactivé : mode de relance automatique. Aucune sonde upstream active, sélection aléatoire et changement automatique de compte en cas d’erreur jusqu’à 5 relances.\nRecommandation : désactivez-le au-delà de 10 000 comptes pour éviter de déclencher des 429 upstream par les sondes actives."
+        },
         "maxInflight": { "label": "Maximum en cours par compte", "desc": "Nombre maximal de requêtes simultanées par compte. Les comptes à cette limite sont ignorés par la sélection (partagé par les deux modes)." },
         "basicInterval": { "label": "Cycle Basic (s)", "desc": "Cycle partagé du pool Basic : utilisé pour l’actualisation en arrière-plan en mode quota et pour le refroidissement après 429 en mode random. Valeur par défaut : 86400s." },
         "superInterval": { "label": "Cycle Super (s)", "desc": "Cycle partagé du pool Super : utilisé pour l’actualisation en arrière-plan en mode quota et pour le refroidissement après 429 en mode random. Valeur par défaut : 7200s." },
@@ -455,7 +461,11 @@
         "logMaxFiles": { "label": "Rétention des journaux (jours)", "desc": "Nombre maximum de fichiers de journal quotidiens conservés lors de la rotation. Par défaut : 7." },
         "buildClientVersion": { "label": "Client Version", "desc": "Build CLI client version identifier." },
         "buildTokenAuth": { "label": "Token Auth", "desc": "Build token authentication header value." },
-        "buildPreferFree": { "label": "Prefer Free Tier", "desc": "When enabled, prefer free tier Build accounts when available." }
+        "buildPreferFree": { "label": "Prefer Free Tier", "desc": "When enabled, prefer free tier Build accounts when available." },
+        "maxRoutingAttempts": { "label": "Tentatives de routage max.", "desc": "Tentatives de routage maximales par requête. -1 pour illimité, ou une valeur entre 1 et 200." },
+        "buildDetectMaxAttempts": { "label": "Tentatives de détection max.", "desc": "Tentatives maximales par compte lors de la détection Build. Défaut 999." },
+        "buildChatDeniedAsReauth": { "label": "403 marque la ré-auth", "desc": "Si un refus 403 dans le chat Build marque le compte comme nécessitant une ré-authentification plutôt qu’un simple échec." },
+        "build403InvalidationCodes": { "label": "Codes d’invalidation 403", "desc": "Liste séparée par des virgules des codes 403 qui invalident un compte Build." }
       }
     }
   },
@@ -583,6 +593,14 @@
     "preferFree": "Prefer Free Tier",
     "polling": "Waiting for authorization…",
     "importDone": "Build account imported",
-    "importFailed": "Authorization expired or denied"
+    "importFailed": "Authorization expired or denied",
+    "detectAction": "Détecter les comptes Build",
+    "detecting": "Détection des comptes Build…",
+    "detectDone": "Détection des comptes Build terminée",
+    "detectConfirmSelTitle": "Détecter les comptes sélectionnés",
+    "detectConfirmSelBody": "Un test de capacité sera lancé sur les comptes Build sélectionnés. Continuer ?",
+    "detectAllTitle": "Détecter tous les comptes Build",
+    "detectAllBody": "Tous les comptes Build gérables seront testés. Cela peut prendre un moment. Continuer ?",
+    "detectNoAccounts": "Aucun compte Build gérable"
   }
 }

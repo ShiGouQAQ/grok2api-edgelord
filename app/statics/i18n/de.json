@@ -364,7 +364,9 @@
         "imageProtocol": "NSFW und Bild-Streaming",
         "logging": "Protokollierung",
         "localMediaCache": "Lokaler Medien-Cache",
-        "buildProvider": "Build Provider"
+        "buildProvider": "Build Provider",
+        "routing": "Routing-Richtlinie",
+        "buildDetect": "Build-Kontenprüfung"
       },
       "options": {
         "imageFormat": {
@@ -410,7 +412,11 @@
         "imageFormat": { "label": "Bildausgabeformat", "desc": "grok_url und grok_md geben die native Grok-CDN-Adresse standardmäßig direkt zurück. local_* Modi laden Assets zuerst auf den Server herunter und stellen sie über den lokalen Proxy bereit. base64 gibt eine eingebettete Data URI zurück. Wenn der Imagine-Public-Bildproxy aktiviert ist, werden vom WebSocket zurückgegebene imagine-public-Bilder ebenfalls lokal proxied." },
         "imaginePublicImageProxy": { "label": "Imagine-Public-Bildproxy", "desc": "Wenn aktiviert, werden vom WebSocket zurückgegebene imagine-public-Bilder auf den Server heruntergeladen und über den lokalen Proxy ausgeliefert. Wenn deaktiviert, werden öffentliche Bilder direkt zurückgegeben." },
         "videoFormat": { "label": "Videoausgabeformat" },
-        "refreshEnabled": { "label": "Quotenaktualisierung aktivieren", "desc": "Wenn aktiviert, wechselt das System automatisch in den Quotenaktualisierungsmodus. Wenn deaktiviert, wechselt es automatisch in den Auto-Retry-Modus.", "help": "Ein: Quotenaktualisierung. Der Scheduler synchronisiert regelmäßig echte Quoten, die Auswahl erfolgt nach Bewertung.\nAus: Auto-Retry-Modus. Keine aktive upstream-Abfrage, zufällige Auswahl und automatischer Kontowechsel bei Fehlern mit bis zu 5 Wiederholungen.\nEmpfehlung: Bei mehr als 10.000 Konten ausschalten, um upstream 429 durch aktive Abfragen zu vermeiden." },
+        "refreshEnabled": {
+          "label": "Quotenaktualisierung aktivieren",
+          "desc": "Wenn aktiviert, wechselt das System automatisch in den Quotenaktualisierungsmodus. Wenn deaktiviert, wechselt es automatisch in den Auto-Retry-Modus.",
+          "help": "Ein: Quotenaktualisierung. Der Scheduler synchronisiert regelmäßig echte Quoten, die Auswahl erfolgt nach Bewertung.\nAus: Auto-Retry-Modus. Keine aktive upstream-Abfrage, zufällige Auswahl und automatischer Kontowechsel bei Fehlern mit bis zu 5 Wiederholungen.\nEmpfehlung: Bei mehr als 10.000 Konten ausschalten, um upstream 429 durch aktive Abfragen zu vermeiden."
+        },
         "maxInflight": { "label": "Max. laufende Anfragen pro Konto", "desc": "Maximale Anzahl gleichzeitig laufender Anfragen pro Konto. Konten am Limit werden von der Auswahl übersprungen (für beide Modi gemeinsam)." },
         "basicInterval": { "label": "Basic-Zyklus (s)", "desc": "Gemeinsamer Zyklus für den Basic-Pool: wird im Quota-Modus für den Hintergrund-Refresh und im Random-Modus für die 429-Abkühlung verwendet. Standardwert: 86400s." },
         "superInterval": { "label": "Super-Zyklus (s)", "desc": "Gemeinsamer Zyklus für den Super-Pool: wird im Quota-Modus für den Hintergrund-Refresh und im Random-Modus für die 429-Abkühlung verwendet. Standardwert: 7200s." },
@@ -455,7 +461,11 @@
         "logMaxFiles": { "label": "Protokoll-Aufbewahrung (Tage)", "desc": "Maximale Anzahl täglicher Protokolldateien bei der Rotation. Standard: 7." },
         "buildClientVersion": { "label": "Client Version", "desc": "Build CLI client version identifier." },
         "buildTokenAuth": { "label": "Token Auth", "desc": "Build token authentication header value." },
-        "buildPreferFree": { "label": "Prefer Free Tier", "desc": "When enabled, prefer free tier Build accounts when available." }
+        "buildPreferFree": { "label": "Prefer Free Tier", "desc": "When enabled, prefer free tier Build accounts when available." },
+        "maxRoutingAttempts": { "label": "Max. Routing-Versuche", "desc": "Maximale Routing-Versuche pro Anfrage. -1 für unbegrenzt oder ein Wert zwischen 1 und 200." },
+        "buildDetectMaxAttempts": { "label": "Max. Prüfversuche", "desc": "Maximale Versuche pro Konto bei der Build-Prüfung. Standard 999." },
+        "buildChatDeniedAsReauth": { "label": "403 als Reauth markieren", "desc": "Ob eine 403-Ablehnung im Build-Chat das Konto als erneut zu authentifizieren markiert statt nur als fehlgeschlagen." },
+        "build403InvalidationCodes": { "label": "403-Invalidierungscodes", "desc": "Kommagetrennte 403-Codes, die ein Build-Konto invalidieren." }
       }
     }
   },
@@ -583,6 +593,14 @@
     "preferFree": "Prefer Free Tier",
     "polling": "Waiting for authorization…",
     "importDone": "Build account imported",
-    "importFailed": "Authorization expired or denied"
+    "importFailed": "Authorization expired or denied",
+    "detectAction": "Build-Konten prüfen",
+    "detecting": "Build-Konten werden geprüft…",
+    "detectDone": "Build-Kontenprüfung abgeschlossen",
+    "detectConfirmSelTitle": "Ausgewählte Konten prüfen",
+    "detectConfirmSelBody": "Für die ausgewählten Build-Konten wird ein Fähigkeitstest ausgeführt. Fortfahren?",
+    "detectAllTitle": "Alle Build-Konten prüfen",
+    "detectAllBody": "Alle verwaltbaren Build-Konten werden geprüft. Dies kann etwas dauern. Fortfahren?",
+    "detectNoAccounts": "Keine verwaltbaren Build-Konten"
   }
 }

@@ -319,9 +319,7 @@
       "reauthRequired": "Reauth required",
       "expired": "Expired",
       "invalid": "Abnormal"
-    },
-    "autoNsfwOnImport": "Auto-enable NSFW after import",
-    "autoNsfwHint": "Requires additional time to detect account status"
+    }
   },
   "config": {
     "pageTitle": "Grok2API - Configuration Management",
@@ -369,7 +367,9 @@
         "imageProtocol": "NSFW and Image Streaming",
         "logging": "Logging",
         "localMediaCache": "Local Media Cache",
-        "buildProvider": "Build Provider"
+        "buildProvider": "Build Provider",
+        "routing": "Routing Policy",
+        "buildDetect": "Build Account Detection"
       },
       "options": {
         "imageFormat": {
@@ -653,6 +653,22 @@
         "buildPreferFree": {
           "label": "Prefer Free Tier",
           "desc": "When enabled, prefer free tier Build accounts when available."
+        },
+        "maxRoutingAttempts": {
+          "label": "Max Routing Attempts",
+          "desc": "Max routing attempts per request. Set to -1 for unlimited, or a value between 1 and 200."
+        },
+        "buildDetectMaxAttempts": {
+          "label": "Detect Max Attempts",
+          "desc": "Max attempts per account when detecting Build accounts. Default 999."
+        },
+        "buildChatDeniedAsReauth": {
+          "label": "403 Marks Reauth",
+          "desc": "Whether a Build chat 403 denial marks the account as needing re-authentication instead of just failing."
+        },
+        "build403InvalidationCodes": {
+          "label": "403 Invalidation Codes",
+          "desc": "Comma-separated 403 codes that invalidate a Build account."
         }
       }
     }
@@ -781,6 +797,14 @@
     "preferFree": "Prefer Free Tier",
     "polling": "Waiting for authorization…",
     "importDone": "Build account imported",
-    "importFailed": "Authorization expired or denied"
+    "importFailed": "Authorization expired or denied",
+    "detectAction": "Detect Build Accounts",
+    "detecting": "Detecting Build accounts…",
+    "detectDone": "Build account detection finished",
+    "detectConfirmSelTitle": "Detect selected accounts",
+    "detectConfirmSelBody": "A capability probe will be issued for the selected Build accounts. Continue?",
+    "detectAllTitle": "Detect all Build accounts",
+    "detectAllBody": "All manageable Build accounts will be probed. This may take a while. Continue?",
+    "detectNoAccounts": "No manageable Build accounts"
   }
 }

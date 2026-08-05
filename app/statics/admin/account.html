@@ -1014,6 +1014,9 @@
       <button type="button" onclick="batchRefreshBuildBilling()" id="btn-refresh-build-billing" class="toolbar-icon-btn" style="display:none" data-tip="Refresh Build Billing">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48 2.83-2.83"/></svg>
       </button>
+      <button type="button" onclick="batchDetectBuild()" id="btn-detect-build" class="toolbar-icon-btn" style="display:none" data-tip="Detect Build Accounts">
+        <svg viewBox="0 0 24 24" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M11 8v3l2 2"/></svg>
+      </button>
       <button type="button" onclick="batchConvertToBuild()" id="btn-convert-build" class="toolbar-icon-btn" style="display:none" data-tip="Convert to Build">
         <svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
       </button>
@@ -1250,6 +1253,7 @@ function applyAccountI18n() {
     ['btn-nsfw-all', 'account.batchNsfwAll', '全部开启 NSFW'],
     ['btn-refresh-all', 'account.refreshAllManageable', '重新测试全部正常账户'],
     ['btn-refresh-build-billing', 'build.billing.refresh', '刷新 Build 额度'],
+    ['btn-detect-build', 'build.detectAction', '检测 Build 账号'],
     ['btn-convert-build', 'build.convertAction', '转为构建账号'],
     ['btn-delete-invalid-all', 'account.deleteInvalidAll', '删除全部异常'],
     ['btn-nsfw', 'account.batchNsfw', '开启 NSFW'],
@@ -1620,6 +1624,10 @@ function renderTable(view = getTokenView()) {
   ['btn-refresh-build-billing'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.style.display = showBilling && sel.size === 0 ? '' : 'none';
+  });
+  ['btn-detect-build'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = showBilling ? '' : 'none';
   });
   ['btn-convert-build'].forEach(id => {
     const el = document.getElementById(id);
@@ -2151,7 +2159,7 @@ async function _runBatch(endpoint, tokens, label, onDone) {
           if (expired > 0) finishMsg += `，异常 ${expired}`;
           if (transient > 0) finishMsg += `，临时失败 ${transient}`;
           progress.finish(finishMsg, fail > 0 ? 'error' : 'success');
-          onDone(ok, fail, s);
+          onDone(ok, fail, s, ev.result);
           load();
         } else if (ev.type === 'cancelled') {
           progress.finish('已取消', 'error');
@@ -2222,6 +2230,43 @@ async function batchRefreshBuildBilling() {
   } catch (e) {
     showToast(`${tr('build.billing.refreshFailed', null, '刷新额度失败')}: ${e.message}`, 'error');
   }
+}
+
+async function batchDetectBuild() {
+  const buildTokens = () => allTokens.filter(t => t.provider === 'grok_build' && isManageableStatus(t.status));
+  // Count per-token outcomes from ev.result.results (the async summary counts
+  // every handler return as "ok"; real ok/invalid/failed lives in results).
+  const summarize = (ok, fail, s, result) => {
+    const r = result?.results || {};
+    let o = 0, inv = 0, f = 0;
+    for (const k in r) {
+      const v = r[k];
+      const oc = v && !v.error && v.outcome ? v.outcome : 'failed';
+      if (oc === 'ok') o++; else if (oc === 'invalid') inv++; else f++;
+    }
+    if (!o && !inv && !f) { o = ok; f = fail; }
+    const msg = tr('build.detectDone', { ok: o, invalid: inv, failed: f }, `检测完成：正常 ${o}，需重新认证 ${inv}，失败 ${f}`);
+    showToast(msg, (inv + f) > 0 ? 'warning' : 'success');
+  };
+
+  const selected = buildTokens().filter(t => sel.has(t.token)).map(t => t.token);
+  if (selected.length) {
+    openConfirm(
+      tr('build.detectConfirmSelTitle', null, '检测选中 Build 账号'),
+      tr('build.detectConfirmSelBody', { n: selected.length }, `对选中的 <b>${selected.length}</b> 个 Build 账号进行可用性检测？<br><small style="color:var(--fg-muted)">需重新认证的账号会被标记。</small>`),
+      () => _runBatch('/batch/build-detect', selected,
+        tr('build.detecting', { n: selected.length }, `正在检测 ${selected.length} 个 Build 账号…`), summarize)
+    );
+    return;
+  }
+  const all = buildTokens();
+  if (!all.length) return showToast(tr('build.detectNoAccounts', null, '没有可检测的 Build 账号'), 'error');
+  openConfirm(
+    tr('build.detectAllTitle', null, '检测全部 Build 账号'),
+    tr('build.detectAllBody', { n: all.length }, `对全部 <b>${all.length}</b> 个 Build 账号进行可用性检测？<br><small style="color:var(--fg-muted)">该操作会调用上游接口，需重新认证的账号会被标记。</small>`),
+    () => _runBatch('/batch/build-detect?all_build=true', [],
+      tr('build.detecting', { n: all.length }, `正在检测 ${all.length} 个 Build 账号…`), summarize)
+  );
 }
 
 async function convertOneToBuild(token) {

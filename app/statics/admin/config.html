@@ -446,6 +446,7 @@ const SCHEMA_DEF = [
           { key: 'auto_chat_mode_fallback', label: 'AUTO 聊天模式回退', labelKey: 'config.schema.fields.autoChatModeFallback.label', type: 'bool', desc: 'AUTO 聊天模型在 auto 额度不可用时，自动尝试 fast 和 expert 聊天额度窗口。', descKey: 'config.schema.fields.autoChatModeFallback.desc' },
           { key: 'thinking_summary', label: '思考精简输出', labelKey: 'config.schema.fields.thinkingSummary.label', type: 'bool', desc: '启用后将思考过程提炼为结构化摘要。关闭时输出完整的原始推理过程，支持多 Agent 模型的协作详情与工具调用展示。', descKey: 'config.schema.fields.thinkingSummary.desc' },
           { key: 'dynamic_statsig', label: '动态 Statsig', labelKey: 'config.schema.fields.dynamicStatsig.label', type: 'bool', desc: '为每次请求动态生成 Statsig 设备指纹，以降低风控拦截概率。', descKey: 'config.schema.fields.dynamicStatsig.desc' },
+          { key: 'build_403_invalidation_codes', label: 'Build 403 失效码', labelKey: 'config.schema.fields.build403InvalidationCodes.label', type: 'text', wide: true, desc: '会使 Build 账号 SSO 失效的上游错误码列表，多个值请使用英文逗号分隔（小写匹配），例如 blocked-user,email-domain-rejected。留空使用内置默认。', descKey: 'config.schema.fields.build403InvalidationCodes.desc' },
           { key: 'enable_nsfw', label: '允许 NSFW 生成', labelKey: 'config.schema.fields.enableNsfw.label', type: 'bool', desc: '允许图像生成接口绕过 NSFW 内容过滤。', descKey: 'config.schema.fields.enableNsfw.desc' },
           { key: 'show_search_sources', label: '正文追加信源', labelKey: 'config.schema.fields.showSearchSources.label', type: 'bool', desc: '搜索信源始终以 search_sources 字段输出。此选项控制是否同时在正文末尾追加 ## Sources 段落（兼容文本解析客户端）。', descKey: 'config.schema.fields.showSearchSources.desc' },
           { key: 'custom_instruction', label: '全局附加指令', labelKey: 'config.schema.fields.customInstruction.label', type: 'textarea', desc: '为每次请求注入统一的 system 消息，用于约束模型行为或固定角色设定。', descKey: 'config.schema.fields.customInstruction.desc' },
@@ -519,6 +520,13 @@ const SCHEMA_DEF = [
         ]
       },
       {
+        title: '账号轮换路由', titleKey: 'config.schema.groups.routing',
+        section: 'routing',
+        fields: [
+          { key: 'max_routing_attempts', label: '最大账号轮换次数', labelKey: 'config.schema.fields.maxRoutingAttempts.label', type: 'number', min: -1, max: 200, desc: '单次请求内账号轮换的最大尝试次数。设为 -1 表示无限；合法值为 -1 或 1..200，0 与超过 200 的值会被后端拒绝。', descKey: 'config.schema.fields.maxRoutingAttempts.desc' },
+        ]
+      },
+      {
         title: '已删除账号清理',
         section: 'account.cleanup',
         fields: [
@@ -526,6 +534,14 @@ const SCHEMA_DEF = [
           { key: 'run_at', label: '每日清理时间', type: 'text', desc: '每天触发一次批量清理，格式 HH:MM。建议设置在低峰时段，默认 03:30。' },
           { key: 'batch_size', label: '每批删除数量', type: 'number', min: 1, desc: '每批物理删除的账号数。分批处理可降低 SQLite 写锁占用时间，默认 5000。' },
           { key: 'vacuum', label: '删除后回收空间', type: 'bool', desc: '实际删除账号后执行一次 VACUUM 回收数据库文件空间。该操作可能短暂占用 SQLite，建议保持低峰执行。' },
+        ]
+      },
+      {
+        title: 'Build 账号检测', titleKey: 'config.schema.groups.buildDetect',
+        section: 'account.build_detect',
+        fields: [
+          { key: 'max_attempts', label: '检测最大尝试次数', labelKey: 'config.schema.fields.buildDetectMaxAttempts.label', type: 'number', min: 1, desc: '管理端 Build 账号可用性检测的最大尝试次数，必须大于 0（0 非法，校验拒绝）。', descKey: 'config.schema.fields.buildDetectMaxAttempts.desc' },
+          { key: 'mark_build_chat_denied_as_reauth', label: 'Chat 拒绝标记需重新认证', labelKey: 'config.schema.fields.buildChatDeniedAsReauth.label', type: 'bool', desc: '开启后，Build 检测期间收到 chat 403（如 blocked-user）时将账号标记为 REAUTH_REQUIRED；关闭时保持默认的模型级阻断。', descKey: 'config.schema.fields.buildChatDeniedAsReauth.desc' },
         ]
       },
       {

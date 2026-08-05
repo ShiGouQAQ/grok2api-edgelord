@@ -364,7 +364,9 @@
         "imageProtocol": "NSFW と画像ストリーミング",
         "logging": "ログ設定",
         "localMediaCache": "ローカルメディアキャッシュ",
-        "buildProvider": "Build Provider"
+        "buildProvider": "Build Provider",
+        "routing": "ルーティング戦略",
+        "buildDetect": "Build アカウント検出"
       },
       "options": {
         "imageFormat": {
@@ -410,7 +412,11 @@
         "imageFormat": { "label": "画像出力形式", "desc": "grok_url と grok_md は既定では Grok CDN のネイティブ URL を直接返します。local_* モードでは、先にサーバーへダウンロードしてからローカルプロキシ経由で再配信します。base64 は埋め込み Data URI を返します。Imagine Public 画像プロキシを有効にすると、WebSocket が返す imagine-public 画像もローカルプロキシ経由になります。" },
         "imaginePublicImageProxy": { "label": "Imagine Public 画像プロキシ", "desc": "有効にすると、WebSocket が返す imagine-public 画像をサーバーにダウンロードし、ローカルプロキシ経由で配信します。無効の場合、公開画像はそのまま返します。" },
         "videoFormat": { "label": "動画出力形式" },
-        "refreshEnabled": { "label": "クォータ更新を有効化", "desc": "オンにすると自動的にクォータ更新モードへ切り替わり、オフにすると自動的に自動再試行モードへ切り替わります。", "help": "オン：クォータ更新モード。scheduler が実クォータを定期同期し、スコアでアカウントを選択します。\nオフ：自動再試行モード。upstream を能動的に確認せず、ランダム選択し、エラー時は最大 5 回まで別アカウントへ自動切替します。\n推奨：1 万件以上のアカウントではオフにして、能動確認による upstream 429 を避けてください。" },
+        "refreshEnabled": {
+          "label": "クォータ更新を有効化",
+          "desc": "オンにすると自動的にクォータ更新モードへ切り替わり、オフにすると自動的に自動再試行モードへ切り替わります。",
+          "help": "オン：クォータ更新モード。scheduler が実クォータを定期同期し、スコアでアカウントを選択します。\nオフ：自動再試行モード。upstream を能動的に確認せず、ランダム選択し、エラー時は最大 5 回まで別アカウントへ自動切替します。\n推奨：1 万件以上のアカウントではオフにして、能動確認による upstream 429 を避けてください。"
+        },
         "maxInflight": { "label": "アカウントごとの同時実行上限", "desc": "1 アカウントで同時に処理中にできるリクエスト数の上限です。上限に達したアカウントは選択時にスキップされます（両モード共通）。" },
         "basicInterval": { "label": "Basic 周期（秒）", "desc": "Basic プールの共通周期です。quota モードではバックグラウンド更新に、random モードでは 429 クールダウンに使われます。既定値は 86400s です。" },
         "superInterval": { "label": "Super 周期（秒）", "desc": "Super プールの共通周期です。quota モードではバックグラウンド更新に、random モードでは 429 クールダウンに使われます。既定値は 7200s です。" },
@@ -455,7 +461,11 @@
         "logMaxFiles": { "label": "ログ保持日数", "desc": "日次ローテーション時に保持するログファイルの最大数。デフォルト: 7。" },
         "buildClientVersion": { "label": "Client Version", "desc": "Build CLI client version identifier." },
         "buildTokenAuth": { "label": "Token Auth", "desc": "Build token authentication header value." },
-        "buildPreferFree": { "label": "Prefer Free Tier", "desc": "When enabled, prefer free tier Build accounts when available." }
+        "buildPreferFree": { "label": "Prefer Free Tier", "desc": "When enabled, prefer free tier Build accounts when available." },
+        "maxRoutingAttempts": { "label": "最大ルーティング試行回数", "desc": "リクエストごとの最大ルーティング試行回数。-1 で無制限、1〜200 で回数を指定。" },
+        "buildDetectMaxAttempts": { "label": "検出最大試行回数", "desc": "Build アカウント検出時のアカウントあたりの最大試行回数。デフォルト 999。" },
+        "buildChatDeniedAsReauth": { "label": "403 で再認証マーク", "desc": "Build チャットの 403 拒否を、失敗として扱わず再認証が必要としてマークするかどうか。" },
+        "build403InvalidationCodes": { "label": "403 無効化コード", "desc": "Build アカウントを無効化する 403 コードのカンマ区切りリスト。" }
       }
     }
   },
@@ -583,6 +593,14 @@
     "preferFree": "Prefer Free Tier",
     "polling": "Waiting for authorization…",
     "importDone": "Build account imported",
-    "importFailed": "Authorization expired or denied"
+    "importFailed": "Authorization expired or denied",
+    "detectAction": "Build アカウントを検出",
+    "detecting": "Build アカウントを検出中…",
+    "detectDone": "Build アカウント検出が完了しました",
+    "detectConfirmSelTitle": "選択したアカウントを検出",
+    "detectConfirmSelBody": "選択した Build アカウントに対して能力プローブを実行します。続行しますか？",
+    "detectAllTitle": "すべての Build アカウントを検出",
+    "detectAllBody": "管理可能なすべての Build アカウントを検出します。時間がかかる場合があります。続行しますか？",
+    "detectNoAccounts": "管理可能な Build アカウントがありません"
   }
 }

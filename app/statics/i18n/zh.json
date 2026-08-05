@@ -319,9 +319,7 @@
       "reauthRequired": "需重新认证",
       "expired": "过期",
       "invalid": "异常"
-    },
-    "autoNsfwOnImport": "导入后自动开启 NSFW",
-    "autoNsfwHint": "需要额外时间检测账户状态"
+    }
   },
   "config": {
     "pageTitle": "Grok2API - 配置管理",
@@ -369,7 +367,9 @@
         "imageProtocol": "NSFW 与图像协议",
         "logging": "日志配置",
         "localMediaCache": "本地媒体缓存",
-        "buildProvider": "构建提供者"
+        "buildProvider": "构建提供者",
+        "routing": "路由策略",
+        "buildDetect": "Build 账号检测"
       },
       "options": {
         "imageFormat": {
@@ -653,6 +653,22 @@
         "buildPreferFree": {
           "label": "优先免费",
           "desc": "启用后，在可用时优先使用免费层级的 Build 账号。"
+        },
+        "maxRoutingAttempts": {
+          "label": "最大路由尝试次数",
+          "desc": "单次请求的最大路由尝试次数。设为 -1 表示不限次数，1–200 表示具体次数。"
+        },
+        "buildDetectMaxAttempts": {
+          "label": "检测最大尝试次数",
+          "desc": "Build 账号检测时单账号的最大尝试次数，默认 999。"
+        },
+        "buildChatDeniedAsReauth": {
+          "label": "403 标记重认证",
+          "desc": "Build 聊天 403 封禁时是否标记为需要重新认证（而不是仅失败）。"
+        },
+        "build403InvalidationCodes": {
+          "label": "403 失效封禁码",
+          "desc": "触发 Build 账号失效的 403 封禁码列表，逗号分隔。"
         }
       }
     }
@@ -781,6 +797,14 @@
     "preferFree": "优先免费",
     "polling": "等待授权中…",
     "importDone": "构建账号已导入",
-    "importFailed": "授权已过期或被拒绝"
+    "importFailed": "授权已过期或被拒绝",
+    "detectAction": "检测 Build 账号",
+    "detecting": "正在检测 Build 账号…",
+    "detectDone": "Build 账号检测完成",
+    "detectConfirmSelTitle": "检测选中的账号",
+    "detectConfirmSelBody": "将对选中的 Build 账号发起能力探测，确认继续？",
+    "detectAllTitle": "检测全部 Build 账号",
+    "detectAllBody": "将检测全部可管理的 Build 账号，可能耗时较长，确认继续？",
+    "detectNoAccounts": "没有可管理的 Build 账号"
   }
 }
