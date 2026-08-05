@@ -791,6 +791,12 @@ class LocalAccountRepository:
         1. 老条件：remaining<=0 且 (reset_at IS NULL 或已过期) → 正常配额耗尽恢复
         2. 新条件 (M6)：reset_at 已过期（即使 remaining>0）→ 异常数据归位
            （来源：人工 patch、迁移数据、M1 历史副作用等）
+
+        注意（C1 竞态修复）：source=REAL(1) 的窗口跳过 —— 真实 /v1/usage
+        预测恢复窗口（remaining=0, reset_at=fetch+24h）由 60s recovery 任务
+        独占探测，30s reset 任务不得覆写为本地模拟（否则 remaining 变 20，
+        recovery 看到 >0 跳过 → 真实探测饿死）。legacy 无 source 字段视为
+        DEFAULT(0) 照常重置。
         """
 
         def _sync() -> int:
@@ -802,6 +808,10 @@ class LocalAccountRepository:
                     SELECT COUNT(*) FROM {_TBL}
                     WHERE status = 'active'
                       AND deleted_at IS NULL
+                      AND (
+                        json_extract(quota_console, '$.source') IS NULL
+                        OR CAST(json_extract(quota_console, '$.source') AS INTEGER) != 1
+                      )
                       AND (
                         (
                           CAST(json_extract(quota_console, '$.remaining') AS INTEGER) <= 0
@@ -840,6 +850,10 @@ class LocalAccountRepository:
                     SET quota_console = ?, revision = ?, updated_at = ?
                     WHERE status = 'active'
                       AND deleted_at IS NULL
+                      AND (
+                        json_extract(quota_console, '$.source') IS NULL
+                        OR CAST(json_extract(quota_console, '$.source') AS INTEGER) != 1
+                      )
                       AND (
                         (
                           CAST(json_extract(quota_console, '$.remaining') AS INTEGER) <= 0

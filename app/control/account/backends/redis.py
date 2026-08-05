@@ -537,6 +537,11 @@ class RedisAccountRepository:
             remaining = int(qc.get("remaining") or 0)
             reset_at = qc.get("reset_at")
             reset_at_int = int(reset_at) if reset_at is not None else None
+            # C1 竞态修复：source=REAL(1) 的真实窗口由 60s recovery 独占，
+            # 30s reset 不得覆写（legacy 无 source 视为 DEFAULT(0) 照常重置）。
+            source = int(qc.get("source") or 0)
+            if source == 1:
+                continue
 
             cond_old = remaining <= 0 and (reset_at_int is None or reset_at_int < now)
             cond_new = reset_at_int is not None and reset_at_int < now
