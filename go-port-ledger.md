@@ -528,3 +528,31 @@
 ### 测试
 
 全套 `uv run pytest tests/ -q --timeout=30` → **1467 passed, 1 skipped**（基线 1432+1，+35 本批新增，无回归）。新增测试：`test_routing_policy.py` (16)、`test_build_detect.py` (15)、`test_tool_parser_normalize.py`、`test_proxy_health.py` (13)、`test_rate_limit_parser.py` (15)、`test_media_audit.py`、`test_model_alias.py` + 各既有文件增量。SSO→Build 测试全部 mock `get_proxy_runtime`（沿用 `_no_real_mint_network` autouse，无真实网络）。
+
+---
+
+## 2026-08-05 移植批 13（PR #853：DPoP 协议 + 真实 /v1/usage 配额 + 24h 恢复探测）
+
+上游：chenyme/grok2api **PR #853**（head `grok_console_260805` = f1d51254 + 377710f4，OPEN 未合并），同步 x.ai 服务端 DPoP 强制（issue #852 的适配成果，修复 2026-08-05 生产 console 403 `unauthorized:dpop-required` 故障）。
+
+| 文件 | 状态 | 说明 |
+|---|---|---|
+| `console/dpop.go` (401 行) | ✅ 已移植 | → `app/dataplane/reverse/protocol/dpop.py`（455 行）：DPoPSessionManager（LRU 4096 + singleflight + 20s 偏斜）、`get_or_fetch`、`sign_dpop_proof`（ES256 jti/htm/htu/iat/ath）、`do_dpop_request`（2 次 401 重建 + x-cluster 条件）、`dpop_session_cache_key`/`dpop_htu`/`parse_dpop_access_token`；`DPoPError`/`DPoPTokenEndpointError`（带 `invalidate_clearance` 标志）；`tests/test_dpop.py` 36 测试 |
+| `console/headers.go` | ✅ 已移植 | `build_console_headers` 增可选 `access_token`/`dpop_proof` 参数（两者齐 → `Authorization: DPoP` + `DPoP:` header，否则保持 Bearer anonymous）；增 `Cache-Control: no-cache` + `Pragma: no-cache`；`x-cluster` 本就无条件存在（Python console 恒走 /v1/responses，与 Go 条件化等价） |
+| `console/quota.go` (167 行) | ✅ 已移植 | → `app/dataplane/reverse/protocol/xai_console_usage.py`（482 行）：`fetch_console_usage`（DPoP GET /v1/usage，30s 超时）、`parse_console_usage_payload`（chat/image/video 三窗口必齐 + 校验）、chat 24h 预测恢复窗口、image/video 仅展示；`tests/test_xai_console_usage.py` 15 测试 |
+| `application/quotarecovery/service.go` | ✅ 已移植 | → `app/control/account/quota_recovery.py`（255 行）：`probe_console_quota`（成功→+24h 固定，失败→有界指数退避 1s-1min，429 不杀凭据）、`recover_due_console_quotas` leader 扫描（Ack 健康账号）；ClaimToken 内存版（单 leader fcntl.flock 下与 Go Redis 等价，`ponytail:` 注释标注多 worker 升级路径）；`console-quota-recovery` 60s leader 任务注册于 main.py |
+| `runtime/memory/quota_queue.go` + `redis/store.go` | ✅ 已移植 | ClaimToken 语义：`schedule_quota_recovery` 已 claimed 时返回 False（并发刷新不得清除权威结果）、`cancel_quota_recovery` claimed 时 no-op、claim 在 finally 释放；内存 dict 实现（Redis Lua 仅多 worker 需要） |
+| `application/account/service.go` (518 行重构) | ✅ 已移植（合并） | 关键语义并入既有架构：`_refresh_one` 增 `grok_console` → `_refresh_console_usage()` 分支（三窗口写入 + 本地模拟 fallback）；`models.py QuotaWindow` 增 `usage_percent`/`predicted` 字段；`quota_defaults.py` 增 `console_usage_windows()` 映射器；单 leader 恢复调度 = Go 刷新队列等价物；`_apply_fallback` 本地模拟保留为 fallback |
+| frontend `account-quota.tsx` + i18n | ⏭️ 跳过 | Python Admin UI 独立，不移植前端 |
+
+**DPoP 故障背景**（2026-08-05 生产）：console `/v1/responses` + `/v1/chat/completions` 均 403 `{"code":"unauthorized:dpop-required"}`；错误链 403 body 含 `unauthorized` → `credential_rejected=True` → `mark_account_reauth_required` 误标账号 REAUTH_REQUIRED（用户手动恢复 3 个）。上游两端（jiujiu532 L1 / chenyme L2）此前均零 DPoP 代码。本批移植 PR #853 为根治方案。
+
+**移植目标（Python 侧）**：
+- 新模块（待定）：`app/dataplane/reverse/protocol/dpop.py`（DPoP 会话管理 + proof 签名）——参照 `rate_limit.py` 风格
+- `headers.py build_console_headers` 改造：DPoP Authorization + DPoP header + no-cache
+- console 出站统一 DPoP 请求层（do_dpop_request 等价物）
+- console 配额刷新：/v1/usage DPoP 接入（替代/增强本地 20/60min 模拟）
+- 恢复调度：24h 预测探测 + ClaimToken 保护
+- errors.py：DPoP 相关 403 不误标 credential_rejected（防御）
+
+**测试基线**：全套 1478 passed（DPoP 移植前）。SSO→Build mint 测试全部 mock `get_proxy_runtime`。

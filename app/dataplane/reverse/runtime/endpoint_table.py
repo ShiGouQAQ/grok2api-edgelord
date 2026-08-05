@@ -47,6 +47,7 @@ LIVEKIT_TOKENS = f"{BASE}/rest/livekit/tokens"  # POST
 # 使用 Bearer token 认证，与 grok.com SSO token 共享同一套凭证
 CONSOLE_RESPONSES = f"{CONSOLE_BASE}/v1/responses"  # POST (OpenAI Responses API)
 CONSOLE_CHAT = f"{CONSOLE_BASE}/v1/chat/completions"  # POST (OpenAI Chat API)
+CONSOLE_USAGE = f"{CONSOLE_BASE}/v1/usage"  # GET (DPoP-authenticated quota fetch)
 
 # ── Build provider (cli-chat-proxy.grok.com) ─────────────────────────────
 BUILD_BASE = "https://cli-chat-proxy.grok.com/v1"
@@ -60,30 +61,31 @@ XAI_FALLBACK_RESPONSES = f"{XAI_FALLBACK_BASE}/responses"  # POST
 
 
 __all__ = [
-    "BASE",
+    "ACCEPT_TOS",
     "ASSETS_CDN",
-    "CONSOLE_BASE",
-    "CHAT",
-    "ASSETS_UPLOAD",
-    "ASSETS_LIST",
     "ASSETS_DELETE",
     "ASSETS_DOWNLOAD",
-    "RATE_LIMITS",
-    "ACCEPT_TOS",
-    "NSFW_MGMT",
-    "SET_BIRTH",
+    "ASSETS_LIST",
+    "ASSETS_UPLOAD",
+    "BASE",
+    "BUILD_BASE",
+    "BUILD_BILLING",
+    "BUILD_MODELS",
+    "BUILD_RESPONSES",
+    "CHAT",
+    "CONSOLE_BASE",
+    "CONSOLE_CHAT",
+    "CONSOLE_RESPONSES",
+    "CONSOLE_USAGE",
+    "LIVEKIT_TOKENS",
     "MEDIA_POST",
     "MEDIA_POST_LINK",
+    "NSFW_MGMT",
+    "RATE_LIMITS",
+    "SET_BIRTH",
     "VIDEO_UPSCALE",
     "WS_IMAGINE",
     "WS_LIVEKIT",
-    "LIVEKIT_TOKENS",
-    "CONSOLE_RESPONSES",
-    "CONSOLE_CHAT",
-    "BUILD_BASE",
-    "BUILD_RESPONSES",
-    "BUILD_MODELS",
-    "BUILD_BILLING",
     "XAI_FALLBACK_BASE",
     "XAI_FALLBACK_RESPONSES",
 ]

@@ -316,11 +316,15 @@ def build_console_headers(
     *,
     lease: ProxyLease | None = None,
     content_type: str = "application/json",
+    access_token: str | None = None,
+    dpop_proof: str | None = None,
 ) -> dict[str, str]:
     """Build headers for console.x.ai/v1/responses requests.
 
-    抓包确认的认证方式：
-    - Authorization: Bearer anonymous  （固定值）
+    认证方式（x.ai 要求 RFC 9449 DPoP，否则 403 unauthorized:dpop-required）：
+    - 同时传入 access_token + dpop_proof → Authorization: DPoP <access_token>
+      并附加 DPoP: <proof>（ES256 proof JWT）
+    - 未传入（或只传其一）→ Authorization: Bearer anonymous（兼容旧调用方）
     - Cookie: sso=<token>; sso-rw=<token>; cf_clearance=...  （身份 + CF clearance）
 
     cf_clearance 从 proxy lease 的 clearance profile 中获取（与 grok.com 共用同一套机制）。
@@ -356,10 +360,11 @@ def build_console_headers(
         "Accept": "*/*",
         "Accept-Encoding": "gzip, deflate, br, zstd",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Authorization": "Bearer anonymous",
+        "Cache-Control": "no-cache",
         "Content-Type": content_type,
         "Cookie": cookie,
         "Origin": "https://console.x.ai",
+        "Pragma": "no-cache",
         "Priority": "u=1, i",
         "Referer": "https://console.x.ai/",
         "Sec-Fetch-Dest": "empty",
@@ -373,6 +378,11 @@ def build_console_headers(
         ),
         "x-cluster": "https://us-east-1.api.x.ai",
     }
+    if access_token is not None and dpop_proof is not None:
+        headers["Authorization"] = f"DPoP {access_token}"
+        headers["DPoP"] = dpop_proof
+    else:
+        headers["Authorization"] = "Bearer anonymous"
     headers.update(_client_hints(profile.browser, profile.user_agent))
     return headers
 

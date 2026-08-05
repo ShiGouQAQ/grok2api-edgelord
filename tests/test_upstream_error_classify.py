@@ -11,6 +11,8 @@
 
 import pytest
 
+from app.control.account.enums import FeedbackKind
+from app.control.proxy.models import ProxyFeedbackKind
 from app.platform.errors import UpstreamError, _classify_upstream_status
 
 
@@ -253,6 +255,73 @@ class TestClassifyUpstream403:
         assert err.permanent_account_denial is False
         assert err.quota_exhausted is False
         assert err.credential_rejected is False
+
+    # --- DPoP proof-required（协议缺口，非凭证失败，不标记账号） ---
+
+    def test_dpop_required_real_body(self):
+        """x.ai 真实 403 body（code 含 unauthorized + DPoP）→ 无任何账号标记"""
+        err = UpstreamError.from_http_response(
+            "test",
+            status=403,
+            body='{"code":"unauthorized:dpop-required","error":"DPoP proof required but was not verified."}',
+        )
+        assert err.credential_rejected is False
+        assert err.account_scoped is False
+        assert err.permanent_account_denial is False
+        assert err.quota_exhausted is False
+        assert err.free_quota_exhausted is False
+        assert err.model_quota_exhausted is False
+        assert err.safety_rejected is False
+        # 请求仍以 403 失败，仅抑制账号级标记
+        assert err.to_feedback_kind() is FeedbackKind.FORBIDDEN
+        assert err.to_proxy_feedback_kind() is ProxyFeedbackKind.FORBIDDEN
+
+    def test_dpop_required_lowercase_message(self):
+        """小写 'dpop proof required but was not verified.' → 同样排除"""
+        _, kw = _classify_upstream_status(
+            403, "", "", "dpop proof required but was not verified."
+        )
+        assert kw["credential_rejected"] is False
+        assert kw["account_scoped"] is False
+
+    def test_dpop_required_marker_in_code_only(self):
+        """code='unauthorized:dpop-required'（无 message）→ 排除"""
+        _, kw = _classify_upstream_status(403, "unauthorized:dpop-required", "", "")
+        assert kw["credential_rejected"] is False
+        assert kw["account_scoped"] is False
+
+    def test_dpop_token_validation_denied(self):
+        """'Access denied due to DPoP token validation' → 排除（token 兜底不触发）"""
+        _, kw = _classify_upstream_status(
+            403, "", "", "Access denied due to DPoP token validation"
+        )
+        assert kw["credential_rejected"] is False
+        assert kw["account_scoped"] is False
+
+    def test_dpop_marker_in_raw_body_only(self):
+        """DPoP 标记只在原始 body（嵌套文本）→ 仍排除"""
+        _, kw = _classify_upstream_status(
+            403,
+            "",
+            "",
+            "some unrelated error",
+            body='{"detail":"DPoP proof required but was not verified."}',
+        )
+        assert kw["credential_rejected"] is False
+        assert kw["account_scoped"] is False
+
+    # --- 回归守卫：非 DPoP 的凭证类 403 不受影响 ---
+
+    def test_plain_unauthorized_still_credential_rejected(self):
+        """403 + 裸 'Unauthorized'（无 dpop）→ 仍 credential_rejected"""
+        err = UpstreamError.from_http_response("test", status=403, body="Unauthorized")
+        assert err.credential_rejected is True
+        assert err.account_scoped is True
+
+    def test_blocked_user_still_credential_rejected(self):
+        """403 + blocked-user（无 dpop）→ credential_rejected 不变"""
+        _, kw = _classify_upstream_status(403, "", "", "blocked-user")
+        assert kw["credential_rejected"] is True
 
     # --- 未分类 ---
 

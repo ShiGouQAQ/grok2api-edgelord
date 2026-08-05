@@ -329,6 +329,13 @@ class AccountRefreshService:
                 record, apply_fallback=apply_fallback
             )
 
+        # Console SSO accounts refresh from console.x.ai /v1/usage (DPoP);
+        # grok.com rate-limits rejects console tokens (401 → false reauth).
+        if record.provider == "grok_console":
+            return await self._refresh_console_usage(
+                record, apply_fallback=apply_fallback
+            )
+
         try:
             windows = await self._fetch_all_quotas(
                 record.token, record.pool, bootstrap=bootstrap
@@ -513,6 +520,103 @@ class AccountRefreshService:
             ]
         )
         return RefreshResult(checked=1, refreshed=1)
+
+    async def _refresh_console_usage(
+        self,
+        record: AccountRecord,
+        *,
+        apply_fallback: bool,
+    ) -> RefreshResult:
+        """Fetch the real console quota (chat/image/video) and persist it.
+
+        Go PR #853: the real upstream quota SUPERSEDES the local simulator
+        when the fetch succeeds (chat → quota_console; image/video → ext,
+        display-only). Transient failures (clearance required, malformed
+        payload, transport, 429) keep the account and fall back to the local
+        quota path; credential rejection follows _expire_invalid_credentials.
+        """
+        from app.dataplane.reverse.protocol.xai_console_usage import (
+            ConsoleClearanceRequiredError,
+            fetch_console_usage,
+        )
+
+        from .quota_defaults import console_usage_windows
+
+        try:
+            result = await fetch_console_usage(record.token)
+        except ConsoleClearanceRequiredError as exc:
+            logger.warning(
+                "console quota refresh clearance required: token={}... error={}",
+                record.token[:10],
+                exc,
+            )
+            return await self._console_refresh_fallback(record, apply_fallback)
+        except UpstreamError as exc:
+            if exc.status == 429:
+                logger.warning(
+                    "console quota refresh rate limited: token={}... error={}",
+                    record.token[:10],
+                    exc,
+                )
+                result = await self._console_refresh_fallback(record, apply_fallback)
+                result.rate_limited = 1
+                return result
+            if getattr(exc, "credential_rejected", False):
+                if await self._expire_invalid_credentials(record, exc):
+                    return RefreshResult(checked=1, expired=1)
+                return RefreshResult(checked=1, failed=1)
+            logger.warning(
+                "console quota refresh transient failure: token={}... error={}",
+                record.token[:10],
+                exc,
+            )
+            return await self._console_refresh_fallback(record, apply_fallback)
+        except Exception as exc:
+            logger.warning(
+                "console quota refresh failed: token={}... error={}",
+                record.token[:10],
+                exc,
+            )
+            return await self._console_refresh_fallback(record, apply_fallback)
+
+        windows = console_usage_windows(result)
+        now = now_ms()
+
+        from .commands import AccountPatch
+
+        reauth_restore = record.status == AccountStatus.REAUTH_REQUIRED
+        was_cooling = record.status == AccountStatus.COOLING
+        await self._repo.patch_accounts(
+            [
+                AccountPatch(
+                    token=record.token,
+                    quota_console=windows.chat.to_dict(),
+                    ext_merge={
+                        **(record.ext or {}),
+                        "console_quota_image": windows.image.to_dict(),
+                        "console_quota_video": windows.video.to_dict(),
+                    },
+                    last_sync_at=now,
+                    usage_sync_delta=1,
+                    clear_failures=reauth_restore,
+                )
+            ]
+        )
+        return RefreshResult(
+            checked=1,
+            refreshed=1,
+            recovered=1 if was_cooling else 0,
+        )
+
+    async def _console_refresh_fallback(
+        self,
+        record: AccountRecord,
+        apply_fallback: bool,
+    ) -> RefreshResult:
+        """Keep the local simulator quota on a transient console-fetch failure."""
+        if not apply_fallback:
+            return RefreshResult(checked=1, failed=1)
+        return await self._apply_fallback(record)
 
     async def _apply_fallback(self, record: AccountRecord) -> RefreshResult:
         """Conservative fallback when API is unreachable (scheduled/import path only)."""

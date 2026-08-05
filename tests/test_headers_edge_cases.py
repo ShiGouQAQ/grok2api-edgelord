@@ -895,9 +895,27 @@ class TestBuildConsoleHeaders:
         assert isinstance(result, dict)
 
     def test_authorization_is_bearer_anonymous(self):
-        """Console uses fixed 'Bearer anonymous' auth."""
+        """Console uses fixed 'Bearer anonymous' auth (no DPoP params)."""
         result = self._build()
         assert result["Authorization"] == "Bearer anonymous"
+
+    def test_dpop_authorization_when_token_and_proof(self):
+        """access_token + dpop_proof → Authorization: DPoP <tok> + DPoP header."""
+        result = self._build(access_token="at-123", dpop_proof="proof-abc")
+        assert result["Authorization"] == "DPoP at-123"
+        assert result["DPoP"] == "proof-abc"
+
+    def test_bearer_anonymous_when_only_one_dpop_param(self):
+        """DPoP requires BOTH params — partial input keeps Bearer anonymous."""
+        result = self._build(access_token="at-123")
+        assert result["Authorization"] == "Bearer anonymous"
+        assert "DPoP" not in result
+
+    def test_no_cache_headers_present(self):
+        """Unconditional no-cache headers (Go PR #853 headers.go)."""
+        result = self._build()
+        assert result["Cache-Control"] == "no-cache"
+        assert result["Pragma"] == "no-cache"
 
     def test_strips_sso_prefix(self):
         """'sso=' prefix should be stripped from token."""

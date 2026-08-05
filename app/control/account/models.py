@@ -24,6 +24,10 @@ class QuotaWindow:
     ``reset_at``       — ms timestamp when the window resets; None = unknown.
     ``synced_at``      — ms timestamp of last upstream sync; None = never.
     ``source``         — reliability of this value.
+    ``usage_percent``  — percent of the window consumed
+                         ((total-remaining)/total*100; 0 when total==0).
+    ``predicted``      — True when reset_at is our predicted recovery point
+                         (e.g. console 24h), not an upstream-confirmed reset.
     """
 
     remaining: int
@@ -32,6 +36,8 @@ class QuotaWindow:
     reset_at: int | None
     synced_at: int | None
     source: QuotaSource
+    usage_percent: float = 0.0
+    predicted: bool = False
 
     def is_exhausted(self) -> bool:
         return self.remaining <= 0
@@ -48,6 +54,8 @@ class QuotaWindow:
             "reset_at": self.reset_at,
             "synced_at": self.synced_at,
             "source": int(self.source),
+            "usage_percent": self.usage_percent,
+            "predicted": self.predicted,
         }
 
     @classmethod
@@ -59,6 +67,8 @@ class QuotaWindow:
             reset_at=d.get("reset_at"),
             synced_at=d.get("synced_at"),
             source=QuotaSource(int(d.get("source", 0))),
+            usage_percent=float(d.get("usage_percent", 0.0)),
+            predicted=bool(d.get("predicted", False)),
         )
 
 

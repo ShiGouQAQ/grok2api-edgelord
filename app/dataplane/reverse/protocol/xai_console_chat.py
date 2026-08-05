@@ -32,6 +32,15 @@ from typing import Any, AsyncGenerator
 
 import orjson
 
+from app.dataplane.proxy.adapters import session as _session_adapter
+from app.dataplane.reverse.protocol.dpop import (
+    DPoPError,
+    DPoPSession,
+    DPoPSessionManager,
+    DPoPTokenEndpointError,
+    dpop_session_cache_key,
+    sign_dpop_proof,
+)
 from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
 
@@ -300,33 +309,48 @@ async def stream_console_chat(
     """POST to console.x.ai/v1/responses and yield (event_type, data) pairs.
 
     走现有的 proxy lease + curl-cffi 体系，与 grok.com 共用 CF clearance。
+    x.ai 要求 RFC 9449 DPoP 证明（否则 403 unauthorized:dpop-required），
+    出站请求带 Authorization: DPoP <access_token> + DPoP: <proof>。
     """
     from app.dataplane.proxy import get_proxy_runtime
-    from app.dataplane.proxy.adapters.headers import build_console_headers
-    from app.dataplane.proxy.adapters.session import (
-        ResettableSession,
-        build_session_kwargs,
-    )
-    from app.dataplane.reverse.runtime.endpoint_table import (
-        CONSOLE_RESPONSES,
-        CONSOLE_BASE,
-    )
+    from app.dataplane.reverse.runtime.endpoint_table import CONSOLE_BASE
 
     proxy = await get_proxy_runtime()
     lease = await proxy.acquire(clearance_origin=CONSOLE_BASE)
 
-    headers = build_console_headers(token, lease=lease)
     payload_bytes = orjson.dumps(payload)
-    session_kwargs = build_session_kwargs(lease=lease)
+    session_kwargs = _session_adapter.build_session_kwargs(lease=lease)
 
-    async with ResettableSession(**session_kwargs) as session:
+    manager = _get_dpop_manager(token, lease)
+
+    async with _session_adapter.ResettableSession(**session_kwargs) as session:
         try:
-            response = await session.post(
-                CONSOLE_RESPONSES,
-                headers=headers,
-                data=payload_bytes,
-                timeout=timeout_s,
-                stream=True,
+            dpop_session = await manager.get_or_fetch(CONSOLE_BASE, 0, 0, token)
+        except DPoPTokenEndpointError as exc:
+            if exc.invalidate_clearance:
+                await proxy.feedback(lease, _forbidden_feedback(403))
+                raise UpstreamError(
+                    "Console DPoP token endpoint rejected request", status=403
+                ) from exc
+            await proxy.feedback(lease, _transport_error_feedback())
+            raise UpstreamError(
+                f"Console DPoP token endpoint failed: {exc}", status=502
+            ) from exc
+        except DPoPError as exc:
+            await proxy.feedback(lease, _transport_error_feedback())
+            raise UpstreamError(
+                f"Console DPoP setup failed: {exc}", status=502
+            ) from exc
+
+        try:
+            response = await _post_console_with_dpop(
+                manager,
+                dpop_session,
+                token=token,
+                lease=lease,
+                payload_bytes=payload_bytes,
+                timeout_s=timeout_s,
+                session=session,
             )
         except Exception as exc:
             await proxy.feedback(lease, _transport_error_feedback())
@@ -372,10 +396,126 @@ async def stream_console_chat(
             ) from exc
 
 
+# ---------------------------------------------------------------------------
+# DPoP (RFC 9449) wiring — port of chenyme/grok2api PR #853 console/dpop.go
+# ---------------------------------------------------------------------------
+
+
+async def _post_dpop_token(
+    url: str, headers: dict[str, str], json_body: dict[str, Any]
+) -> tuple[int, dict[str, Any]]:
+    """Perform the POST {base}/v1/dpop/token exchange through the proxy machinery.
+
+    Acquires its own lease (the exchange is rare — the DPoP session is cached
+    per SSO token). Transport failures surface as status 0 so the manager
+    raises DPoPTokenEndpointError instead of leaking raw exceptions.
+    """
+    from app.dataplane.proxy import get_proxy_runtime
+    from app.dataplane.proxy.adapters.session import (
+        ResettableSession,
+        build_session_kwargs,
+    )
+    from app.dataplane.reverse.runtime.endpoint_table import CONSOLE_BASE
+
+    proxy = await get_proxy_runtime()
+    lease = await proxy.acquire(clearance_origin=CONSOLE_BASE)
+    session_kwargs = build_session_kwargs(lease=lease)
+    try:
+        async with ResettableSession(**session_kwargs) as s:
+            resp = await s.post(
+                url, headers=headers, data=orjson.dumps(json_body), timeout=30.0
+            )
+            status = resp.status_code
+            try:
+                text = await resp.atext()
+            except Exception:
+                text = ""
+            if not text:
+                return status, {}
+            try:
+                return status, orjson.loads(text)
+            except (orjson.JSONDecodeError, TypeError, ValueError):
+                return status, {}
+    except Exception:
+        return 0, {}
+
+
+_dpop_manager = None  # DPoPSessionManager — built lazily, one per SSO token
+_dpop_manager_token: str | None = None
+
+
+def _get_dpop_manager(token: str, lease) -> "DPoPSessionManager":
+    """Lazily build the DPoP session manager.
+
+    One manager per SSO token so the token-exchange browser headers (sso
+    cookie) match the account; the cached DPoP session survives across calls.
+    """
+    global _dpop_manager, _dpop_manager_token
+    if _dpop_manager is None or _dpop_manager_token != token:
+        from app.dataplane.proxy.adapters.headers import build_console_headers
+
+        _dpop_manager = DPoPSessionManager(
+            _post_dpop_token,
+            browser_headers=build_console_headers(token, lease=lease),
+        )
+        _dpop_manager_token = token
+    return _dpop_manager
+
+
+async def _post_console_with_dpop(
+    manager: "DPoPSessionManager",
+    dpop_session: "DPoPSession",
+    *,
+    token: str,
+    lease,
+    payload_bytes: bytes,
+    timeout_s: float,
+    session,
+):
+    """POST /v1/responses with a DPoP proof; on 401 invalidate the session,
+    refetch and retry once (mirrors Go doDPoPRequest's single retry)."""
+    from app.dataplane.proxy.adapters.headers import build_console_headers
+    from app.dataplane.reverse.runtime.endpoint_table import (
+        CONSOLE_BASE,
+        CONSOLE_RESPONSES,
+    )
+
+    async def _post(dpop_sess) -> Any:
+        headers = build_console_headers(
+            token,
+            lease=lease,
+            access_token=dpop_sess.access_token,
+            dpop_proof=sign_dpop_proof(dpop_sess, method="POST", url=CONSOLE_RESPONSES),
+        )
+        return await session.post(
+            CONSOLE_RESPONSES,
+            headers=headers,
+            data=payload_bytes,
+            timeout=timeout_s,
+            stream=True,
+        )
+
+    response = await _post(dpop_session)
+    if response.status_code != 401:
+        return response
+    manager.invalidate(
+        dpop_session_cache_key(CONSOLE_BASE, 0, 0, token),
+        dpop_session.access_token,
+    )
+    refreshed = await manager.get_or_fetch(CONSOLE_BASE, 0, 0, token)
+    return await _post(refreshed)
+
+
 def _success_feedback():
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
 
     return ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200)
+
+
+def _forbidden_feedback(status: int = 403):
+    from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
+
+    return ProxyFeedback(kind=ProxyFeedbackKind.FORBIDDEN, status_code=status)
 
 
 def _transport_error_feedback():

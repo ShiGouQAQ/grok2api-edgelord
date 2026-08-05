@@ -313,6 +313,33 @@ async def lifespan(app: FastAPI):
         else None
     )
 
+    # 9. Console 配额预测恢复任务（leader-only，60s 巡检）
+    # 对 remaining==0 且 reset_at 已过期的 console 账号执行真实配额探测
+    # （Go PR #853 移植：24h 预测恢复节奏 + 传输失败有界指数退避）。
+    _CONSOLE_QUOTA_RECOVERY_INTERVAL = 60  # 秒
+
+    async def _console_quota_recovery_loop() -> None:
+        while True:
+            await asyncio.sleep(_CONSOLE_QUOTA_RECOVERY_INTERVAL)
+            try:
+                from app.control.account.quota_recovery import (
+                    recover_due_console_quotas,
+                )
+
+                await recover_due_console_quotas(repo)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("console quota recovery loop error: error={}", exc)
+
+    console_quota_recovery_task = (
+        asyncio.create_task(
+            _console_quota_recovery_loop(), name="console-quota-recovery"
+        )
+        if is_leader
+        else None
+    )
+
     def _deleted_cleanup_settings() -> dict[str, object]:
         return {
             "retention_days": max(
@@ -356,6 +383,12 @@ async def lifespan(app: FastAPI):
         reauth_recovery_task.cancel()
         try:
             await reauth_recovery_task
+        except asyncio.CancelledError:
+            pass
+    if console_quota_recovery_task is not None:
+        console_quota_recovery_task.cancel()
+        try:
+            await console_quota_recovery_task
         except asyncio.CancelledError:
             pass
     if deleted_cleanup_task is not None:

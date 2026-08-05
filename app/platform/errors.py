@@ -251,6 +251,11 @@ def _classify_upstream_status(
             body and _is_safety_rejection(str(body).lower())
         ):
             kw["safety_rejected"] = True
+        elif _is_dpop_required(text) or (body and _is_dpop_required(str(body).lower())):
+            # DPoP proof-required is a client/protocol gap (no proof sent), not
+            # a credential failure: leave all flags False so the account is not
+            # marked reauth/expired. Local fix — Go PR #853 has no such rule.
+            pass
         else:
             if "access to the chat endpoint is denied" in text:
                 kw["permanent_account_denial"] = True
@@ -325,6 +330,14 @@ def _is_safety_rejection(text: str) -> bool:
     """Return whether *text* marks a request-level content safety denial."""
     lower = text.lower()
     return "content violates usage guidelines" in lower or "safety_check_type_" in lower
+
+
+def _is_dpop_required(text: str) -> bool:
+    """Return whether *text* marks a DPoP proof-required protocol denial."""
+    lower = text.lower()
+    return "dpop" in lower and (
+        "proof" in lower or "dpop-required" in lower or "token" in lower
+    )
 
 
 def _contains_any(text: str, *signals: str) -> bool:

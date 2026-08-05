@@ -16,6 +16,33 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from app.dataplane.reverse.runtime.endpoint_table import CONSOLE_BASE
 
 
+@pytest.fixture(autouse=True)
+def _bypass_dpop_exchange(monkeypatch):
+    """The DPoP manager's token exchange would run against the mocked HTTP
+    layer here and fail (its status-200 mock carries no access token). These
+    tests own clearance-origin / feedback semantics, so bypass the manager
+    factory with a fake that serves a ready DPoP session."""
+    import time
+
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from app.dataplane.reverse.protocol.dpop import DPoPSession, public_dpop_jwk
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    session = DPoPSession(
+        access_token="fake-at",
+        private_key=key,
+        public_jwk=public_dpop_jwk(key),
+        expires_at=int(time.time() * 1000) + 3_600_000,
+    )
+    fake = MagicMock()
+    fake.get_or_fetch = AsyncMock(return_value=session)
+    monkeypatch.setattr(
+        "app.dataplane.reverse.protocol.xai_console_chat._get_dpop_manager",
+        lambda token, lease: fake,
+    )
+
+
 @pytest.mark.asyncio
 async def test_clearance_origin_is_console_x_ai():
     assert CONSOLE_BASE == "https://console.x.ai"

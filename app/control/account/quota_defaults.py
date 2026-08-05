@@ -12,13 +12,14 @@ accounts; basic accounts no longer expose auto/expert windows locally.
 Console quota: 20 queries / 60 min window, rotation threshold at remaining <= 12.
 """
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .enums import QuotaSource
 from .models import AccountQuotaSet, QuotaWindow
 
 if TYPE_CHECKING:
-    pass
+    from app.dataplane.reverse.protocol.xai_console_usage import ConsoleUsageResult
 
 
 # ---------------------------------------------------------------------------
@@ -224,12 +225,78 @@ def infer_pool(windows: dict[int, QuotaWindow]) -> str:
     return _AUTO_TOTAL_TO_POOL.get(auto_win.total, "basic")
 
 
+# ---------------------------------------------------------------------------
+# Console real-usage mapping (Go PR #853 quota.go)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ConsoleUsageWindows:
+    """Mapped console quota windows: chat (routing) + display-only media."""
+
+    chat: QuotaWindow
+    image: QuotaWindow
+    video: QuotaWindow
+
+
+def console_usage_windows(result: "ConsoleUsageResult") -> ConsoleUsageWindows:
+    """Map a fetched ``ConsoleUsageResult`` onto account quota windows.
+
+    Go PR #853 semantics:
+    * chat — the routing window: ``window_seconds`` = 24h predicted recovery;
+      ``predicted=True`` and ``reset_at = fetch time + 24h`` iff ``remaining==0``
+      (upstream never confirms a reset time; the sibling parser stamps it).
+    * image/video — display-only: ``window_seconds=0``, ``reset_at=None``,
+      ``predicted=False``; never participate in routing or expiry.
+    * ``usage_percent`` = ``(total-remaining)/total*100`` (0 when total==0);
+      ``source`` stays the fetched window's REAL marker.
+    """
+    from app.dataplane.reverse.protocol.xai_console_usage import (
+        CONSOLE_PREDICTED_CHAT_RECOVERY_WINDOW_S,
+    )
+
+    def _percent(total: int, remaining: int) -> float:
+        if total <= 0:
+            return 0.0
+        return (total - remaining) / total * 100.0
+
+    def _display_only(window: QuotaWindow) -> QuotaWindow:
+        return QuotaWindow(
+            remaining=window.remaining,
+            total=window.total,
+            window_seconds=0,
+            reset_at=None,
+            synced_at=window.synced_at,
+            source=window.source,
+            usage_percent=_percent(window.total, window.remaining),
+            predicted=False,
+        )
+
+    chat = result.chat
+    return ConsoleUsageWindows(
+        chat=QuotaWindow(
+            remaining=chat.remaining,
+            total=chat.total,
+            window_seconds=CONSOLE_PREDICTED_CHAT_RECOVERY_WINDOW_S,
+            reset_at=chat.reset_at,
+            synced_at=chat.synced_at,
+            source=chat.source,
+            usage_percent=_percent(chat.total, chat.remaining),
+            predicted=chat.reset_at is not None,
+        ),
+        image=_display_only(result.image),
+        video=_display_only(result.video),
+    )
+
+
 __all__ = [
     "_MODE_KEYS",
     "BUILD_QUOTA_DEFAULTS",
     "BASIC_QUOTA_DEFAULTS",
     "SUPER_QUOTA_DEFAULTS",
     "HEAVY_QUOTA_DEFAULTS",
+    "ConsoleUsageWindows",
+    "console_usage_windows",
     "default_quota_set",
     "default_quota_window",
     "infer_pool",
