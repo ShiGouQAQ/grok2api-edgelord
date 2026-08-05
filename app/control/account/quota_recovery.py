@@ -33,9 +33,9 @@ CONSOLE_PROBE_INTERVAL_MS = 86_400_000
 # Go consoleMinInterval — never probe an account more often than this,
 # except via the bounded backoff path.
 CONSOLE_MIN_INTERVAL_MS = 30_000
-# Go recovery backoff bounds (base 1 s, max 1 min).
-BACKOFF_BASE_MS = 1_000
-BACKOFF_MAX_MS = 60_000
+# Go recovery backoff bounds (config defaults 30 s base / 30 min max, floor 5 s).
+BACKOFF_BASE_MS = 30_000
+BACKOFF_MAX_MS = 1_800_000
 
 MODE_CONSOLE = "console"
 
@@ -191,7 +191,8 @@ async def recover_due_console_quotas(
     """Leader task: probe console accounts whose predicted recovery window is due.
 
     A console account is due when its chat quota is exhausted (remaining == 0)
-    and its reset window has passed (reset_at <= now, or no reset_at).
+    and its reset window is past due (reset_at IS NOT NULL and reset_at <= now,
+    matching Go ListDueQuotaWindows).
     Probes sequentially; on success the fresh chat window is persisted (the
     account returns to active routing), on failure the bounded backoff guard
     suppresses re-probing until it elapses.
@@ -206,7 +207,7 @@ async def recover_due_console_quotas(
         chat = record.quota_set().get(5)
         if chat is None or not chat.is_exhausted():
             continue
-        if chat.reset_at is not None and chat.reset_at > now:
+        if chat.reset_at is None or chat.reset_at > now:
             continue
         key = (record.token, MODE_CONSOLE)
         if _next_probe_at.get(key, 0) > now:

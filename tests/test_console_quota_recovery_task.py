@@ -2,7 +2,8 @@
 
 ``recover_due_console_quotas`` scans the account directory for console
 accounts whose predicted recovery window is past due (remaining == 0 and
-reset_at <= now), probes the real quota, and refreshes the stored window.
+reset_at IS NOT NULL and reset_at <= now — Go ``ListDueQuotaWindows``),
+probes the real quota, and refreshes the stored window.
 All network is mocked — the probe's fetch is patched at its module site.
 """
 
@@ -157,7 +158,7 @@ class TestRecoverDueConsoleQuotas:
         window = await _fetch_record(repo)
         assert window is not None and window.remaining == 0
 
-        # Second scan inside the backoff window (deadline NOW + 1 s) → skipped.
+        # Second scan inside the backoff window (deadline NOW + 30 s) → skipped.
         assert await qr.recover_due_console_quotas(repo, now_ms=NOW + 500) == 0
         fetch.assert_awaited_once()
 
@@ -207,17 +208,17 @@ class TestRecoverDueConsoleQuotas:
         fetch.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_window_without_reset_at_is_due_now(self, tmp_path, monkeypatch):
-        _patch_fetch(
-            monkeypatch, AsyncMock(return_value=_usage_result(chat_remaining=7))
-        )
+    async def test_window_without_reset_at_skipped(self, tmp_path, monkeypatch):
+        # Go ListDueQuotaWindows requires reset_at IS NOT NULL (377710f4) — a
+        # null-reset exhausted window is never due, so it must not be probed.
+        fetch = AsyncMock(return_value=_usage_result(chat_remaining=7))
+        _patch_fetch(monkeypatch, fetch)
         repo = await _make_repo(
             tmp_path, provider="grok_console", remaining=0, reset_at=None
         )
 
-        assert await qr.recover_due_console_quotas(repo, now_ms=NOW) == 1
-        window = await _fetch_record(repo)
-        assert window is not None and window.remaining == 7
+        assert await qr.recover_due_console_quotas(repo, now_ms=NOW) == 0
+        fetch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_429_probe_keeps_account_and_schedules_backoff(

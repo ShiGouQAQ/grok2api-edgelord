@@ -3,7 +3,7 @@
 Covers the pure scheduling semantics of ``probe_console_quota``:
 * success (quota present OR zero chat window) → next probe = now + 24 h
   (Go ``consoleProbeInterval`` fixed window)
-* transient/transport failure → bounded exponential backoff (base 1 s, max 1 min)
+* transient/transport failure → bounded exponential backoff (base 30 s, max 30 min)
 * 429 → same backoff path (never credential death)
 * non-console accounts skipped
 * 30 s min-interval guard (Go ``consoleMinInterval``)
@@ -109,7 +109,7 @@ class TestProbeNextDueMath:
         assert second is not None
         assert second.next_due_ms == NOW + 60_000 + 2 * qr.BACKOFF_BASE_MS
 
-        # Attempt 3 → 4 s.
+        # Attempt 3 → 4 × base.
         third = await qr.probe_console_quota(record, now_ms=NOW + 120_000)
         assert third is not None
         assert third.next_due_ms == NOW + 120_000 + 4 * qr.BACKOFF_BASE_MS
@@ -144,26 +144,29 @@ class TestProbeNextDueMath:
         f1 = await qr.probe_console_quota(record, now_ms=NOW)
         f2 = await qr.probe_console_quota(record, now_ms=NOW + 60_000)
         assert f1 is not None and f2 is not None
-        assert f1.next_due_ms == NOW + 1_000
-        assert f2.next_due_ms == NOW + 60_000 + 2_000
+        assert f1.next_due_ms == NOW + qr.BACKOFF_BASE_MS
+        assert f2.next_due_ms == NOW + 60_000 + 2 * qr.BACKOFF_BASE_MS
 
-        # Success resets the attempt counter — the next failure backs off from 1 s.
+        # Success resets the attempt counter — the next failure backs off from base.
         s = await qr.probe_console_quota(record, now_ms=NOW + 120_000)
         assert s is not None
         assert s.window is not None and s.window.remaining == 5
         f3 = await qr.probe_console_quota(record, now_ms=NOW + 180_000)
         assert f3 is not None
-        assert f3.next_due_ms == NOW + 180_000 + 1_000
+        assert f3.next_due_ms == NOW + 180_000 + qr.BACKOFF_BASE_MS
 
     def test_backoff_capped_at_max(self):
-        assert qr._backoff_ms(1) == 1_000
-        assert qr._backoff_ms(2) == 2_000
-        assert qr._backoff_ms(3) == 4_000
-        assert qr._backoff_ms(4) == 8_000
-        assert qr._backoff_ms(5) == 16_000
-        assert qr._backoff_ms(6) == 32_000
-        assert qr._backoff_ms(7) == 60_000
-        assert qr._backoff_ms(10) == 60_000
+        # Go defaults (377710f4): base 30 s, max 30 min.
+        assert qr.BACKOFF_BASE_MS == 30_000
+        assert qr.BACKOFF_MAX_MS == 1_800_000
+        assert qr._backoff_ms(1) == 30_000
+        assert qr._backoff_ms(2) == 60_000
+        assert qr._backoff_ms(3) == 120_000
+        assert qr._backoff_ms(4) == 240_000
+        assert qr._backoff_ms(5) == 480_000
+        assert qr._backoff_ms(6) == 960_000
+        assert qr._backoff_ms(7) == 1_800_000
+        assert qr._backoff_ms(10) == 1_800_000
 
 
 class TestConsoleFilter:
