@@ -17,11 +17,6 @@ UNLIMITED_ROUTING_ATTEMPTS = -1
 _DEFAULT_ROUTING_LIMIT = 3
 # Go: maxRoutingAttempts = 200 — validation cap.
 MAX_ROUTING_ATTEMPTS = 200
-# Shipped default of routing.max_routing_attempts in config.defaults.toml.
-# The merged config always carries it, so treat it as "not overridden": the
-# default config must preserve the legacy strategy-aware budget (5 random /
-# 1 quota retries). Only explicit non-default values activate config routing.
-_SHIPPED_DEFAULT_ATTEMPTS = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,13 +72,15 @@ def routing_attempt_policy(legacy_retries: int | None = None) -> RoutingAttemptP
     the config key is unset it is used as the fallback limit, preserving the
     historical behaviour: random strategy 5 retries (6 attempts), quota
     strategy 1 retry (2 attempts). The ``+1`` converts the legacy *retry*
-    count into the policy's *attempt* count.
+    count into the policy's *attempt* count. Key presence is authoritative:
+    any configured value (including the legal max 200) is used as-is, per Go
+    ``newRoutingAttemptPolicy(configured)``.
 
     Raises ValueError when the configured value is invalid (Go
     ``Config.Validate``: only -1 and 1..200 are allowed).
     """
     configured = get_config("routing.max_routing_attempts", None)
-    if configured is None or int(configured) == _SHIPPED_DEFAULT_ATTEMPTS:
+    if configured is None:
         if legacy_retries is None:
             legacy_retries = selection_max_retries()
         return new_routing_attempt_policy(legacy_retries + 1)

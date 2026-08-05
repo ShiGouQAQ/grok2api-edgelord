@@ -121,14 +121,22 @@ class TestConfigDrivenResolution:
         assert policy.allows(1)
         assert not policy.allows(2)
 
-    def test_shipped_default_preserves_legacy_budget(self, monkeypatch):
-        # defaults.toml ships max_routing_attempts = 200; the merged config
-        # always carries it, and the default must not change loop behaviour.
+    def test_explicit_two_hundred_is_honored_as_two_hundred(self, monkeypatch):
+        # Go: newRoutingAttemptPolicy(configured) with configured=200 -> 200
+        # attempts. 200 is the legal max, NOT a "not overridden" sentinel.
         monkeypatch.setattr(rp, "get_config", lambda key, default=None: 200)
         policy = rp.routing_attempt_policy(1)
-        assert policy.limit == 2
-        assert policy.allows(1)
-        assert not policy.allows(2)
+        assert policy.limit == 200
+        assert not policy.unlimited
+        assert policy.allows(199)
+        assert not policy.allows(200)
+
+    def test_explicit_three_is_honored(self, monkeypatch):
+        monkeypatch.setattr(rp, "get_config", lambda key, default=None: 3)
+        policy = rp.routing_attempt_policy(1)
+        assert policy.limit == 3
+        assert policy.allows(2)
+        assert not policy.allows(3)
 
     def test_explicit_non_default_limit_activates_config(self, monkeypatch):
         monkeypatch.setattr(rp, "get_config", lambda key, default=None: 100)
