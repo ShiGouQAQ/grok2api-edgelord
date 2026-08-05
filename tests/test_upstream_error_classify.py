@@ -38,6 +38,14 @@ class TestClassifyUpstream402:
         assert kw["account_scoped"] is True
         assert kw["credential_rejected"] is False
 
+    def test_402_model_free_usage_sets_free_quota(self):
+        """402 + model 免费额度文案 → free_quota_exhausted=True（Go d1205d85 failure.go:117）"""
+        _, kw = _classify_upstream_status(
+            402, "", "", "used all the included free usage for model grok-3"
+        )
+        assert kw["free_quota_exhausted"] is True
+        assert kw["quota_exhausted"] is True
+
 
 class TestClassifyUpstream403:
     """测试 403 状态码分类 — 最复杂的分支"""
@@ -67,17 +75,33 @@ class TestClassifyUpstream403:
         _, kw = _classify_upstream_status(403, "Access Denied", "", "")
         assert kw["permanent_account_denial"] is True
 
-    # --- 免费配额（d1205d85 解耦：model 不再隐含 free） ---
+    # --- 免费配额（Go d1205d85：model 文案同时是 free 信号） ---
+    # failure.go:130-131: FreeQuotaExhausted = ModelQuotaExhausted || isFreeQuotaExhaustion(text)
+    # failure.go:140-141: QuotaExhausted = FreeQuotaExhausted || isPaidQuotaExhaustion(text)
+    # isFreeQuotaExhaustion 含 "used all the included free usage for model"
 
     def test_free_usage_exhausted_sets_model_quota(self):
-        """'used all the included free usage for model' → model quota ONLY (no free)"""
+        """'used all the included free usage for model' → model + free + quota 均置位"""
         _, kw = _classify_upstream_status(
             403, "", "", "used all the included free usage for model grok-3"
         )
         assert kw["model_quota_exhausted"] is True
-        assert kw["free_quota_exhausted"] is False
-        assert kw["quota_exhausted"] is False
-        assert kw["account_scoped"] is False
+        assert kw["free_quota_exhausted"] is True
+        assert kw["quota_exhausted"] is True
+        assert kw["account_scoped"] is True
+
+    def test_model_free_usage_403_feedback_rate_limited(self):
+        """403 + model 免费额度文案 → account_scoped → to_feedback_kind RATE_LIMITED（Go 为 RATE_LIMITED，非 FORBIDDEN）"""
+        err = UpstreamError.from_http_response(
+            "test",
+            status=403,
+            body='{"error":{"message":"You used all the included free usage for model grok-3"}}',
+        )
+        assert err.model_quota_exhausted is True
+        assert err.free_quota_exhausted is True
+        assert err.quota_exhausted is True
+        assert err.account_scoped is True
+        assert err.to_feedback_kind() is FeedbackKind.RATE_LIMITED
 
     def test_subscription_free_usage_exhausted(self):
         """'subscription:free-usage-exhausted' → free_quota_exhausted only (no model)"""
@@ -155,17 +179,17 @@ class TestClassifyUpstream403:
         _, kw = _classify_upstream_status(403, "", "", "usage-exhausted")
         assert kw["account_scoped"] is True
 
-    # --- 优先级测试：quota 解耦后 credential 不再被 model 标记抑制 ---
+    # --- 优先级测试：quota 置位后 credential 被抑制（Go d1205d85: CredentialRejected = !QuotaExhausted && ...） ---
 
-    def test_model_quota_no_longer_suppresses_credential(self):
-        """model 标记 + blocked-user：quota 未置位 → credential 正常判出"""
+    def test_model_quota_suppresses_credential(self):
+        """model 标记 + blocked-user：quota 置位 → credential 被抑制"""
         _, kw = _classify_upstream_status(
             403, "", "", "used all the included free usage for model X blocked-user"
         )
         assert kw["model_quota_exhausted"] is True
-        assert kw["free_quota_exhausted"] is False
-        assert kw["quota_exhausted"] is False
-        assert kw["credential_rejected"] is True
+        assert kw["free_quota_exhausted"] is True
+        assert kw["quota_exhausted"] is True
+        assert kw["credential_rejected"] is False
 
     def test_credential_keywords_still_suppressed_by_free_quota(self):
         """free-usage + blocked-user：quota 置位 → credential 仍被抑制"""
@@ -340,13 +364,13 @@ class TestClassifyUpstream429:
     """测试 429 状态码分类"""
 
     def test_free_usage_exhausted_429(self):
-        """429 + free usage → model quota ONLY（解耦后不再隐含 free）"""
+        """429 + model 免费额度文案 → free + quota 均置位（Go d1205d85: FreeQuotaExhausted = isFreeQuotaExhaustion 含 model 文案）"""
         _, kw = _classify_upstream_status(
             429, "", "", "used all the included free usage for model grok-3"
         )
         assert kw["model_quota_exhausted"] is True
-        assert kw["free_quota_exhausted"] is False
-        assert kw["quota_exhausted"] is False
+        assert kw["free_quota_exhausted"] is True
+        assert kw["quota_exhausted"] is True
         assert kw["account_scoped"] is True
 
     def test_subscription_free_usage_exhausted_429(self):

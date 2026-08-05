@@ -243,6 +243,11 @@ def _classify_upstream_status(
     elif status == 402:
         kw["account_scoped"] = True
         kw["quota_exhausted"] = True
+        if "subscription:free-usage-exhausted" in text or (
+            "used all the included free usage for model" in text
+        ):
+            # Go d1205d85 failure.go:117: FreeQuotaExhausted = isFreeQuotaExhaustion(text)
+            kw["free_quota_exhausted"] = True
     elif status == 403:
         # Safety denials are request-scoped: inspect both structured metadata
         # and the raw body so SAFETY_CHECK_TYPE_* markers still match when they
@@ -268,11 +273,15 @@ def _classify_upstream_status(
                 or upstream_message.lower().strip(" .!\t\r\n") == "access denied"
             ):
                 kw["permanent_account_denial"] = True
-            # free-usage and per-model free usage are distinct so their
-            # recovery scopes stay independent (d1205d85).
+            # Go d1205d85 failure.go:130-131: FreeQuotaExhausted =
+            # ModelQuotaExhausted || isFreeQuotaExhaustion(text) — the model
+            # marker itself is a free-usage signal.
             if "used all the included free usage for model" in text:
                 kw["model_quota_exhausted"] = True
-            if "subscription:free-usage-exhausted" in text:
+            if (
+                kw["model_quota_exhausted"]
+                or "subscription:free-usage-exhausted" in text
+            ):
                 kw["free_quota_exhausted"] = True
             if "personal-team-blocked:spending-limit" in text:
                 kw["quota_exhausted"] = True
@@ -315,7 +324,8 @@ def _classify_upstream_status(
         kw["account_scoped"] = True
         if "used all the included free usage for model" in text:
             kw["model_quota_exhausted"] = True
-        if "subscription:free-usage-exhausted" in text:
+        if kw["model_quota_exhausted"] or "subscription:free-usage-exhausted" in text:
+            # Go d1205d85 failure.go:231-233: FreeQuotaExhausted = isFreeQuotaExhaustion(text)
             kw["free_quota_exhausted"] = True
         if "personal-team-blocked:spending-limit" in text:
             kw["quota_exhausted"] = True
