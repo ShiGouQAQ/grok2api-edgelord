@@ -458,6 +458,45 @@ async def test_chat_dpop_exchange_has_no_x_cluster():
 
 
 # ---------------------------------------------------------------------------
+# G6-M3: no Authorization header on the /dpop/token exchange
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_chat_dpop_exchange_has_no_authorization():
+    """G6-M3: the token exchange must NOT carry an Authorization header.
+
+    Go's applyBrowserHeaders never sets Authorization; a stray
+    "Bearer anonymous" on the /dpop/token POST is what got Cloudflare to
+    answer the exchange with a 200 challenge interstitial (non-JSON body →
+    "Console DPoP token response invalid" → 502).
+    """
+    captured: list[dict[str, str]] = []
+
+    async def fake_post(
+        _url: str,
+        headers: dict[str, str],
+        _payload: dict[str, Any],
+        _lease: Any | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        captured.append(headers)
+        raise DPoPTokenEndpointError(403, b"{}", invalidate_clearance=False)
+
+    with (
+        patch.object(chat_module, "_post_dpop_token", fake_post),
+        patch(
+            "app.dataplane.proxy.adapters.headers._resolve_profile",
+            return_value=_Profile(),
+        ),
+    ):
+        manager = chat_module._get_dpop_manager("sso-tok")
+        with pytest.raises(DPoPTokenEndpointError):
+            await manager.get_or_fetch(CONSOLE_BASE, 0, 0, "sso-tok")
+
+    assert "Authorization" not in captured[0]
+
+
+# ---------------------------------------------------------------------------
 # Fix A regression: the token exchange must reuse the chat request's lease
 # ---------------------------------------------------------------------------
 

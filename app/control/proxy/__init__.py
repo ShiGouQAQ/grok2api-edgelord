@@ -293,10 +293,14 @@ class ProxyDirectory:
             await self._apply_node_success(lease)
         else:
             await self._apply_node_failure(lease, result, after_success=False)
-        if result.kind in (
-            ProxyFeedbackKind.CHALLENGE,
-            ProxyFeedbackKind.UNAUTHORIZED,
-            ProxyFeedbackKind.NODE_BANNED,
+        if (
+            result.kind
+            in (
+                ProxyFeedbackKind.CHALLENGE,
+                ProxyFeedbackKind.UNAUTHORIZED,
+                ProxyFeedbackKind.NODE_BANNED,
+            )
+            or result.invalidate_clearance
         ):
             # Invalidate associated clearance bundle. NODE_BANNED also
             # invalidates: the bundle was minted through a banned IP, so a

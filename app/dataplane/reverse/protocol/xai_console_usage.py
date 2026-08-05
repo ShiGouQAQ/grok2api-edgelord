@@ -142,11 +142,14 @@ def _status_feedback(status: int) -> ProxyFeedback:
     return ProxyFeedback(kind=kind, status_code=status)
 
 
-def _feedback_forbidden(status: int, body: str) -> ProxyFeedback:
+def _feedback_forbidden(
+    status: int, body: str, *, invalidate_clearance: bool = False
+) -> ProxyFeedback:
     return ProxyFeedback(
         kind=ProxyFeedbackKind.FORBIDDEN,
         status_code=status,
         reason=_parse_body_code(body),
+        invalidate_clearance=invalidate_clearance,
     )
 
 
@@ -267,7 +270,12 @@ async def _handle_dpop_token_error(
             credential_rejected=True,
         ) from exc
     if status == 403:
-        await proxy.feedback(lease, _feedback_forbidden(status, body_text))
+        await proxy.feedback(
+            lease,
+            _feedback_forbidden(
+                status, body_text, invalidate_clearance=exc.invalidate_clearance
+            ),
+        )
         raise ConsoleClearanceRequiredError(
             f"Console usage rejected: DPoP token endpoint {status}",
             status=403,
@@ -295,8 +303,11 @@ async def _handle_usage_status(
             credential_rejected=True,
         )
     if status == 403:
-        # Go lease.InvalidateClearance() — clearance/egress is bad, not the account.
-        await proxy.feedback(lease, _feedback_forbidden(status, body_text))
+        # Go lease.InvalidateClearance() — clearance/egress is bad, not the
+        # account: invalidate the bundle so the next acquire() re-solves.
+        await proxy.feedback(
+            lease, _feedback_forbidden(status, body_text, invalidate_clearance=True)
+        )
         raise ConsoleClearanceRequiredError(
             f"Console usage returned {status}",
             status=403,
@@ -412,6 +423,7 @@ async def fetch_console_usage(
     async with ResettableSession(**build_session_kwargs(lease=lease)) as session:
         manager = DPoPSessionManager(
             _make_post_json_fn(session, token, lease, timeout_s),
+            browser_headers=lambda lease: build_console_headers(token, lease=lease),
             is_definitive_block=_is_definitive_block_body,
         )
         try:

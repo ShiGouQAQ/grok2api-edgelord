@@ -324,7 +324,8 @@ def build_console_headers(
     认证方式（x.ai 要求 RFC 9449 DPoP，否则 403 unauthorized:dpop-required）：
     - 同时传入 access_token + dpop_proof → Authorization: DPoP <access_token>
       并附加 DPoP: <proof>（ES256 proof JWT）
-    - 未传入（或只传其一）→ Authorization: Bearer anonymous（兼容旧调用方）
+    - 未传入 → 不设 Authorization header（Go applyBrowserHeaders 从不发送
+      Authorization；token 交换请求带多余 header 会被 CF 拦截返回 200 挑战页）
     - Cookie: sso=<token>; sso-rw=<token>; cf_clearance=...  （身份 + CF clearance）
 
     cf_clearance 从 proxy lease 的 clearance profile 中获取（与 grok.com 共用同一套机制）。
@@ -380,8 +381,6 @@ def build_console_headers(
     if access_token is not None and dpop_proof is not None:
         headers["Authorization"] = f"DPoP {access_token}"
         headers["DPoP"] = dpop_proof
-    else:
-        headers["Authorization"] = "Bearer anonymous"
     headers.update(_client_hints(profile.browser, profile.user_agent))
     return headers
 

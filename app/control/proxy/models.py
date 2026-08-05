@@ -108,6 +108,11 @@ class ProxyFeedback(BaseModel):
     status_code: int | None = None
     reason: str = ""
     retry_after_ms: int | None = None
+    # Go lease.InvalidateClearance(): the associated clearance bundle is bad
+    # (DPoP token endpoint 403 on a non-definitive block). Kind stays FORBIDDEN
+    # (account-level semantics) but the bundle must still be invalidated so the
+    # next acquire() re-solves instead of reusing stale cf_clearance.
+    invalidate_clearance: bool = False
 
 
 __all__ = [

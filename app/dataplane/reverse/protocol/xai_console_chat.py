@@ -1,7 +1,7 @@
 """XAI console.x.ai chat protocol — payload builder and SSE stream adapter.
 
 端点: POST https://console.x.ai/v1/responses
-认证: Authorization: Bearer anonymous  +  Cookie: sso=<token>; sso-rw=<token>
+认证: Authorization: DPoP <token> + DPoP: <proof>（RFC 9449） + Cookie: sso=<token>; sso-rw=<token>
 
 请求格式 (OpenAI Responses API):
 {
@@ -272,8 +272,11 @@ class ConsoleStreamAdapter:
             self.usage = resp.get("usage")
             self._done = True
 
-        elif event_type == "error":
-            msg = obj.get("message") or str(obj)
+        elif event_type in ("error", "response.failed"):
+            # Go conversation stream: "error" and "response.failed" are both
+            # stream errors — a clean [DONE] after a mid-stream failure must
+            # not masquerade as success.
+            msg = obj.get("message") or obj.get("error") or str(obj)
             raise UpstreamError(f"Console API error: {msg}", status=502)
 
         return []
@@ -333,7 +336,13 @@ async def stream_console_chat(
             )
         except DPoPTokenEndpointError as exc:
             if exc.invalidate_clearance:
-                await proxy.feedback(lease, _forbidden_feedback(403))
+                # Go fetchDPoPSession: 403 on a non-definitive block →
+                # lease.InvalidateClearance() so the next acquire() re-solves
+                # instead of reusing stale cf_clearance.
+                await proxy.feedback(
+                    lease,
+                    _forbidden_feedback(403, invalidate_clearance=True),
+                )
                 raise UpstreamError(
                     "Console DPoP token endpoint rejected request", status=403
                 ) from exc
@@ -544,10 +553,14 @@ def _success_feedback():
     return ProxyFeedback(kind=ProxyFeedbackKind.SUCCESS, status_code=200)
 
 
-def _forbidden_feedback(status: int = 403):
+def _forbidden_feedback(status: int = 403, *, invalidate_clearance: bool = False):
     from app.control.proxy.models import ProxyFeedback, ProxyFeedbackKind
 
-    return ProxyFeedback(kind=ProxyFeedbackKind.FORBIDDEN, status_code=status)
+    return ProxyFeedback(
+        kind=ProxyFeedbackKind.FORBIDDEN,
+        status_code=status,
+        invalidate_clearance=invalidate_clearance,
+    )
 
 
 def _transport_error_feedback():

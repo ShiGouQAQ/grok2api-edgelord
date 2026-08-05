@@ -41,7 +41,7 @@ def _load_headers_module():
     _saved = {k: sys.modules.get(k) for k in _replaced_keys}
 
     # Ensure parent packages exist
-    for pkg in (
+    _parent_pkgs = (
         "app",
         "app.platform",
         "app.platform.logging",
@@ -51,7 +51,8 @@ def _load_headers_module():
         "app.dataplane",
         "app.dataplane.proxy",
         "app.dataplane.proxy.adapters",
-    ):
+    )
+    for pkg in _parent_pkgs:
         sys.modules.setdefault(pkg, types.ModuleType(pkg))
 
     # Stub logger
@@ -118,6 +119,13 @@ def _load_headers_module():
             sys.modules.pop(k, None)
         else:
             sys.modules[k] = _saved[k]
+
+    # setdefault() may have created empty parent-package shells (no __path__);
+    # drop them so later tests can import the real packages.
+    for pkg in _parent_pkgs:
+        shell = sys.modules.get(pkg)
+        if isinstance(shell, types.ModuleType) and not hasattr(shell, "__path__"):
+            sys.modules.pop(pkg, None)
 
     return module
 
@@ -895,9 +903,14 @@ class TestBuildConsoleHeaders:
         assert isinstance(result, dict)
 
     def test_authorization_is_bearer_anonymous(self):
-        """Console uses fixed 'Bearer anonymous' auth (no DPoP params)."""
+        """No DPoP params → NO Authorization header (Go applyBrowserHeaders).
+
+        A stray 'Bearer anonymous' on the /dpop/token exchange made
+        Cloudflare answer with a 200 challenge interstitial (non-JSON body
+        → 'Console DPoP token response invalid' → 502).
+        """
         result = self._build()
-        assert result["Authorization"] == "Bearer anonymous"
+        assert "Authorization" not in result
 
     def test_dpop_authorization_when_token_and_proof(self):
         """access_token + dpop_proof → Authorization: DPoP <tok> + DPoP header."""
@@ -906,9 +919,9 @@ class TestBuildConsoleHeaders:
         assert result["DPoP"] == "proof-abc"
 
     def test_bearer_anonymous_when_only_one_dpop_param(self):
-        """DPoP requires BOTH params — partial input keeps Bearer anonymous."""
+        """DPoP requires BOTH params — partial input sends NO Authorization."""
         result = self._build(access_token="at-123")
-        assert result["Authorization"] == "Bearer anonymous"
+        assert "Authorization" not in result
         assert "DPoP" not in result
 
     def test_no_cache_headers_present(self):
