@@ -5,10 +5,14 @@ fixed non-streaming POST /responses (model ``grok-4.5``, input ``hello,test``)
 and the response is classified via errors.py's UpstreamError flags:
 
   ok      — 2xx response
-  invalid — OAuth credential rejected (401 after one manual refresh retry, or
-            permanent refresh failure) → REAUTH_REQUIRED
-  failed  — network error / quota exhaustion / model denial / non-2xx
-            (no account-state change)
+  invalid — OAuth credential rejected (401 after one manual refresh retry,
+            permanent refresh failure, or 403 credential rejection per Go
+            ClassifyCredentialRejection — no config gate) → REAUTH_REQUIRED
+  failed  — network error / quota exhaustion / model denial / non-2xx.
+            Quota exhaustion persists a 24 h build-quota recovery window
+            (Go markBuildDetectQuotaExhausted); permanent account denial
+            persists a 5 min model-denied cooldown (Go
+            markBuildDetectModelDenied).
 
 softNetworkCooldown semantics (Go selector_session): network failures
 (status==0) never bump reauth/expired counters — the account's fail state is
@@ -21,8 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
-from app.platform.config.snapshot import get_config
-from app.platform.errors import UpstreamError, should_invalidate_build_forbidden
+from app.platform.errors import UpstreamError
 from app.platform.logging.logger import logger
 from app.platform.runtime.clock import now_ms
 
@@ -34,6 +37,11 @@ if TYPE_CHECKING:
 
 BUILD_DETECT_MODEL = "grok-4.5"
 BUILD_DETECT_PROMPT = "hello,test"
+
+# Go buildDetectQuotaRecoveryPause — next probe of a quota-exhausted account.
+BUILD_QUOTA_RECOVERY_MS = 24 * 3_600_000
+# Go buildDetectModelDeniedCooldown — model-access-denied block duration.
+BUILD_MODEL_DENIED_COOLDOWN_MS = 5 * 60_000
 
 # Go softNetworkCooldown: transport/5xx failures isolate the account for only
 # 5s instead of accumulating fail count. The 5s isolation itself lives in the
@@ -192,22 +200,19 @@ async def _classify_detect_response(
 ) -> dict[str, Any]:
     """Classify the probe response via errors.py's UpstreamError flags.
 
-    Port of Go finishBuildDetectResponse + b4c7baab quota signals:
-    credential rejection → invalid (reauth); quota exhaustion / model denial /
-    non-2xx → failed with no state change.
+    Port of Go finishBuildDetectResponse (b4c7baab): credential rejection →
+    invalid (reauth, no config gate); quota exhaustion → failed + 24 h
+    recovery window; permanent model denial → failed + 5 min cooldown;
+    non-2xx → failed.
     """
     exc = UpstreamError.from_http_response(
         f"Build detection HTTP {status}", status=status, body=body
     )
-    if exc.credential_rejected:
-        if status == 403 and not _chat_denial_marks_reauth(status, exc):
-            # Chat 403 blocked-user/denial: model-scoped by default (Go
-            # markBuildChatDeniedAsReauth=false) — account stays in pool.
-            return {
-                "outcome": "failed",
-                "reason": f"Build chat endpoint access denied for {BUILD_DETECT_MODEL}",
-                "httpStatus": status,
-            }
+    # Go ClassifyCredentialRejection: 403 Rejected requires !QuotaExhausted
+    # && !permanentDenial — quota/denial 403s fall through to their branches.
+    if exc.credential_rejected and not (
+        status == 403 and (exc.quota_exhausted or exc.permanent_account_denial)
+    ):
         await _mark_invalid(
             repo, token, f"Build OAuth credential rejected (HTTP {status})"
         )
@@ -217,12 +222,14 @@ async def _classify_detect_response(
             "httpStatus": status,
         }
     if exc.quota_exhausted or exc.free_quota_exhausted or exc.model_quota_exhausted:
+        await _schedule_build_quota_recovery(repo, token)
         return {
             "outcome": "failed",
             "reason": "Build quota exhausted",
             "httpStatus": status,
         }
     if exc.permanent_account_denial:
+        await _mark_build_model_denied(repo, token)
         return {
             "outcome": "failed",
             "reason": f"Build chat endpoint access denied for {BUILD_DETECT_MODEL}",
@@ -237,23 +244,84 @@ async def _classify_detect_response(
     return {"outcome": "ok", "reason": "", "httpStatus": status}
 
 
-def _chat_denial_marks_reauth(status: int, exc: UpstreamError) -> bool:
-    """Gate 403 chat-denial → reauth on config + errors.py invalidation rules.
+async def _schedule_build_quota_recovery(repo: "AccountRepository", token: str) -> None:
+    """Persist a 24 h predicted recovery window on the build quota.
 
-    account.build_detect.mark_build_chat_denied_as_reauth (default false)
-    mirrors Go RoutingConfig.MarkBuildChatDeniedAsReauth; the code-list gate
-    reuses Task-1-A's should_invalidate_build_forbidden (safety rejections
-    never invalidate).
+    Go markBuildDetectQuotaExhausted → SaveQuotaRecovery (kind Free,
+    NextProbeAt = now + buildDetectQuotaRecoveryPause). Python has no
+    QuotaRecovery row for build accounts; the quota_build window with
+    reset_at = now + 24h and predicted=True is the recovery schedule.
     """
-    if not get_config("account.build_detect.mark_build_chat_denied_as_reauth", False):
-        return False
-    return should_invalidate_build_forbidden(
-        status,
-        str((exc.details or {}).get("upstream_code") or ""),
-        (exc.details or {}).get("body", ""),
-        safety_rejected=exc.safety_rejected,
-        account_scoped=exc.account_scoped,
+    from .commands import AccountPatch
+    from .quota_defaults import BUILD_QUOTA_DEFAULTS
+
+    record = next(iter(await repo.get_accounts([token])), None)
+    if record is None or record.is_deleted():
+        return
+    existing = record.quota_set().quota_build or BUILD_QUOTA_DEFAULTS.quota_build
+    if existing is None:
+        return
+    ts = now_ms()
+    from .models import QuotaWindow
+
+    window = QuotaWindow(
+        remaining=0,
+        total=existing.total,
+        window_seconds=existing.window_seconds,
+        reset_at=ts + BUILD_QUOTA_RECOVERY_MS,
+        synced_at=ts,
+        source=existing.source,
+        usage_percent=100.0 if existing.total > 0 else 0.0,
+        predicted=True,
     )
+    try:
+        await repo.patch_accounts(
+            [AccountPatch(token=token, quota_build=window.to_dict())]
+        )
+    except Exception as exc:
+        logger.warning(
+            "build detect quota recovery write failed: token={}... error={}",
+            token[:10],
+            exc,
+        )
+
+
+async def _mark_build_model_denied(repo: "AccountRepository", token: str) -> None:
+    """Persist a 5 min model-denied cooldown.
+
+    Go markBuildDetectModelDenied → ModelQuotaBlock "model_access_denied"
+    CooldownUntil = now + buildDetectModelDeniedCooldown. Python has no
+    per-model block table; a build account serves only build models, so the
+    auto-expiring COOLING status (state_machine.derive_status) is the
+    equivalent model-scoped block — the account leaves routing and returns
+    after 5 min.
+    """
+    from .commands import AccountPatch
+    from .enums import AccountStatus
+
+    ts = now_ms()
+    try:
+        await repo.patch_accounts(
+            [
+                AccountPatch(
+                    token=token,
+                    status=AccountStatus.COOLING,
+                    last_fail_at=ts,
+                    last_fail_reason="model_access_denied",
+                    state_reason="model_access_denied",
+                    ext_merge={
+                        "cooldown_until": ts + BUILD_MODEL_DENIED_COOLDOWN_MS,
+                        "cooldown_reason": "model_access_denied",
+                    },
+                )
+            ]
+        )
+    except Exception as exc:
+        logger.warning(
+            "build detect model-denied write failed: token={}... error={}",
+            token[:10],
+            exc,
+        )
 
 
 async def _persist_ext(

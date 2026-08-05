@@ -12,6 +12,7 @@ Detection probes each Build account with a fixed non-streaming POST
 
 import tempfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -38,7 +39,7 @@ async def _make_repo(*upserts: AccountUpsert) -> LocalAccountRepository:
     return repo
 
 
-def _build_account(ext: dict | None = None) -> AccountUpsert:
+def _build_account(ext: dict[str, Any] | None = None) -> AccountUpsert:
     """A standard build account with an OAuth access token in ext."""
     base = {
         "build_access_token": "at-build",
@@ -55,7 +56,9 @@ def _build_account(ext: dict | None = None) -> AccountUpsert:
     )
 
 
-async def _detect(repo: LocalAccountRepository, token: str = "build-tok") -> dict:
+async def _detect(
+    repo: LocalAccountRepository, token: str = "build-tok"
+) -> dict[str, Any]:
     from app.control.account.build_detect import detect_build_account
 
     return await detect_build_account(repo, token)
@@ -167,9 +170,10 @@ class TestDetectOutcomeClassification:
         assert "expired_at" not in (rec.ext or {})
 
     @pytest.mark.asyncio
-    async def test_detect_403_blocked_user_default_not_reauth(self):
-        """403 blocked-user with mark_build_chat_denied_as_reauth=false
-        (default) → failed, account untouched (model-scoped, Go default)."""
+    async def test_detect_403_blocked_user_reauth_without_config_gate(self):
+        """403 blocked-user reauths in detect WITHOUT the config gate
+        (Go ClassifyCredentialRejection: 403 credential keyword → Rejected
+        → unconditional markBuildDetectReauth)."""
         repo = await _make_repo(_build_account())
 
         with patch(
@@ -178,43 +182,36 @@ class TestDetectOutcomeClassification:
         ):
             result = await _detect(repo)
 
-        assert result["outcome"] == "failed"
-        assert result["httpStatus"] == 403
-        rec = (await repo.get_accounts(["build-tok"]))[0]
-        assert rec.status == AccountStatus.ACTIVE
-
-    @pytest.mark.asyncio
-    async def test_detect_403_blocked_user_marks_reauth_when_configured(self):
-        """mark_build_chat_denied_as_reauth=true + should_invalidate_build_forbidden
-        match → 403 blocked-user marks reauth (invalid)."""
-        repo = await _make_repo(_build_account())
-        real_get_config = None
-
-        def _fake_config(key: str, default=None):
-            if key == "account.build_detect.mark_build_chat_denied_as_reauth":
-                return True
-            return default
-
-        with (
-            patch(
-                "app.control.account.build_detect._probe_build",
-                AsyncMock(return_value=(403, '{"error":"blocked-user"}')),
-            ),
-            patch(
-                "app.control.account.build_detect.get_config",
-                side_effect=_fake_config,
-            ),
-        ):
-            result = await _detect(repo)
-
         assert result["outcome"] == "invalid"
+        assert result["httpStatus"] == 403
         rec = (await repo.get_accounts(["build-tok"]))[0]
         assert rec.status == AccountStatus.REAUTH_REQUIRED
 
     @pytest.mark.asyncio
-    async def test_detect_403_chat_endpoint_denied_failed(self):
+    async def test_detect_403_invalid_token_reauth_without_config_gate(self):
+        """403 'invalid token' → REAUTH_REQUIRED with the DEFAULT config
+        (mark_build_chat_denied_as_reauth=false must not gate the detect
+        path — Go finishBuildDetectResponse has no config gate)."""
+        repo = await _make_repo(_build_account())
+
+        with patch(
+            "app.control.account.build_detect._probe_build",
+            AsyncMock(return_value=(403, '{"error":"invalid token"}')),
+        ):
+            result = await _detect(repo)
+
+        assert result["outcome"] == "invalid"
+        assert result["httpStatus"] == 403
+        rec = (await repo.get_accounts(["build-tok"]))[0]
+        assert rec.status == AccountStatus.REAUTH_REQUIRED
+        assert "reauth_reason" in (rec.ext or {})
+
+    @pytest.mark.asyncio
+    async def test_detect_403_permanent_denial_5min_cooldown(self):
         """403 'chat endpoint denied' (permanent account denial) → failed
-        outcome; never marks reauth by default (Go: model-scoped block)."""
+        outcome (shape unchanged) + 5 min model-denied cooldown persisted
+        (Go markBuildDetectModelDenied → ModelQuotaBlock
+        'model_access_denied' CooldownUntil=now+5min)."""
         repo = await _make_repo(_build_account())
 
         with patch(
@@ -226,13 +223,22 @@ class TestDetectOutcomeClassification:
             result = await _detect(repo)
 
         assert result["outcome"] == "failed"
+        assert result["httpStatus"] == 403
         rec = (await repo.get_accounts(["build-tok"]))[0]
-        assert rec.status == AccountStatus.ACTIVE
+        assert rec.status == AccountStatus.COOLING
+        ext = rec.ext or {}
+        cooldown_until = int(ext["cooldown_until"])
+        # ≈ now + 5 min (Go buildDetectModelDeniedCooldown)
+        assert 4 * 60_000 <= cooldown_until - now_ms() <= 6 * 60_000
+        assert ext.get("cooldown_reason") == "model_access_denied"
 
     @pytest.mark.asyncio
-    async def test_detect_quota_429_failed_no_state_change(self):
-        """429 free-usage-exhausted → failed (quota is not a credential death)."""
+    async def test_detect_quota_429_schedules_24h_recovery(self):
+        """429 free-usage-exhausted → failed + quota_build window gains
+        reset_at ≈ now+24h with predicted=True (Go markBuildDetectQuotaExhausted
+        → SaveQuotaRecovery NextProbeAt=now+buildDetectQuotaRecoveryPause)."""
         repo = await _make_repo(_build_account())
+        before = now_ms()
 
         with patch(
             "app.control.account.build_detect._probe_build",
@@ -247,7 +253,63 @@ class TestDetectOutcomeClassification:
 
         assert result["outcome"] == "failed"
         rec = (await repo.get_accounts(["build-tok"]))[0]
+        assert rec.status == AccountStatus.ACTIVE  # quota is not a credential death
+        win = rec.quota_set().quota_build
+        assert win is not None
+        assert win.remaining == 0
+        assert win.predicted is True
+        reset_at = win.reset_at
+        assert reset_at is not None
+        assert before + 24 * 3_600_000 <= reset_at <= now_ms() + 24 * 3_600_000
+
+    @pytest.mark.asyncio
+    async def test_detect_403_quota_text_not_reauth(self):
+        """403 with quota text → NOT reauth: quota branch (failed + 24 h
+        recovery window), account stays ACTIVE (Go Rejected requires
+        !QuotaExhausted)."""
+        repo = await _make_repo(_build_account())
+
+        with patch(
+            "app.control.account.build_detect._probe_build",
+            AsyncMock(
+                return_value=(
+                    403,
+                    '{"error":"You\'ve used all the included free usage for model grok-4.5-build-free for now. Usage resets over a rolling 24-hour window."}',
+                )
+            ),
+        ):
+            result = await _detect(repo)
+
+        assert result["outcome"] == "failed"
+        rec = (await repo.get_accounts(["build-tok"]))[0]
         assert rec.status == AccountStatus.ACTIVE
+        assert "reauth_reason" not in (rec.ext or {})
+        win = rec.quota_set().quota_build
+        assert win is not None
+        assert win.remaining == 0
+        assert win.predicted is True
+
+    @pytest.mark.asyncio
+    async def test_detect_402_spending_limit_schedules_24h_recovery(self):
+        """402 personal-team-blocked:spending-limit (Go SpendingLimitBlocked)
+        → failed + 24 h recovery window."""
+        repo = await _make_repo(_build_account())
+
+        with patch(
+            "app.control.account.build_detect._probe_build",
+            AsyncMock(
+                return_value=(402, '{"code":"personal-team-blocked:spending-limit"}')
+            ),
+        ):
+            result = await _detect(repo)
+
+        assert result["outcome"] == "failed"
+        rec = (await repo.get_accounts(["build-tok"]))[0]
+        assert rec.status == AccountStatus.ACTIVE
+        win = rec.quota_set().quota_build
+        assert win is not None
+        assert win.remaining == 0
+        assert win.predicted is True
 
     @pytest.mark.asyncio
     async def test_detect_non_build_account_failed(self):
