@@ -458,8 +458,10 @@ async def _post_dpop_token(
                 url, headers=headers, data=orjson.dumps(json_body), timeout=30.0
             )
             status = resp.status_code
+            # Non-streamed response: curl_cffi .text reads the buffered body
+            # synchronously (atext() asserts stream mode and raises).
             try:
-                text = await resp.atext()
+                text = resp.text
             except Exception:
                 text = ""
             if not text:

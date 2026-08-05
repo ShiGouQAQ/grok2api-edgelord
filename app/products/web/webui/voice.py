@@ -7,7 +7,11 @@ from app.platform.errors import AppError, RateLimitError, UpstreamError
 from app.platform.runtime.clock import now_s
 from app.platform.auth.middleware import verify_webui_key
 
-router = APIRouter(prefix="/webui/api", dependencies=[Depends(verify_webui_key)], tags=["WebUI - Voice"])
+router = APIRouter(
+    prefix="/webui/api",
+    dependencies=[Depends(verify_webui_key)],
+    tags=["WebUI - Voice"],
+)
 
 
 class VoiceTokenResponse(BaseModel):
@@ -28,6 +32,7 @@ class VoiceTokenRequest(BaseModel):
 async def voice_token(request: VoiceTokenRequest):
     """Acquire a LiveKit voice session token."""
     from app.dataplane.account import _directory as _acct_dir
+
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
 
@@ -46,6 +51,7 @@ async def voice_token(request: VoiceTokenRequest):
     token = acct.token
     try:
         from app.dataplane.reverse.transport.livekit import fetch_livekit_token
+
         data = await fetch_livekit_token(
             token,
             voice=request.voice,
@@ -66,15 +72,12 @@ async def voice_token(request: VoiceTokenRequest):
                 or ""
             ),
             room_name=str(
-                data.get("roomName")
-                or data.get("room_name")
-                or data.get("room")
-                or ""
+                data.get("roomName") or data.get("room_name") or data.get("room") or ""
             ),
         )
     except AppError:
         raise
     except Exception as e:
-        raise UpstreamError(f"Voice token error: {e}")
+        raise UpstreamError(f"Voice token error: {e}") from e
     finally:
         await _acct_dir.release(acct)

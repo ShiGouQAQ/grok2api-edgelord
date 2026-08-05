@@ -19,9 +19,11 @@ router = APIRouter()
 
 async def _acquire_token():
     from app.dataplane.account import _directory as _acct_dir
+
     if _acct_dir is None:
         return None, None
     from app.control.model.registry import get as get_model
+
     spec = get_model("grok-imagine-image")
     if spec is None:
         return None, None
@@ -73,7 +75,7 @@ async def imagine_ws(websocket: WebSocket):
         try:
             await websocket.send_text(orjson.dumps(payload).decode())
             return True
-        except Exception:
+        except (RuntimeError, WebSocketDisconnect):
             return False
 
     async def _stop_run():
@@ -100,28 +102,36 @@ async def imagine_ws(websocket: WebSocket):
 
         run_id = uuid.uuid4().hex
         enable_pro = quality == "quality"
-        await _send({
-            "type": "status",
-            "status": "running",
-            "prompt": prompt,
-            "aspect_ratio": aspect_ratio,
-            "run_id": run_id,
-            "count": count,
-            "quality": quality,
-        })
+        await _send(
+            {
+                "type": "status",
+                "status": "running",
+                "prompt": prompt,
+                "aspect_ratio": aspect_ratio,
+                "run_id": run_id,
+                "count": count,
+                "quality": quality,
+            }
+        )
 
         acct = None
         try:
             token, acct = await _acquire_token()
             if not token:
-                await _send({
-                    "type": "error",
-                    "message": "No available accounts for this model tier",
-                    "code": "rate_limit_exceeded",
-                })
+                await _send(
+                    {
+                        "type": "error",
+                        "message": "No available accounts for this model tier",
+                        "code": "rate_limit_exceeded",
+                    }
+                )
                 return
 
-            enable_nsfw = nsfw if nsfw is not None else get_config().get_bool("features.enable_nsfw", True)
+            enable_nsfw = (
+                nsfw
+                if nsfw is not None
+                else get_config().get_bool("features.enable_nsfw", True)
+            )
             async for event in stream_images(
                 token,
                 prompt,
@@ -140,12 +150,14 @@ async def imagine_ws(websocket: WebSocket):
                     return
 
             if not stop_event.is_set():
-                await _send({
-                    "type": "status",
-                    "status": "completed",
-                    "run_id": run_id,
-                    "count": count,
-                })
+                await _send(
+                    {
+                        "type": "status",
+                        "status": "completed",
+                        "run_id": run_id,
+                        "count": count,
+                    }
+                )
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -154,11 +166,13 @@ async def imagine_ws(websocket: WebSocket):
                 type(exc).__name__,
                 exc,
             )
-            await _send({
-                "type": "error",
-                "message": str(exc),
-                "code": "internal_error",
-            })
+            await _send(
+                {
+                    "type": "error",
+                    "message": str(exc),
+                    "code": "internal_error",
+                }
+            )
         finally:
             if acct and _acct_dir:
                 await _acct_dir.release(acct)
@@ -174,25 +188,31 @@ async def imagine_ws(websocket: WebSocket):
 
             try:
                 payload = orjson.loads(raw)
-            except Exception:
-                await _send({
-                    "type": "error",
-                    "message": "Invalid message format.",
-                    "code": "invalid_payload",
-                })
+            except (orjson.JSONDecodeError, ValueError):
+                await _send(
+                    {
+                        "type": "error",
+                        "message": "Invalid message format.",
+                        "code": "invalid_payload",
+                    }
+                )
                 continue
 
             action = payload.get("type")
             if action == "start":
                 prompt = str(payload.get("prompt") or "").strip()
                 if not prompt:
-                    await _send({
-                        "type": "error",
-                        "message": "Prompt cannot be empty.",
-                        "code": "invalid_prompt",
-                    })
+                    await _send(
+                        {
+                            "type": "error",
+                            "message": "Prompt cannot be empty.",
+                            "code": "invalid_prompt",
+                        }
+                    )
                     continue
-                aspect_ratio = resolve_aspect_ratio(str(payload.get("aspect_ratio") or "2:3").strip() or "2:3")
+                aspect_ratio = resolve_aspect_ratio(
+                    str(payload.get("aspect_ratio") or "2:3").strip() or "2:3"
+                )
                 quality = str(payload.get("quality") or "speed").strip().lower()
                 if quality not in {"speed", "quality"}:
                     quality = "speed"
@@ -208,18 +228,22 @@ async def imagine_ws(websocket: WebSocket):
                     count = 6
                 count = max(1, min(count, 6))
                 await _stop_run()
-                run_task = asyncio.create_task(_run(prompt, aspect_ratio, nsfw, count, quality))
+                run_task = asyncio.create_task(
+                    _run(prompt, aspect_ratio, nsfw, count, quality)
+                )
                 continue
 
             if action == "stop":
                 await _stop_run()
                 continue
 
-            await _send({
-                "type": "error",
-                "message": "Unknown action.",
-                "code": "invalid_action",
-            })
+            await _send(
+                {
+                    "type": "error",
+                    "message": "Unknown action.",
+                    "code": "invalid_action",
+                }
+            )
     except WebSocketDisconnect:
         pass
     except Exception as exc:
@@ -232,6 +256,7 @@ async def imagine_ws(websocket: WebSocket):
         await _stop_run()
         try:
             from starlette.websockets import WebSocketState
+
             if websocket.client_state == WebSocketState.CONNECTED:
                 await websocket.close(code=1000, reason="Server closing connection")
         except Exception:

@@ -220,7 +220,7 @@ def _extract_image_file_id(url: str) -> str:
 def _is_imagine_public_url(url: str) -> bool:
     try:
         host = urlparse(url or "").hostname or ""
-    except Exception:
+    except (ValueError, TypeError):
         return False
     return host.startswith("imagine-public")
 
@@ -332,6 +332,19 @@ async def generate(
 
     if _acct_dir is None:
         raise RateLimitError("Account directory not initialised")
+
+    # Console models: console.x.ai /images/generations (Go a05e06a2).
+    if spec.mode_id == ModeId.CONSOLE:
+        return await _generate_console_image(
+            spec=spec,
+            model=model,
+            prompt=prompt,
+            n=n,
+            size=size,
+            response_format=response_format,
+            stream=stream,
+            chat_format=chat_format,
+        )
 
     # Lite model: chat-based generation (no WS, ignores aspect_ratio).
     if model in _LITE_IMAGE_MODELS:
@@ -748,6 +761,239 @@ async def _generate_lite(
 
 
 # ---------------------------------------------------------------------------
+# Console image generation (console.x.ai /images/generations, Go a05e06a2)
+# ---------------------------------------------------------------------------
+
+
+async def _generate_console_image(
+    *,
+    spec: ModelSpec,
+    model: str,
+    prompt: str,
+    n: int,
+    size: str,
+    response_format: str,
+    stream: bool,
+    chat_format: bool,
+) -> dict:
+    """Generate images via console.x.ai DPoP endpoint (Go GenerateImage)."""
+    from app.dataplane.reverse.protocol.xai_console_media import (
+        generate_console_image as _console_generate,
+    )
+
+    if stream:
+        raise ValidationError(
+            "Grok Console 标准图片接口不支持 stream 或 partial_images",
+            param="stream",
+        )
+    response_id = make_response_id()
+    log_media_input_summary(
+        logger,
+        response_id,
+        orjson.dumps(
+            {
+                "model": model,
+                "prompt": prompt,
+                "n": n,
+                "size": size,
+                "response_format": response_format,
+            }
+        ),
+    )
+
+    from app.dataplane.account import _directory as _acct_dir
+
+    if _acct_dir is None:
+        raise RateLimitError("Account directory not initialised")
+    acct = await _acct_dir.reserve(
+        pool_candidates=spec.pool_candidates(),
+        mode_id=int(spec.mode_id),
+        now_s_override=now_s(),
+    )
+    if acct is None:
+        raise RateLimitError("No available accounts for console image generation")
+
+    token = acct.token
+    fmt = _normalize_response_format(response_format)
+    success = False
+    fail_exc: BaseException | None = None
+    try:
+        envelope = await _console_generate(
+            token,
+            model=model,
+            prompt=prompt,
+            n=n,
+            size=size,
+            response_format=response_format,
+        )
+        images: list[_ImageOutput] = []
+        for item in envelope["data"]:
+            url = str(item.get("url") or "")
+            blob = item.get("b64_json")
+            if not url and not (isinstance(blob, str) and blob):
+                raise UpstreamError(
+                    "Console image response item missing url/b64_json", status=502
+                )
+            image = await _resolve_image_output(
+                token=token,
+                url=url,
+                response_format=response_format,
+                blob_b64=blob if isinstance(blob, str) else None,
+            )
+            images.append(image)
+        success = True
+    except BaseException as exc:
+        fail_exc = exc
+        raise
+    finally:
+        await _acct_dir.release(acct)
+        kind = (
+            FeedbackKind.SUCCESS
+            if success
+            else _feedback_kind(fail_exc)
+            if fail_exc
+            else FeedbackKind.SERVER_ERROR
+        )
+        await _acct_dir.feedback(token, kind, int(spec.mode_id))
+        if success:
+            asyncio.create_task(
+                _quota_sync(token, int(spec.mode_id))
+            ).add_done_callback(_log_task_exception)
+        else:
+            asyncio.create_task(
+                _fail_sync(token, int(spec.mode_id), fail_exc)
+            ).add_done_callback(_log_task_exception)
+
+    if chat_format:
+        content = "\n\n".join(image.markdown_value for image in images)
+        return make_chat_response(
+            model,
+            content,
+            prompt_content=prompt,
+            response_id=response_id,
+        )
+
+    data = [
+        {"b64_json": image.api_value} if fmt == "b64_json" else {"url": image.api_value}
+        for image in images
+    ]
+    return {"created": int(time.time()), "data": data}
+
+
+async def _edit_console_image(
+    *,
+    spec: ModelSpec,
+    model: str,
+    messages: list[dict],
+    n: int,
+    size: str,
+    response_format: str,
+    stream: bool,
+    chat_format: bool,
+) -> dict:
+    """Edit images via console.x.ai DPoP endpoint (Go EditImage)."""
+    from app.dataplane.reverse.protocol.xai_console_media import (
+        edit_console_image as _console_edit,
+    )
+
+    if stream:
+        raise ValidationError(
+            "Grok Console 标准图片接口不支持 stream 或 partial_images",
+            param="stream",
+        )
+    prompt, image_inputs = _extract_edit_prompt_and_inputs(messages)
+    if not image_inputs or len(image_inputs) > 3:
+        raise ValidationError(
+            "Console image edit requires 1 to 3 images", param="messages"
+        )
+    response_id = make_response_id()
+    log_media_input_summary(
+        logger,
+        response_id,
+        orjson.dumps({"model": model, "messages": messages, "n": n}),
+    )
+
+    from app.dataplane.account import _directory as _acct_dir
+
+    if _acct_dir is None:
+        raise RateLimitError("Account directory not initialised")
+    acct = await _acct_dir.reserve(
+        pool_candidates=spec.pool_candidates(),
+        mode_id=int(spec.mode_id),
+        now_s_override=now_s(),
+    )
+    if acct is None:
+        raise RateLimitError("No available accounts for console image edit")
+
+    token = acct.token
+    fmt = _normalize_response_format(response_format)
+    success = False
+    fail_exc: BaseException | None = None
+    try:
+        envelope = await _console_edit(
+            token,
+            model=model,
+            prompt=prompt,
+            image_urls=image_inputs,
+            n=n,
+            size=size,
+            response_format=response_format,
+        )
+        images: list[_ImageOutput] = []
+        for item in envelope["data"]:
+            url = str(item.get("url") or "")
+            blob = item.get("b64_json")
+            if not url and not (isinstance(blob, str) and blob):
+                raise UpstreamError(
+                    "Console image response item missing url/b64_json", status=502
+                )
+            image = await _resolve_image_output(
+                token=token,
+                url=url,
+                response_format=response_format,
+                blob_b64=blob if isinstance(blob, str) else None,
+            )
+            images.append(image)
+        success = True
+    except BaseException as exc:
+        fail_exc = exc
+        raise
+    finally:
+        await _acct_dir.release(acct)
+        kind = (
+            FeedbackKind.SUCCESS
+            if success
+            else _feedback_kind(fail_exc)
+            if fail_exc
+            else FeedbackKind.SERVER_ERROR
+        )
+        await _acct_dir.feedback(token, kind, int(spec.mode_id))
+        if success:
+            asyncio.create_task(
+                _quota_sync(token, int(spec.mode_id))
+            ).add_done_callback(_log_task_exception)
+        else:
+            asyncio.create_task(
+                _fail_sync(token, int(spec.mode_id), fail_exc)
+            ).add_done_callback(_log_task_exception)
+
+    if chat_format:
+        content = "\n\n".join(image.markdown_value for image in images)
+        return make_chat_response(
+            model,
+            content,
+            prompt_content=prompt,
+            response_id=response_id,
+        )
+
+    data = [
+        {"b64_json": image.api_value} if fmt == "b64_json" else {"url": image.api_value}
+        for image in images
+    ]
+    return {"created": int(time.time()), "data": data}
+
+
+# ---------------------------------------------------------------------------
 # Image editing
 # ---------------------------------------------------------------------------
 
@@ -975,7 +1221,7 @@ async def _collect_edit_final_urls(
             continue
         try:
             obj = orjson.loads(data)
-        except Exception:
+        except (orjson.JSONDecodeError, ValueError):
             continue
         raise_for_stream_error(obj)
         stream = extract_streaming_response(obj)
@@ -1291,6 +1537,19 @@ async def edit(
     if not (1 <= n <= _EDIT_MAX_N):
         raise ValidationError("image edit n must be between 1 and 2", param="n")
     _normalize_edit_size(size)
+
+    # Console models: console.x.ai /images/edits (Go a05e06a2).
+    if spec.mode_id == ModeId.CONSOLE:
+        return await _edit_console_image(
+            spec=spec,
+            model=model,
+            messages=messages,
+            n=n,
+            size=size,
+            response_format=response_format,
+            stream=stream,
+            chat_format=chat_format,
+        )
 
     prompt, image_inputs = _extract_edit_prompt_and_inputs(messages)
 

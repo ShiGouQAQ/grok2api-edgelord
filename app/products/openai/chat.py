@@ -427,8 +427,16 @@ async def _stream_chat(
 
         if response.status_code != 200:
             try:
-                body = response.content.decode("utf-8", "replace")[:400]
-            except Exception:
+                # POST used stream=True: curl_cffi only populates sync .content
+                # from the non-streamed buffer (always b"" here), so the body
+                # must be drained via the async stream API.
+                body = (await response.acontent()).decode("utf-8", "replace")[:400]
+            except Exception as exc:
+                logger.warning(
+                    "chat upstream body read failed: status={} error={}",
+                    response.status_code,
+                    exc,
+                )
                 body = ""
             raise UpstreamError(
                 f"Chat upstream returned {response.status_code}",
@@ -748,9 +756,8 @@ async def completions(
 
                     except UpstreamError as exc:
                         fail_exc = exc
-                        if (
-                            _should_retry_upstream(exc, retry_codes)
-                            and policy.has_next(attempt)
+                        if _should_retry_upstream(exc, retry_codes) and policy.has_next(
+                            attempt
                         ):
                             _retry = True
                             logger.warning(
@@ -847,7 +854,9 @@ async def completions(
 
             except UpstreamError as exc:
                 fail_exc = exc
-                if _should_retry_upstream(exc, retry_codes) and policy.has_next(attempt):
+                if _should_retry_upstream(exc, retry_codes) and policy.has_next(
+                    attempt
+                ):
                     _retry = True
                     logger.warning(
                         "chat retry scheduled: attempt={}/{} status={} token={}...",

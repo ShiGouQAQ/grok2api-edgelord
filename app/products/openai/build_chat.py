@@ -523,7 +523,14 @@ async def stream_build_chat(
         if response.status_code != 200:
             try:
                 body = await response.atext()
-            except Exception:
+            except Exception as exc:
+                # Body drives _status_feedback classification (cf_challenge /
+                # node_banned / transport_error) — a lost body mislabels errors.
+                logger.warning(
+                    "build upstream body read failed: status={} error={}",
+                    response.status_code,
+                    exc,
+                )
                 body = ""
             exc = UpstreamError.from_http_response(
                 f"Build API returned {response.status_code}",

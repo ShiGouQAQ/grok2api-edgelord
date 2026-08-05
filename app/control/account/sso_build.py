@@ -194,7 +194,12 @@ async def _acquire_mint_lease() -> ProxyLease | None:
         if not isinstance(getattr(lease, "cf_cookies", ""), str):
             return None
         return lease
-    except Exception:
+    except Exception as exc:
+        # Broad by design: the lazy imports inside the try guard a circular-import risk.
+        logger.warning(
+            "SSO→Build mint lease acquisition failed, falling back to configured clearance: error={}",
+            exc,
+        )
         return None
 
 
@@ -250,7 +255,9 @@ def safe_xai_url(raw: str) -> bool:
             return False
         host = parsed.hostname.lower()
         return host == "x.ai" or host.endswith(".x.ai")
-    except Exception:
+    except (ValueError, TypeError, AttributeError):
+        # urlparse only fails on malformed input (bad IPv6 brackets, non-str);
+        # fail closed — never validate a URL we could not parse.
         return False
 
 
@@ -268,7 +275,10 @@ def decode_build_claims(token: str) -> dict[str, Any] | None:
     try:
         data = base64.urlsafe_b64decode(parts[1] + "==")
         return json.loads(data)
-    except Exception:
+    except ValueError:
+        # binascii.Error / json.JSONDecodeError / UnicodeDecodeError all
+        # subclass ValueError — malformed payloads yield no claims, nothing
+        # else should be swallowed here.
         return None
 
 

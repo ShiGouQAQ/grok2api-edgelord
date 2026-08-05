@@ -31,6 +31,7 @@ from app.platform.storage import save_local_video
 from app.platform.storage.media_audit import log_media_input_summary
 from app.control.account.enums import FeedbackKind
 from app.control.model import registry as model_registry
+from app.control.model.enums import ModeId
 from app.control.model.registry import resolve as resolve_model
 from app.dataplane.proxy import get_proxy_runtime
 from app.dataplane.proxy.adapters.headers import build_http_headers
@@ -523,7 +524,7 @@ async def _collect_video_segment(
         stream_data_items.append(data)
         try:
             obj = orjson.loads(data)
-        except Exception:
+        except (orjson.JSONDecodeError, ValueError):
             continue
         raise_for_stream_error(obj)
 
@@ -639,7 +640,7 @@ async def _resolve_video_output(*, token: str, url: str, file_id: str) -> str:
         raw, _mime = await _download_video_bytes(token, url)
         await asyncio.to_thread(_save_video_bytes, raw, file_id)
     except Exception as exc:
-        logger.debug("video download fallback_to=upstream_url error={}", exc)
+        logger.warning("video download fallback_to=upstream_url error={}", exc)
         return url if fmt == "local_url" else _render_video_html(url)
 
     local_url = _local_video_url(file_id)
@@ -732,6 +733,51 @@ async def _generate_video_with_token(
     if artifact is None:
         raise UpstreamError("Video generation returned no artifact")
     return artifact
+
+
+async def _generate_console_video_with_token(
+    *,
+    token: str,
+    prompt: str,
+    aspect_ratio: str,
+    resolution_name: str,
+    seconds: int,
+    timeout_s: float,
+    input_references: list[dict[str, Any]] | None = None,
+    progress_cb: Callable[[int], Awaitable[None]] | None = None,
+) -> _VideoArtifact:
+    """Console.x.ai video generation (Go GenerateVideo, a05e06a2).
+
+    POST /videos/generations → poll GET /videos/{id} → return the final
+    vidgen.x.ai URL; the caller downloads via download_asset (trusted-host
+    allow-list covers vidgen.x.ai).
+    """
+    from app.dataplane.reverse.protocol.xai_console_media import generate_console_video
+
+    image_urls = [
+        str(ref.get("image_url") or "").strip()
+        for ref in (input_references or [])
+        if isinstance(ref, dict)
+    ]
+    if len(image_urls) > 1:
+        raise ValidationError(
+            "Console grok-imagine-video supports at most 1 first-frame image",
+            param="input_references",
+        )
+    result = await generate_console_video(
+        token,
+        model="grok-imagine-video-console",
+        prompt=prompt,
+        duration=seconds,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution_name,
+        image_url=image_urls[0] if image_urls else None,
+        progress_cb=progress_cb,
+        timeout_s=timeout_s,
+    )
+    return _VideoArtifact(
+        video_url=result.url, video_post_id="", asset_id="", thumbnail_url=""
+    )
 
 
 async def _run_video_generation(
@@ -895,6 +941,7 @@ async def _run_video_job(
     preset: str | None,
     input_references: list[dict[str, Any]] | None = None,
 ) -> None:
+    token: str | None = None
     try:
         await _set_job_status(job, status="in_progress", progress=1)
         aspect_ratio, default_resolution_name = _resolve_video_size(size)
@@ -930,16 +977,29 @@ async def _run_video_job(
                     job, status="in_progress", progress=max(1, progress)
                 )
 
-            artifact = await _generate_video_with_token(
-                token=token,
-                prompt=prompt,
-                aspect_ratio=aspect_ratio,
-                resolution_name=resolved_resolution_name,
-                seconds=seconds,
-                preset=resolved_preset,
-                timeout_s=timeout_s,
-                input_references=input_references,
-                progress_cb=_progress,
+            artifact = (
+                await _generate_console_video_with_token(
+                    token=token,
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    resolution_name=resolved_resolution_name,
+                    seconds=seconds,
+                    timeout_s=timeout_s,
+                    input_references=input_references,
+                    progress_cb=_progress,
+                )
+                if spec.mode_id == ModeId.CONSOLE
+                else await _generate_video_with_token(
+                    token=token,
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    resolution_name=resolved_resolution_name,
+                    seconds=seconds,
+                    preset=resolved_preset,
+                    timeout_s=timeout_s,
+                    input_references=input_references,
+                    progress_cb=_progress,
+                )
             )
             raw, _mime = await _download_video_bytes(token, artifact.video_url)
             success = True
@@ -993,12 +1053,20 @@ async def create_video(
     if spec is None or not spec.enabled or not spec.is_video():
         raise ValidationError(f"Model {model!r} is not a video model", param="model")
 
+    is_console = getattr(spec, "mode_id", None) == ModeId.CONSOLE
     cleaned_prompt = (prompt or "").strip()
-    if not cleaned_prompt:
+    if not cleaned_prompt and not (is_console and input_references):
         raise ValidationError("prompt cannot be empty", param="prompt")
 
     normalized_seconds = _coerce_seconds(seconds)
-    validate_video_length(normalized_seconds)
+    if is_console:
+        if not (1 <= normalized_seconds <= 15):
+            raise ValidationError(
+                "seconds must be between 1 and 15 for console video models",
+                param="seconds",
+            )
+    else:
+        validate_video_length(normalized_seconds)
     normalized_size = (size or "720x1280").strip()
     _aspect_ratio, default_resolution_name = _resolve_video_size(normalized_size)
     _resolve_video_resolution_name(resolution_name, default=default_resolution_name)
@@ -1071,7 +1139,7 @@ async def content_path(video_id: str) -> Path:
 
 
 def _extract_video_prompt_and_reference(
-    messages: list[dict],
+    messages: list[dict], *, allow_empty_prompt: bool = False
 ) -> tuple[str, list[dict[str, Any]] | None]:
     prompt = ""
     reference_urls: list[str] = []
@@ -1112,7 +1180,7 @@ def _extract_video_prompt_and_reference(
         if prompt:
             break
 
-    if not prompt:
+    if not prompt and not allow_empty_prompt:
         raise ValidationError("Video prompt cannot be empty", param="messages")
 
     input_references: list[dict[str, Any]] | None = None
@@ -1132,14 +1200,25 @@ async def completions(
     preset: str | None = None,
 ) -> dict | AsyncGenerator[str, None]:
     """Chat-completions video support on top of the same core flow."""
-    validate_video_length(seconds)
+    spec = resolve_model(model)
+    is_console = spec.mode_id == ModeId.CONSOLE
+    if is_console:
+        if not (1 <= seconds <= 15):
+            raise ValidationError(
+                "seconds must be between 1 and 15 for console video models",
+                param="seconds",
+            )
+    else:
+        validate_video_length(seconds)
     aspect_ratio, default_resolution_name = _resolve_video_size(size)
     resolved_resolution_name = _resolve_video_resolution_name(
         resolution_name,
         default=default_resolution_name,
     )
     resolved_preset = _resolve_video_preset(preset)
-    prompt, input_references = _extract_video_prompt_and_reference(messages)
+    prompt, input_references = _extract_video_prompt_and_reference(
+        messages, allow_empty_prompt=is_console
+    )
 
     cfg = get_config()
     is_stream = stream if stream is not None else cfg.get_bool("features.stream", False)
@@ -1152,16 +1231,29 @@ async def completions(
 
     async def _run(progress_cb: Callable[[int], Awaitable[None]] | None = None) -> str:
         async def _runner(token: str, timeout_s: float) -> str:
-            artifact = await _generate_video_with_token(
-                token=token,
-                prompt=prompt,
-                aspect_ratio=aspect_ratio,
-                resolution_name=resolved_resolution_name,
-                seconds=seconds,
-                preset=resolved_preset,
-                timeout_s=timeout_s,
-                input_references=input_references,
-                progress_cb=progress_cb,
+            artifact = (
+                await _generate_console_video_with_token(
+                    token=token,
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    resolution_name=resolved_resolution_name,
+                    seconds=seconds,
+                    timeout_s=timeout_s,
+                    input_references=input_references,
+                    progress_cb=progress_cb,
+                )
+                if is_console
+                else await _generate_video_with_token(
+                    token=token,
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    resolution_name=resolved_resolution_name,
+                    seconds=seconds,
+                    preset=resolved_preset,
+                    timeout_s=timeout_s,
+                    input_references=input_references,
+                    progress_cb=progress_cb,
+                )
             )
             file_id = hashlib.sha1(artifact.video_url.encode("utf-8")).hexdigest()[:32]
             return await _resolve_video_output(

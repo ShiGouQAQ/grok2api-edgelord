@@ -305,6 +305,7 @@ async def mihomo_status():
             },
         }
     except Exception as e:
+        logger.warning("mihomo status check failed: error={}", e)
         return {"success": False, "error": str(e)}
 
 
@@ -326,6 +327,7 @@ async def mihomo_switch():
         else:
             return {"success": False, "message": "节点切换失败"}
     except Exception as e:
+        logger.warning("mihomo switch failed: error={}", e)
         return {"success": False, "error": str(e)}
 
 

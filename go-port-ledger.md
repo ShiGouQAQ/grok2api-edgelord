@@ -683,3 +683,47 @@
 **调查结论（不改代码）**：`_post_console_with_dpop` 401 重试同一 curl_cffi session，未 drain 的 401 body 不阻塞重试（curl 对未读完连接开新连接/新 stream，HTTP/1.1 不复用、HTTP/2 新流），无 hang 无损坏；Go `ReadDiagnosticBody` 仅为日志/连接复用优化 → 良性不动。
 
 **测试**：合并后全量 **1667 passed / 1 skipped**。
+
+---
+
+## a05e06a2 全量移植：Console 媒体端点（2026-08-05）
+
+**移植内容**：Go `backend/internal/infra/provider/console/media.go`（727 行：GenerateImage/EditImage/forwardConsoleMedia/localizeConsoleImageResponse/GenerateVideo/doConsoleVideoJSON/DownloadVideo + 校验/解析/错误辅助）+ `catalog.go` mediaCatalog + `adapter.go` QuotaMode 映射 + `definition.go` MediaSurface → Python。
+
+**模型命名设计决策**：Go mediaCatalog 复用 `grok-imagine-image-quality`/`grok-imagine-image`/`grok-imagine-video` 作为 console provider 模型，但 Python 已将这些名字路由到 grok.com（WS/SSE 流）。按 2026-08-05 审计结论，新增 `-console` 后缀公开名，**上游 model 字段仍发原名**（`CONSOLE_MEDIA_MODELS` 映射），grok.com 路由零改动。
+
+### 新增模型（`app/control/model/registry.py` console 段）
+
+| 公开名 | ModeId | Tier | Capability | 上游 model 字段 |
+|--------|--------|------|------------|-----------------|
+| `grok-imagine-image-quality-console` | CONSOLE | BASIC | IMAGE \| IMAGE_EDIT | grok-imagine-image-quality |
+| `grok-imagine-image-console` | CONSOLE | BASIC | IMAGE \| IMAGE_EDIT | grok-imagine-image |
+| `grok-imagine-video-console` | CONSOLE | BASIC | VIDEO | grok-imagine-video |
+
+（Go mediaCatalog：前两者 Capabilities=[Image, ImageEdit]，后者=[Video]；Tier 沿用 console 模型惯例 BASIC/免费。）
+
+### 文件改动
+
+| 文件 | 改动 |
+|------|------|
+| `app/dataplane/reverse/protocol/xai_console_media.py`（新） | Console 媒体协议：`CONSOLE_MEDIA_MODELS` 公开名→上游名映射；`generate_console_image`（POST /images/generations）/`edit_console_image`（POST /images/edits）/`generate_console_video`（POST /videos/generations → GET /videos/{id} 轮询，2s 间隔，Go consoleVideoPollEvery）；DPoP 走 `do_dpop_request`，结构照抄 `xai_console_usage.py`（同 lease token 交换 + `browser_headers=lambda lease: build_console_headers(token, lease=lease)` + `_is_definitive_block_body`）；错误分类移植 `newConsoleMediaUpstreamError`（安全摘要 + 160 字符截断 + authorization/cookie 脱敏 `safeConsoleMediaText`）、401/403-definitive → credential_rejected、403 非 definitive → invalidate_clearance（Go `lease.InvalidateClearance()`）；`normalizeConsoleImageFormat`（url/b64_json）/`normalizeConsoleImageResolution`（1k/2k）/`resolveConsoleImageAspectRatio`（尺寸映射表）/`validConsoleMediaInputURL`（https 或 data:image/...;base64,）/`parseConsoleVideoCreate`/`parseConsoleVideoStatus`（done/completed/succeeded/success/ready；failed/expired/cancelled/canceled/error；pending/processing/in_progress/queued）/`waitConsoleMediaRetry`（200ms/750ms 退避） |
+| `app/products/openai/images.py` | `generate()`/`edit()` 按 `spec.mode_id == ModeId.CONSOLE` 分派到 console 路径（console 不支持 stream → ValidationError，Go invalidConsoleMediaRequest）；账号 `reserve(mode_id=5)` + feedback + `_quota_sync`/`_fail_sync`（与 lite 路径同构）；输出整形复用 `_resolve_image_output`（下载→本地缓存→url，或 b64_json），外部响应与 grok.com 路径同构（`{"created", "data":[{url|b64_json}]}`，chat_format 走 make_chat_response） |
+| `app/products/openai/video.py` | `create_video()`/`_run_video_job()`/`completions()` 按 console 分派：duration 校验 1–15s（Go GenerateVideo，替换 grok.com 的 {6,10,12,16,20} 集合）、图片生视频可省略 prompt（Go 语义）、最多 1 张首图；console 生成器 → `generate_console_video` → 复用现有 `_download_video_bytes`（download_asset → get_bytes_stream → trusted_hosts 白名单，vidgen.x.ai ✓）→ 本地保存，job 外部形状与 grok.com 完全一致 |
+| `tests/test_console_media.py`（新） | 见下方测试清单 |
+
+### 配额接线（Go QuotaMode 映射的 Python 等价）
+
+Go `QuotaMode()`：chat 模型 → "console"，Image/ImageEdit → "console_image"，Video → "console_video"。Python 的 model→配额解析在 `AccountQuotaSet.get(mode_id)`（models.py:98），console 窗口挂 mode_id=5（`quota_console`）；`/v1/usage` 的 image/video kind 由 `refresh.py` 以 display-only 存入 ext `console_quota_image`/`console_quota_video`（Go WindowSeconds=0 等价）。因此新模型 `ModeId.CONSOLE` 即自动参与 console 配额窗口（reserve 按 mode 5 计 quota），无需新增 quota mode——这是 Python 架构下 QuotaMode 映射的等价物（与 chat 模型一致）。
+
+### 下载加固复用（Go trustedConsoleImageURL/trustedConsoleVideoHost）
+
+切片 (b) 已移植（本日早前）：`trusted_hosts.py` 白名单含 assets.grok.com / imagine-public.x.ai / imgen.x.ai / vidgen.x.ai + *.vidgen.x.ai，32MiB 上限 + Content-Type 校验 + 重定向再校验在 `get_bytes_stream`；console 响应返回的绝对 URL 均在白名单内。本次无需新增下载代码，console 视频走 `download_asset` 复用全部加固。
+
+### 刻意跳过/简化
+
+1. **localizeConsoleImageResponse 全量重托管**：Go 对 format=url 恒下载重托管（签名 URL 过期防护）；Python 复用 grok.com 的 `_resolve_image_output`——`features.imagine_public_image_proxy=false` 时 imagine-public.x.ai URL 直出（与 grok.com 路径行为一致，任务要求外部响应与 grok.com 同构）。需要全托管时开该 flag。
+2. **Go rate-limit metadata（429 解析）**：Python 无 RateLimitMetadata 信封，429 走既有 `_status_feedback` RATE_LIMITED 反馈。
+3. **ScopeConsoleAsset 免 clearance**：Python 代理层无 scope 分离（2026-07-15 审计 3b8feb2 已判跳过），下载走 ASSET scope 既有逻辑。
+4. **consoleMediaBodyLimit 2MiB**：图片/视频响应整体读取由 curl_cffi 管理，未逐字节限 2MiB（Go 的 ReadAll+LimitReader 防御；Python 侧视频轮询响应天然小于该值）。
+
+**测试**：`tests/test_console_media.py` 新增 16 用例（registry/路由分派/协议端点/视频轮询/配额映射/白名单）；全量 **1683 passed / 1 skipped**（基线 1667 + 16 新增）。

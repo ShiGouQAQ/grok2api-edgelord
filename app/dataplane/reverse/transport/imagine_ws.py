@@ -180,7 +180,7 @@ async def _stream_round(
         if ws_msg.type == aiohttp.WSMsgType.TEXT:
             try:
                 msg = orjson.loads(ws_msg.data)
-            except Exception:
+            except (orjson.JSONDecodeError, ValueError):
                 continue
 
             msg_type = msg.get("type")

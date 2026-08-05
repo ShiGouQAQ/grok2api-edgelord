@@ -56,8 +56,16 @@ async def post_stream(
 
         if response.status_code != 200:
             try:
-                body = (response.content).decode("utf-8", "replace")[:400]
-            except Exception:
+                # Streamed response: the buffered body is only reachable via
+                # the async read API — sync .content stays empty in stream
+                # mode (curl_cffi 0.16). acontent() is valid here (stream=True).
+                body = (await response.acontent()).decode("utf-8", "replace")[:400]
+            except Exception as exc:
+                logger.warning(
+                    "http stream post error body read failed: status={} error={}",
+                    response.status_code,
+                    exc,
+                )
                 body = ""
             logger.error(
                 "http stream post failed: url={} status={} body={}",
@@ -287,8 +295,13 @@ async def get_bytes_stream(
             ) from exc
         if response.status_code != 200:
             try:
-                body = (response.content).decode("utf-8", "replace")[:400]
-            except Exception:
+                body = (await response.acontent()).decode("utf-8", "replace")[:400]
+            except Exception as exc:
+                logger.warning(
+                    "http byte stream get error body read failed: status={} error={}",
+                    response.status_code,
+                    exc,
+                )
                 body = ""
             logger.error(
                 "http byte stream get failed: url={} status={} body={}",

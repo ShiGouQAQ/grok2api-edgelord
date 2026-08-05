@@ -48,7 +48,7 @@ def _is_url(value: str) -> bool:
     try:
         p = urlparse(value)
         return bool(p.scheme in {"http", "https"} and p.netloc)
-    except Exception:
+    except (ValueError, TypeError):
         return False
 
 
@@ -170,7 +170,7 @@ async def _upload_file_inner(
 
         try:
             result = orjson.loads(body_bytes)
-        except Exception as parse_exc:
+        except (orjson.JSONDecodeError, ValueError) as parse_exc:
             diagnostic = _upload_response_diagnostic(body_bytes)
             raise UpstreamError(
                 f"Asset upload response invalid: {parse_exc} (response: {diagnostic})"
@@ -196,7 +196,7 @@ def _validate_remote_url(url: str) -> None:
     """Validate that a remote URL is safe to fetch."""
     try:
         parsed = urlparse(url)
-    except Exception as exc:
+    except (ValueError, TypeError) as exc:
         raise ValidationError(f"Invalid URL: {exc}", param="image_url") from exc
 
     if parsed.scheme not in ("http", "https"):

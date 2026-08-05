@@ -795,8 +795,8 @@ class ProxyDirectory:
                 stats["total_checks"] = (
                     stats["solver_success"] + stats["solver_failures"]
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("proxy stats history query failed: error={}", exc)
             finally:
                 if conn:
                     conn.close()

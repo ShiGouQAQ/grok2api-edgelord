@@ -12,6 +12,7 @@ from app.control.account.commands import ListAccountsQuery
 from app.control.account.invalid_credentials import mark_account_invalid_credentials
 from app.control.account.state_machine import is_manageable
 from app.platform.errors import UpstreamError
+from app.platform.logging.logger import logger
 
 if TYPE_CHECKING:
     from app.control.account.repository import AccountRepository
@@ -27,17 +28,19 @@ def _mask(token: str) -> str:
 
 def _asset_row(token: str, items: list[dict], *, error: str | None = None) -> dict:
     return {
-        "token":  token,
+        "token": token,
         "masked": _mask(token),
-        "count":  len(items),
+        "count": len(items),
         "assets": [
             {
-                "id":           item.get("id") or item.get("assetId") or "",
-                "name":         item.get("fileName") or item.get("name") or "",
-                "file_path":    item.get("filePath") or item.get("file_path") or "",
-                "content_type": item.get("contentType") or item.get("content_type") or "",
-                "size":         item.get("fileSize") or item.get("size") or 0,
-                "created_at":   item.get("createdAt") or item.get("created_at") or "",
+                "id": item.get("id") or item.get("assetId") or "",
+                "name": item.get("fileName") or item.get("name") or "",
+                "file_path": item.get("filePath") or item.get("file_path") or "",
+                "content_type": item.get("contentType")
+                or item.get("content_type")
+                or "",
+                "size": item.get("fileSize") or item.get("size") or 0,
+                "created_at": item.get("createdAt") or item.get("created_at") or "",
             }
             for item in items
         ],
@@ -48,7 +51,9 @@ def _asset_row(token: str, items: list[dict], *, error: str | None = None) -> di
 async def _list_all_tokens(repo: "AccountRepository") -> list[str]:
     page_num, tokens = 1, []
     while True:
-        page = await repo.list_accounts(ListAccountsQuery(page=page_num, page_size=2000))
+        page = await repo.list_accounts(
+            ListAccountsQuery(page=page_num, page_size=2000)
+        )
         tokens.extend(r.token for r in page.items if is_manageable(r))
         if page_num * 2000 >= page.total:
             break
@@ -57,7 +62,7 @@ async def _list_all_tokens(repo: "AccountRepository") -> list[str]:
 
 
 class DeleteItemRequest(BaseModel):
-    token:    str
+    token: str
     asset_id: str
 
 
@@ -81,7 +86,12 @@ async def list_all_assets(repo: "AccountRepository" = Depends(get_repo)):
         try:
             resp = await list_assets(token)
         except Exception as exc:
-            await mark_account_invalid_credentials(repo, token, exc, source="asset list")
+            logger.warning(
+                "admin asset list failed: token={} error={}", _mask(token), exc
+            )
+            await mark_account_invalid_credentials(
+                repo, token, exc, source="asset list"
+            )
             return _asset_row(token, [], error=str(exc))
 
         items = resp.get("assets", resp.get("items", []))
@@ -96,7 +106,9 @@ async def list_all_assets(repo: "AccountRepository" = Depends(get_repo)):
 
 
 @router.post("/delete-item")
-async def delete_item(req: DeleteItemRequest, repo: "AccountRepository" = Depends(get_repo)):
+async def delete_item(
+    req: DeleteItemRequest, repo: "AccountRepository" = Depends(get_repo)
+):
     """Delete a single asset by token + asset_id."""
     from app.dataplane.reverse.transport.assets import delete_asset
 
@@ -104,12 +116,16 @@ async def delete_item(req: DeleteItemRequest, repo: "AccountRepository" = Depend
         await delete_asset(req.token, req.asset_id)
         return {"status": "success"}
     except Exception as exc:
-        await mark_account_invalid_credentials(repo, req.token, exc, source="asset delete")
+        await mark_account_invalid_credentials(
+            repo, req.token, exc, source="asset delete"
+        )
         raise UpstreamError(str(exc)) from exc
 
 
 @router.post("/clear-token")
-async def clear_token_assets(req: ClearTokenRequest, repo: "AccountRepository" = Depends(get_repo)):
+async def clear_token_assets(
+    req: ClearTokenRequest, repo: "AccountRepository" = Depends(get_repo)
+):
     """Delete all assets for one token concurrently."""
     from app.dataplane.reverse.transport.assets import delete_asset, list_assets
 
@@ -124,16 +140,22 @@ async def clear_token_assets(req: ClearTokenRequest, repo: "AccountRepository" =
             await delete_asset(req.token, asset_id)
             return 1
 
-        results = await asyncio.gather(*[_delete_one(item) for item in items], return_exceptions=True)
+        results = await asyncio.gather(
+            *[_delete_one(item) for item in items], return_exceptions=True
+        )
         for result in results:
             if not isinstance(result, Exception):
                 continue
-            if await mark_account_invalid_credentials(repo, req.token, result, source="asset clear"):
+            if await mark_account_invalid_credentials(
+                repo, req.token, result, source="asset clear"
+            ):
                 raise result
         deleted = sum(result for result in results if isinstance(result, int))
         return {"status": "success", "deleted": deleted}
     except Exception as exc:
-        await mark_account_invalid_credentials(repo, req.token, exc, source="asset clear")
+        await mark_account_invalid_credentials(
+            repo, req.token, exc, source="asset clear"
+        )
         raise UpstreamError(str(exc)) from exc
 
 

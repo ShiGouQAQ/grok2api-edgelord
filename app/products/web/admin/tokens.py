@@ -678,7 +678,7 @@ async def build_start():
             kind=ErrorKind.UPSTREAM,
             code="build_device_flow_failed",
             status=502,
-        )
+        ) from exc
 
 
 @router.post("/tokens/build-poll")

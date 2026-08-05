@@ -383,9 +383,17 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
             from .video import completions as vid_comp
 
             vcfg = req.video_config or VideoConfig()
+            from app.control.model.enums import ModeId
             from .video import validate_video_length as _validate_video_length
 
-            _validate_video_length(vcfg.seconds or 6)
+            if spec.mode_id == ModeId.CONSOLE:
+                if not (1 <= (vcfg.seconds or 6) <= 15):
+                    raise ValidationError(
+                        "seconds must be between 1 and 15 for console video models",
+                        param="video_config.seconds",
+                    )
+            else:
+                _validate_video_length(vcfg.seconds or 6)
             result = await vid_comp(
                 model=req.model,
                 messages=messages,

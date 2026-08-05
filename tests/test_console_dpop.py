@@ -96,9 +96,12 @@ def _response(
 
         resp.aiter_lines = _aiter_lines
     else:
+        # curl_cffi non-streamed responses read the buffered body via the
+        # sync .text property; .atext() asserts stream mode and raises.
+        resp.text = body
 
         async def _atext():
-            return body
+            raise AssertionError("stream mode is not enabled.")
 
         resp.atext = _atext
     return resp

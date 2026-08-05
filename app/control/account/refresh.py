@@ -506,7 +506,13 @@ class AccountRefreshService:
                     ]
                 )
             return RefreshResult(checked=1, expired=1)
-        except Exception:
+        except Exception as exc:
+            # Non-UpstreamError = transport/programming failure, never a silent failed=1.
+            logger.warning(
+                "build billing fetch failed: token={}... error={}",
+                token[:10],
+                exc,
+            )
             return RefreshResult(checked=1, failed=1)
 
         from .commands import AccountPatch

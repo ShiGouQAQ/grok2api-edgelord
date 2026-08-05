@@ -73,6 +73,13 @@ MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("grok-4.5-console",                       ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok 4.5 (Console)", supports_reasoning=True),
     ModelSpec("grok-build-console",                     ModeId.CONSOLE,  Tier.BASIC, Capability.CONSOLE_CHAT, True, "Grok Build (Console)"),
 
+    # === Console Media (console.x.ai /images + /videos, Go a05e06a2) =========
+    # 上游 model 字段仍为原名（grok-imagine-image-quality 等），见
+    # xai_console_media.py CONSOLE_MEDIA_MODELS；grok.com 路由零改动
+    ModelSpec("grok-imagine-image-quality-console",     ModeId.CONSOLE,  Tier.BASIC, Capability.IMAGE | Capability.IMAGE_EDIT, True, "Grok Imagine Image Quality (Console)"),
+    ModelSpec("grok-imagine-image-console",             ModeId.CONSOLE,  Tier.BASIC, Capability.IMAGE | Capability.IMAGE_EDIT, True, "Grok Imagine Image (Console)"),
+    ModelSpec("grok-imagine-video-console",             ModeId.CONSOLE,  Tier.BASIC, Capability.VIDEO,      True, "Grok Imagine Video (Console)"),
+
     # === Build (grok.com build 端点) ==========================================
     ModelSpec("grok-4.5",              ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok 4.5 (Build)"),
     ModelSpec("grok-4.5-latest",       ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok 4.5 Latest (Build)"),
