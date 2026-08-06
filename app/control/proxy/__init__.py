@@ -36,6 +36,14 @@ from .providers.turnstile import TurnstileClearanceProvider
 
 _DEFAULT_CLEARANCE_ORIGIN = "https://grok.com"
 _CONSOLE_CLEARANCE_ORIGIN = "https://console.x.ai"
+# Suffix -> canonical origin for scheduled refresh: bundles are keyed by
+# registrable-domain suffix (see _clearance_host), but re-solving must target
+# a real hostname the turnstile selector knows about (e.g. x.ai has no
+# selector entry, console.x.ai does).
+_SUFFIX_ORIGINS: dict[str, str] = {
+    "grok.com": _DEFAULT_CLEARANCE_ORIGIN,
+    "x.ai": _CONSOLE_CLEARANCE_ORIGIN,
+}
 # Proxy URLs carrying the account placeholder are sticky: pinned to one
 # account, never rotated (Go ProxyAccountPlaceholder "{account}").
 _PROXY_ACCOUNT_PLACEHOLDER = "{account}"
@@ -58,8 +66,23 @@ def _node_state_for_health(health: float) -> EgressNodeState:
 
 
 def _clearance_host(clearance_origin: str | None) -> str:
+    """Map a clearance origin to its registrable-domain suffix.
+
+    Cloudflare clearance cookies are scoped to the registrable domain:
+    ``Domain=.grok.com`` covers ``grok.com`` AND ``cli-chat-proxy.grok.com``
+    (verified live: a grok.com solve is honored by cli-chat-proxy.grok.com).
+    Bundles are keyed by ``(affinity node, suffix)`` so one solve per node per
+    suffix is shared across every subdomain instead of re-solving per exact
+    host. This mirrors Go's ``clearanceCacheKey(nodeID, proxyURL)``, which
+    intentionally does not include the target host.
+    """
     host = urlparse(clearance_origin or _DEFAULT_CLEARANCE_ORIGIN).hostname
-    return (host or "grok.com").lower()
+    host = (host or "grok.com").lower()
+    parts = host.split(".")
+    if len(parts) > 2:
+        # console.x.ai -> x.ai ; cli-chat-proxy.grok.com -> grok.com
+        return ".".join(parts[-2:])
+    return host
 
 
 class ProxyDirectory:
@@ -713,9 +736,13 @@ class ProxyDirectory:
             refresh_targets[key] = (proxy_url, _DEFAULT_CLEARANCE_ORIGIN)
         for key in existing:
             affinity, clearance_host = key
+            origin = _SUFFIX_ORIGINS.get(clearance_host)
             refresh_targets.setdefault(
                 key,
-                ("" if affinity == "direct" else affinity, f"https://{clearance_host}"),
+                (
+                    "" if affinity == "direct" else affinity,
+                    origin or f"https://{clearance_host}",
+                ),
             )
 
         success_count = 0

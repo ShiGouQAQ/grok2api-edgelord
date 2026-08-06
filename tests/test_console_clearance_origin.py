@@ -14,6 +14,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from app.dataplane.reverse.runtime.endpoint_table import CONSOLE_BASE
+from app.control.proxy import _clearance_host
 
 
 @pytest.fixture(autouse=True)
@@ -787,6 +788,78 @@ async def test_stream_non200_body_not_truncated():
 
         assert exc_info.value.details["body"] == long_body
         assert len(exc_info.value.details["body"]) == 1000
+
+
+# ---------------------------------------------------------------------------
+# 公共后缀归一化：同注册域子域共享同一 clearance bundle key（Go
+# clearanceCacheKey 不含目标 host；CF cookie 按 Domain=.grok.com 覆盖子域）
+# ---------------------------------------------------------------------------
+
+
+def test_clearance_host_suffix_normalization():
+    from app.control.proxy import _clearance_host
+
+    assert _clearance_host("https://grok.com") == "grok.com"
+    assert _clearance_host("https://cli-chat-proxy.grok.com/v1") == "grok.com"
+    assert _clearance_host("https://assets.grok.com/") == "grok.com"
+    assert _clearance_host("https://console.x.ai") == "x.ai"
+    assert _clearance_host("https://accounts.x.ai/") == "x.ai"
+    assert _clearance_host(None) == "grok.com"
+
+
+def test_clearance_host_suffix_does_not_cross_domains():
+    from app.control.proxy import _clearance_host
+
+    assert _clearance_host("https://grok.com") != _clearance_host(
+        "https://console.x.ai"
+    )
+
+
+def test_clearance_bundle_key_shared_across_subdomain():
+    from unittest.mock import AsyncMock, patch
+
+    from app.control.proxy import ProxyDirectory
+
+    directory = ProxyDirectory.__new__(ProxyDirectory)
+    directory._bundles = {}
+    directory._refresh_events = {}
+    directory._lock = AsyncMock()
+    from app.control.proxy.models import ClearanceMode
+
+    directory._clearance_mode = ClearanceMode.TURNSTILE
+
+    seen_keys: list[tuple[str, str]] = []
+    from app.control.proxy.models import ClearanceBundle
+
+    bundle = ClearanceBundle(bundle_id="turnstile:direct@grok.com")
+
+    async def fake_refresh(*, affinity_key, proxy_url, clearance_origin):
+        seen_keys.append((affinity_key, _clearance_host(clearance_origin)))
+        return bundle
+
+    with patch.object(directory, "_refresh_bundle_with_node_fallback", fake_refresh):
+        import asyncio
+
+        b1 = asyncio.run(
+            directory._get_or_build_bundle(
+                affinity_key="direct",
+                proxy_url="",
+                clearance_origin="https://grok.com",
+            )
+        )
+        b2 = asyncio.run(
+            directory._get_or_build_bundle(
+                affinity_key="direct",
+                proxy_url="",
+                clearance_origin="https://cli-chat-proxy.grok.com/v1",
+            )
+        )
+
+    # 同后缀同节点：第二次直接命中缓存，不触发第二次求解
+    assert seen_keys == [("direct", "grok.com")]
+    assert b1 is bundle
+    assert b2 is bundle
+    assert directory._bundles == {("direct", "grok.com"): bundle}
 
 
 if __name__ == "__main__":

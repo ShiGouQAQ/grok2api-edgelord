@@ -51,7 +51,13 @@ _CONTENT_SELECTORS: dict[str, str] = {
 def _expected_content_selector(target_url: str) -> str | None:
     """Return the expected content selector for the given target URL."""
     host = (urlparse(target_url).hostname or "").lower()
-    return _CONTENT_SELECTORS.get(host)
+    selector = _CONTENT_SELECTORS.get(host)
+    if selector:
+        return selector
+    parts = host.split(".")
+    if len(parts) > 2:
+        return _CONTENT_SELECTORS.get(".".join(parts[-2:]))
+    return None
 
 
 class TurnstileClearanceProvider:
