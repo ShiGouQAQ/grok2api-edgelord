@@ -78,13 +78,10 @@ MODELS: tuple[ModelSpec, ...] = (
 _BY_NAME: dict[str, ModelSpec] = {m.model_name: m for m in MODELS}
 
 # Reasoning-effort aliases → canonical registered model (Go 1edc9fbe).
-# Exact-name matches in MODELS win; only non-registered aliases live here
-# (e.g. "grok-4.20-0309-reasoning-low" → "grok-4.20-0309-reasoning-console").
-ALIASES: dict[str, str] = {
-    "grok-4.20-0309-reasoning-low": "grok-4.20-0309-reasoning-console",
-    "grok-4.20-0309-reasoning-medium": "grok-4.20-0309-reasoning-console",
-    "grok-4.20-0309-reasoning-high": "grok-4.20-0309-reasoning-console",
-}
+# Exact-name matches in MODELS win; only non-registered aliases live here.
+# grok-4.20-0309-reasoning has SupportsReasoningEffort=false upstream, so it
+# intentionally gets NO low/medium/high aliases (Go ReasoningAliasPublicIDs).
+ALIASES: dict[str, str] = {}
 
 _BY_CAP: dict[int, list[ModelSpec]] = {}
 for _m in MODELS:

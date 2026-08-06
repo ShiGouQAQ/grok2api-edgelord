@@ -28,9 +28,11 @@ from app.dataplane.reverse.protocol.xai_console_chat import (
 
 
 class TestRegistryAlias:
-    def test_alias_resolves_to_canonical_model(self):
-        spec = resolve("grok-4.20-0309-reasoning-low")
-        assert spec.model_name == "grok-4.20-0309-reasoning-console"
+    def test_no_alias_for_effortless_upstream_model(self):
+        # grok-4.20-0309-reasoning: SupportsReasoningEffort=false upstream ->
+        # no low/medium/high aliases (Go ReasoningAliasPublicIDs)
+        with pytest.raises(ValueError):
+            resolve("grok-4.20-0309-reasoning-low")
 
     def test_exact_name_wins_over_alias(self):
         assert resolve("grok-4.3-low").model_name == "grok-4.3-low"
@@ -41,10 +43,6 @@ class TestRegistryAlias:
 
     def test_resolve_alias_identity_for_plain_model(self):
         assert resolve_alias("grok-4.5") == "grok-4.5"
-        assert (
-            resolve_alias("grok-4.20-0309-reasoning-low")
-            == "grok-4.20-0309-reasoning-console"
-        )
 
     def test_get_remains_exact_name_only(self):
         # routers rely on get() for exact registry lookups; aliases resolve
@@ -91,19 +89,13 @@ class TestSupportsReasoningFlag:
 
 
 class TestConsoleAliasMaps:
-    def test_reasoning_aliases_map_to_upstream(self):
-        assert (
-            CONSOLE_MODELS["grok-4.20-0309-reasoning-low"] == "grok-4.20-0309-reasoning"
-        )
-        assert (
-            CONSOLE_MODELS["grok-4.20-0309-reasoning-high"]
-            == "grok-4.20-0309-reasoning"
-        )
+    def test_no_effort_aliases_for_0309_reasoning(self):
+        # upstream SupportsReasoningEffort=false -> no -low/-medium/-high entries
+        assert "grok-4.20-0309-reasoning-low" not in CONSOLE_MODELS
+        assert "grok-4.20-0309-reasoning-high" not in CONSOLE_MODELS
 
-    def test_reasoning_aliases_pin_fixed_effort(self):
-        assert _MODEL_FIXED_EFFORT["grok-4.20-0309-reasoning-low"] == "low"
-        assert _MODEL_FIXED_EFFORT["grok-4.20-0309-reasoning-medium"] == "medium"
-        assert _MODEL_FIXED_EFFORT["grok-4.20-0309-reasoning-high"] == "high"
+    def test_no_fixed_effort_for_0309_reasoning(self):
+        assert "grok-4.20-0309-reasoning-low" not in _MODEL_FIXED_EFFORT
 
     def test_registered_alias_fixed_effort_in_payload(self):
         payload = build_console_payload(
@@ -158,9 +150,7 @@ class TestBuildEffortNormalization:
         assert "thinking" not in payload
 
     def test_max_maps_to_high_for_alias(self):
-        assert (
-            _normalize_reasoning_effort("max", "grok-4.20-0309-reasoning-low") == "high"
-        )
+        assert _normalize_reasoning_effort("max", "grok-4.3-low") == "high"
 
     def test_xhigh_kept_only_for_supported_models(self):
         assert (
@@ -168,7 +158,7 @@ class TestBuildEffortNormalization:
             == "xhigh"
         )
         assert (
-            _normalize_reasoning_effort("xhigh", "grok-4.20-0309-reasoning-low")
+            _normalize_reasoning_effort("xhigh", "grok-4.20-0309-reasoning-console")
             == "high"
         )
 

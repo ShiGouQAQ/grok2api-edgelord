@@ -10,7 +10,17 @@ import uuid
 from typing import Annotated, Any, AsyncGenerator, AsyncIterable, Literal
 
 import orjson
-from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 
 from app.control.account.enums import AccountStatus
@@ -169,6 +179,19 @@ def _model_available_for_pools(spec: ModelSpec, pools: frozenset[str]) -> bool:
         if pool in pools and supports_mode(pool, int(spec.mode_id)):
             return True
     return False
+
+
+def _enforce_client_key_model(request: Request, model_name: str) -> None:
+    """Reject client-key requests to models outside the key's allow-list.
+
+    Mirrors Go gateway/service.go CanUseModel: an empty allow-list permits
+    everything; a non-empty list requires explicit authorization.
+    """
+    key = getattr(request.state, "client_key", None)
+    if key is not None and not key.allows_model(model_name):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Client key is not allowed to use this model."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +475,7 @@ async def chat_completions_endpoint(req: ChatCompletionRequest, request: Request
             param="model",
             code="model_not_found",
         )
+    _enforce_client_key_model(request, req.model)
     messages = [m.model_dump(exclude_none=True) for m in req.messages]
 
     sink = _AuditSink(request, req.model, "chat", is_stream)
@@ -624,6 +648,7 @@ async def responses_endpoint(req: ResponsesCreateRequest, request: Request):
             param="model",
             code="model_not_found",
         )
+    _enforce_client_key_model(request, req.model)
     if not req.input:
         raise _ValidationError("input cannot be empty", param="input")
 
@@ -688,6 +713,7 @@ async def image_generations(req: ImageGenerationRequest, request: Request):
         raise ValidationError(
             f"Model {req.model!r} is not an image model", param="model"
         )
+    _enforce_client_key_model(request, req.model)
     _validate_image_n(req.model, req.n or 1, param="n")
 
     from .images import generate as img_gen
@@ -743,6 +769,8 @@ async def videos_create(
             {"image_url": await _upload_to_data_uri(f, param="input_reference")}
             for f in input_reference[:7]
         ]
+    if model:
+        _enforce_client_key_model(request, model)
 
     sink = _AuditSink(request, model or "grok-video", "video", False)
     try:
@@ -809,6 +837,7 @@ async def image_edits(
         raise ValidationError(
             f"Model {model!r} is not an image-edit model", param="model"
         )
+    _enforce_client_key_model(request, model)
     if mask is not None:
         raise ValidationError("mask is not supported yet", param="mask")
     _validate_image_edit_n(n, param="n")
