@@ -141,8 +141,8 @@ class AccountRefreshService:
 
         Examples:
           - basic -> fast
-          - super -> auto / fast / expert / grok_4_3
-          - heavy -> auto / fast / expert / heavy / grok_4_3
+          - super -> auto / fast / expert
+          - heavy -> auto / fast / expert / heavy
         """
         try:
             from app.dataplane.reverse.protocol.xai_usage import fetch_all_quotas
@@ -153,7 +153,7 @@ class AccountRefreshService:
                 # current local image is basic. If auto is flaky, expert/heavy
                 # windows still provide enough signal to avoid a sticky
                 # misclassification.
-                mode_ids = tuple(dict.fromkeys((0, 2, 3, 4, *mode_ids)))
+                mode_ids = tuple(dict.fromkeys((0, 2, 3, *mode_ids)))
             return await fetch_all_quotas(token, mode_ids)
         except UpstreamError:
             raise

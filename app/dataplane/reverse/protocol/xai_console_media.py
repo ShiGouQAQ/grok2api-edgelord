@@ -267,12 +267,6 @@ def parse_console_video_status(
     )
 
 
-async def wait_console_media_retry(attempt: int) -> None:
-    """Go waitConsoleMediaRetry: 200ms / 750ms backoff."""
-    delays = (0.2, 0.75)
-    await asyncio.sleep(delays[min(attempt, len(delays) - 1)])
-
-
 # ---------------------------------------------------------------------------
 # DPoP wiring (xai_console_usage.py structure — same-lease token exchange)
 # ---------------------------------------------------------------------------
@@ -766,5 +760,4 @@ __all__ = [
     "safe_console_media_error_value",
     "safe_console_media_text",
     "valid_console_media_input_url",
-    "wait_console_media_retry",
 ]

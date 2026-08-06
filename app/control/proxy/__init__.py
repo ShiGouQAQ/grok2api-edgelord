@@ -663,21 +663,6 @@ class ProxyDirectory:
     # Clearance lifecycle helpers (used by ProxyClearanceScheduler)
     # ------------------------------------------------------------------
 
-    async def invalidate_clearance(self) -> None:
-        """Mark all cached clearance bundles as invalid.
-
-        The next ``acquire()`` call for each affinity key will trigger a fresh
-        FlareSolverr fetch (serialised by the single-flight guard).
-        """
-        from .models import ClearanceBundleState
-
-        async with self._lock:
-            self._bundles = {
-                k: b.model_copy(update={"state": ClearanceBundleState.INVALID})
-                for k, b in self._bundles.items()
-            }
-        logger.debug("clearance bundles invalidated: count={}", len(self._bundles))
-
     async def warm_up(self) -> None:
         """Pre-fetch clearance bundles for all configured affinity keys.
 
@@ -707,10 +692,9 @@ class ProxyDirectory:
     async def refresh_clearance_safe(self) -> None:
         """Scheduled clearance refresh: build new bundles then swap atomically.
 
-        Unlike ``invalidate_clearance() + warm_up()``, this never discards a
-        working bundle before a replacement is ready.  If FlareSolverr is
-        temporarily unavailable the old bundle remains valid and continues to
-        serve requests.
+        Unlike ``warm_up()``, this never discards a working bundle before a
+        replacement is ready.  If FlareSolverr is temporarily unavailable the
+        old bundle remains valid and continues to serve requests.
         """
         if self._clearance_mode == ClearanceMode.NONE:
             return

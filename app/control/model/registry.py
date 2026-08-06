@@ -163,11 +163,6 @@ def list_enabled() -> list[ModelSpec]:
     return [m for m in MODELS if m.enabled]
 
 
-def list_by_capability(cap: Capability) -> list[ModelSpec]:
-    """Return enabled models that include *cap* in their capability mask."""
-    return [m for m in MODELS if m.enabled and bool(m.capability & cap)]
-
-
 __all__ = [
     "MODELS",
     "ALIASES",
@@ -176,6 +171,5 @@ __all__ = [
     "resolve_alias",
     "is_enabled",
     "list_enabled",
-    "list_by_capability",
     "list_models_with_overrides",
 ]

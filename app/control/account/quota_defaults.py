@@ -92,8 +92,8 @@ _POOL_DEFAULTS: dict[str, AccountQuotaSet] = {
 
 _SUPPORTED_MODE_IDS_BY_POOL: dict[str, frozenset[int]] = {
     "basic": frozenset((1, 5, 6)),
-    "super": frozenset((0, 1, 2, 4, 5, 6)),
-    "heavy": frozenset((0, 1, 2, 3, 4, 5, 6)),
+    "super": frozenset((0, 1, 2, 5, 6)),
+    "heavy": frozenset((0, 1, 2, 3, 5, 6)),
     "build": frozenset((1, 6)),
 }
 
@@ -103,7 +103,6 @@ _MODE_KEYS: dict[int, str] = {
     1: "quota_fast",
     2: "quota_expert",
     3: "quota_heavy",
-    4: "quota_grok_4_3",
     5: "quota_console",
     6: "quota_build",
 }

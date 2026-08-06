@@ -17,13 +17,6 @@ _PREFIX_HEX_CHARS = 8  # prefix = "grok2api_" + first 8 hex chars (16 chars tota
 _SECRET_HEX_CHARS = 32
 
 
-def key_prefix_of(secret: str) -> str:
-    """Derive the lookup prefix of a full client key secret."""
-    if secret.startswith(_KEY_PREFIX):
-        return secret[: len(_KEY_PREFIX) + _PREFIX_HEX_CHARS]
-    return secret[:16]
-
-
 @dataclass
 class ClientKey:
     id: int = 0
@@ -59,5 +52,4 @@ __all__ = [
     "ClientKey",
     "DEFAULT_RPM_LIMIT",
     "DEFAULT_MAX_CONCURRENT",
-    "key_prefix_of",
 ]

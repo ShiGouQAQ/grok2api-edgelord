@@ -65,7 +65,6 @@ ALL_MODES_FULL: tuple[ModeId, ...] = (
     ModeId.FAST,
     ModeId.EXPERT,
     ModeId.HEAVY,
-    ModeId.GROK_4_3,
 )
 
 __all__ = [

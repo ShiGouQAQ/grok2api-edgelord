@@ -6,7 +6,6 @@ returns the file metadata ID used as a file attachment reference in chat.
 
 import asyncio
 import base64
-import mimetypes
 import re
 from urllib.parse import urlparse
 
@@ -50,11 +49,6 @@ def _is_url(value: str) -> bool:
         return bool(p.scheme in {"http", "https"} and p.netloc)
     except (ValueError, TypeError):
         return False
-
-
-def _mime_from_name(filename: str, fallback: str = "application/octet-stream") -> str:
-    mime, _ = mimetypes.guess_type(filename)
-    return mime or fallback
 
 
 def parse_data_uri(data_uri: str) -> tuple[str, str, str]:

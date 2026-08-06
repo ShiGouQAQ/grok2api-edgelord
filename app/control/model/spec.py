@@ -12,9 +12,9 @@ class ModelSpec:
     ``model_name``  is the public-facing identifier used in API requests.
     ``mode_id``     is the upstream ``modeId`` value (auto / fast / expert).
     ``tier``        determines which account pool is used (basic / super).
-                    When ``prefer_best`` is True, ``tier`` only affects
-                    ``pool_name()``/``pool_id()``; the actual selection order
-                    is reversed (heavy → super → basic).
+                    When ``prefer_best`` is True, ``tier`` only affects the
+                    pool priority order in ``pool_candidates()``: the actual
+                    selection order is reversed (heavy → super → basic).
     ``capability``  is a bitmask of supported operations.
     ``enabled``     gates whether the model appears in ``/v1/models``.
     ``public_name`` is the human-readable display name.
@@ -47,9 +47,6 @@ class ModelSpec:
     def is_video(self) -> bool:
         return bool(self.capability & Capability.VIDEO)
 
-    def is_voice(self) -> bool:
-        return bool(self.capability & Capability.VOICE)
-
     def is_console_chat(self) -> bool:
         """通过 console.x.ai/v1/responses 路由的模型。"""
         return bool(self.capability & Capability.CONSOLE_CHAT)
@@ -57,18 +54,6 @@ class ModelSpec:
     def is_build(self) -> bool:
         """grok.com build 端点。"""
         return bool(self.capability & Capability.BUILD)
-
-    def pool_name(self) -> str:
-        """Return the canonical pool string for this tier."""
-        if self.tier == Tier.SUPER:
-            return "super"
-        if self.tier == Tier.HEAVY:
-            return "heavy"
-        return "basic"
-
-    def pool_id(self) -> int:
-        """Return the integer PoolId for the dataplane account table."""
-        return int(self.tier)
 
     # 返回按优先级排序的候选池 ID
     def pool_candidates(self) -> tuple[int, ...]:

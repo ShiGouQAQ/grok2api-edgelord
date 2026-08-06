@@ -16,8 +16,3 @@ def now_s() -> int:
 def ms_to_s(ms: int) -> int:
     """Convert millisecond timestamp to second timestamp."""
     return ms // 1000
-
-
-def s_to_ms(s: int) -> int:
-    """Convert second timestamp to millisecond timestamp."""
-    return s * 1000

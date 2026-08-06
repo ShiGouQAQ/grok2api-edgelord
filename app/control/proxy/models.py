@@ -98,10 +98,6 @@ class ProxyLease(BaseModel):
     # the exit IP rotates (Go 75f4f7a7 request.Close = true).
     fresh_tunnel: bool = False
 
-    @property
-    def has_proxy(self) -> bool:
-        return bool(self.proxy_url)
-
 
 class ProxyFeedback(BaseModel):
     kind: ProxyFeedbackKind

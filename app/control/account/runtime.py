@@ -33,20 +33,10 @@ def set_refresh_scheduler(scheduler: "AccountRefreshScheduler | None") -> None:
     _refresh_scheduler = scheduler
 
 
-def get_refresh_scheduler() -> "AccountRefreshScheduler | None":
-    """Return the registered account refresh scheduler, if any."""
-    return _refresh_scheduler
-
-
 def set_refresh_scheduler_leader(is_leader: bool) -> None:
     """Record whether this worker currently owns the refresh scheduler lock."""
     global _refresh_scheduler_leader
     _refresh_scheduler_leader = bool(is_leader)
-
-
-def is_refresh_scheduler_leader() -> bool:
-    """Return True when this worker is the active refresh-scheduler leader."""
-    return _refresh_scheduler_leader
 
 
 def reconcile_refresh_runtime(
@@ -94,9 +84,7 @@ def reconcile_refresh_runtime(
 __all__ = [
     "get_refresh_service",
     "set_refresh_service",
-    "get_refresh_scheduler",
     "set_refresh_scheduler",
-    "is_refresh_scheduler_leader",
     "set_refresh_scheduler_leader",
     "reconcile_refresh_runtime",
 ]

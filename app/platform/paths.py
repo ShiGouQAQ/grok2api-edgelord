@@ -27,8 +27,4 @@ def data_path(*parts: str) -> Path:
     return data_dir().joinpath(*parts)
 
 
-def log_path(*parts: str) -> Path:
-    return log_dir().joinpath(*parts)
-
-
-__all__ = ["data_dir", "log_dir", "data_path", "log_path"]
+__all__ = ["data_dir", "log_dir", "data_path"]

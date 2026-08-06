@@ -33,20 +33,11 @@ SET_BIRTH = f"{BASE}/rest/auth/set-birth-date"  # POST
 
 # ── Media (video) ────────────────────────────────────────────────────────
 MEDIA_POST = f"{BASE}/rest/media/post/create"  # POST
-MEDIA_POST_LINK = f"{BASE}/rest/media/post/create-link"  # POST
 VIDEO_UPSCALE = f"{BASE}/rest/media/video/upscale"  # POST
-
-# ── WebSocket endpoints ─────────────────────────────────────────────────
-WS_IMAGINE = "wss://grok.com/ws/imagine/listen"
-WS_LIVEKIT = "wss://livekit.grok.com"
-
-# ── LiveKit ─────────────────────────────────────────────────────────────
-LIVEKIT_TOKENS = f"{BASE}/rest/livekit/tokens"  # POST
 
 # ── Console API (console.x.ai) ───────────────────────────────────────────
 # 使用 Bearer token 认证，与 grok.com SSO token 共享同一套凭证
 CONSOLE_RESPONSES = f"{CONSOLE_BASE}/v1/responses"  # POST (OpenAI Responses API)
-CONSOLE_CHAT = f"{CONSOLE_BASE}/v1/chat/completions"  # POST (OpenAI Chat API)
 CONSOLE_USAGE = f"{CONSOLE_BASE}/v1/usage"  # GET (DPoP-authenticated quota fetch)
 
 # ── Build provider (cli-chat-proxy.grok.com) ─────────────────────────────
@@ -54,10 +45,6 @@ BUILD_BASE = "https://cli-chat-proxy.grok.com/v1"
 BUILD_RESPONSES = f"{BUILD_BASE}/responses"  # POST
 BUILD_MODELS = f"{BUILD_BASE}/models"  # GET
 BUILD_BILLING = f"{BUILD_BASE}/billing"  # GET
-
-# ── XAI API fallback ──────────────────────────────────────────────────────
-XAI_FALLBACK_BASE = "https://api.x.ai/v1"
-XAI_FALLBACK_RESPONSES = f"{XAI_FALLBACK_BASE}/responses"  # POST
 
 
 __all__ = [
@@ -74,18 +61,11 @@ __all__ = [
     "BUILD_RESPONSES",
     "CHAT",
     "CONSOLE_BASE",
-    "CONSOLE_CHAT",
     "CONSOLE_RESPONSES",
     "CONSOLE_USAGE",
-    "LIVEKIT_TOKENS",
     "MEDIA_POST",
-    "MEDIA_POST_LINK",
     "NSFW_MGMT",
     "RATE_LIMITS",
     "SET_BIRTH",
     "VIDEO_UPSCALE",
-    "WS_IMAGINE",
-    "WS_LIVEKIT",
-    "XAI_FALLBACK_BASE",
-    "XAI_FALLBACK_RESPONSES",
 ]
