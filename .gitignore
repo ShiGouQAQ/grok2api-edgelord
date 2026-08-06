@@ -65,3 +65,4 @@ token.json
 
 # Local analysis docs (not for public repo)
 docs/
+MagicMock/
