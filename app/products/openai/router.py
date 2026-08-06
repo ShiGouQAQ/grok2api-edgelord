@@ -186,19 +186,16 @@ def _codex_display_name(name: str) -> str:
 _CODEX_CONTEXT_WINDOWS: dict[str, int] = {
     "grok-4.3": 131_072,
     "grok-4.20": 131_072,
+    "grok-chat": 131_072,
     "grok-imagine": 0,
 }
 
 _CODEX_REASONING_MODELS: frozenset[str] = frozenset(
     {
-        "grok-4.20-auto",
-        "grok-4.20-expert",
-        "grok-4.20-heavy",
+        "grok-chat-expert",
+        "grok-chat-heavy",
         "grok-4.3-console",
         "grok-4.3-high",
-        "grok-4.20-0309-reasoning",
-        "grok-4.20-0309-reasoning-super",
-        "grok-4.20-0309-reasoning-heavy",
         "grok-4.20-0309-reasoning-console",
     }
 )

@@ -62,11 +62,11 @@ class TestSupportsReasoningFlag:
     @pytest.mark.parametrize(
         "name",
         [
-            "grok-4.20-0309-reasoning",
+            "grok-chat-expert",
             "grok-4.20-0309-reasoning-console",
             "grok-4.3-console",
             "grok-4.3-low",
-            "grok-4.20-multi-agent-0309",
+            "grok-chat-heavy",
             "grok-4.20-multi-agent-xhigh",
         ],
     )
@@ -76,7 +76,7 @@ class TestSupportsReasoningFlag:
     @pytest.mark.parametrize(
         "name",
         [
-            "grok-4.20-0309",
+            "grok-chat-auto",
             "grok-4.20-0309-console",
             "grok-4.20-0309-non-reasoning-console",
         ],

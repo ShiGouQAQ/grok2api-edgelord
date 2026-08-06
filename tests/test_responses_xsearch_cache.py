@@ -99,7 +99,7 @@ def test_cache_route_uncapable_model():
 def test_is_cache_capable():
     assert _is_cache_capable("responses", "grok-4.5")
     assert not _is_cache_capable("video", "grok-4.5")
-    assert _is_cache_capable("chat", "grok-build-latest")
+    assert _is_cache_capable("chat", "grok-4.5-build-free")
 
 
 def test_cache_route_existing_tools_not_duplicated():

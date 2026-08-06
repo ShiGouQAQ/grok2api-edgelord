@@ -111,7 +111,7 @@ async def test_router_forwards_previous_response_id(monkeypatch):
     monkeypatch.setattr(responses_module, "create", fake_create)
 
     req = ResponsesCreateRequest(
-        model="grok-4.20-auto", input="hi", previous_response_id="resp_abc"
+        model="grok-chat-auto", input="hi", previous_response_id="resp_abc"
     )
     from types import SimpleNamespace
 
@@ -187,7 +187,7 @@ async def test_build_create_single_attempt_when_previous_id(
     calls = _install_policy_spies(monkeypatch, br)
 
     await br.create(
-        model="grok-4.20-0309",
+        model="grok-chat-auto",
         messages=[{"role": "user", "content": "hi"}],
         stream=True,
         emit_think=True,
@@ -228,7 +228,7 @@ async def test_build_create_forwards_previous_id_to_payload(
     )
 
     gen = await br.create(
-        model="grok-4.20-0309",
+        model="grok-chat-auto",
         messages=[{"role": "user", "content": "hi"}],
         stream=True,
         emit_think=True,

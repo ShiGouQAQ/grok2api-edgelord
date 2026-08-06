@@ -13,26 +13,12 @@ from . import overrides
 MODELS: tuple[ModelSpec, ...] = (
     # === Chat ==============================================================
 
-    # Basic fast; auto/expert require Super+
-    ModelSpec("grok-4.20-0309-non-reasoning",           ModeId.FAST,     Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 0309 Non-Reasoning"),
-    ModelSpec("grok-4.20-0309",                         ModeId.AUTO,     Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309"),
-    ModelSpec("grok-4.20-0309-reasoning",               ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309 Reasoning", supports_reasoning=True),
-    # Super+
-    ModelSpec("grok-4.20-0309-non-reasoning-super",     ModeId.FAST,     Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309 Non-Reasoning Super"),
-    ModelSpec("grok-4.20-0309-super",                   ModeId.AUTO,     Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309 Super"),
-    ModelSpec("grok-4.20-0309-reasoning-super",         ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 0309 Reasoning Super", supports_reasoning=True),
-    # Heavy+
-    ModelSpec("grok-4.20-0309-non-reasoning-heavy",     ModeId.FAST,     Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 0309 Non-Reasoning Heavy"),
-    ModelSpec("grok-4.20-0309-heavy",                   ModeId.AUTO,     Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 0309 Heavy"),
-    ModelSpec("grok-4.20-0309-reasoning-heavy",         ModeId.EXPERT,   Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 0309 Reasoning Heavy", supports_reasoning=True),
-    ModelSpec("grok-4.20-multi-agent-0309",             ModeId.HEAVY,    Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 Multi-Agent 0309", supports_reasoning=True),
-
-    # --- 硬优先级反向选池 (heavy → super → basic) ---
-    ModelSpec("grok-4.20-fast",                         ModeId.FAST,     Tier.BASIC, Capability.CHAT,       True, "Grok 4.20 Fast",          prefer_best=True),
-    ModelSpec("grok-4.3-fast",                          ModeId.FAST,     Tier.BASIC, Capability.CHAT,       True, "Grok 4.3 Fast",           prefer_best=True),
-    ModelSpec("grok-4.20-auto",                         ModeId.AUTO,     Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 Auto",          prefer_best=True),
-    ModelSpec("grok-4.20-expert",                       ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok 4.20 Expert",        prefer_best=True),
-    ModelSpec("grok-4.20-heavy",                        ModeId.HEAVY,    Tier.HEAVY, Capability.CHAT,       True, "Grok 4.20 Heavy",         prefer_best=True),
+    # 上游 Go catalog 规范名（grok-chat-*，仅 4 个；旧版本名已收敛删除，不留别名）
+    # fast = basic；auto/expert = super+；heavy = heavy；均为反向选池 prefer_best
+    ModelSpec("grok-chat-fast",                         ModeId.FAST,     Tier.BASIC, Capability.CHAT,       True, "Grok Chat Fast",         prefer_best=True),
+    ModelSpec("grok-chat-auto",                         ModeId.AUTO,     Tier.SUPER, Capability.CHAT,       True, "Grok Chat Auto",         prefer_best=True),
+    ModelSpec("grok-chat-expert",                       ModeId.EXPERT,   Tier.SUPER, Capability.CHAT,       True, "Grok Chat Expert",       supports_reasoning=True, prefer_best=True),
+    ModelSpec("grok-chat-heavy",                        ModeId.HEAVY,    Tier.HEAVY, Capability.CHAT,       True, "Grok Chat Heavy",        supports_reasoning=True, prefer_best=True),
 
     # === Image ==============================================================
 
@@ -82,8 +68,6 @@ MODELS: tuple[ModelSpec, ...] = (
     ModelSpec("grok-4.5",              ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok 4.5 (Build)"),
     ModelSpec("grok-4.5-mini",         ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok 4.5 Mini (Build)"),
     ModelSpec("grok-4.5-build-free",   ModeId.BUILD, Tier.BASIC, Capability.BUILD, True, "Grok 4.5 Free (Build)"),
-    ModelSpec("grok-4.5-latest",       ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok 4.5 Latest (Build)"),
-    ModelSpec("grok-build-latest",     ModeId.BUILD, Tier.SUPER, Capability.BUILD, True, "Grok Build Latest"),
 )
 # fmt: on
 

@@ -884,3 +884,34 @@ Go `QuotaMode()`：chat 模型 → "console"，Image/ImageEdit → "console_imag
 `tests/test_client_keys.py`（CRUD/scope/admin 端点/认证集成/rpm 429/maxConcurrent 429）、`tests/test_audit_repository.py`（record/list/cursor/summary/dashboard_aggregate + 路由热路径落库）、`tests/test_dashboard.py`（聚合形状/period 校验/空数据）。
 
 **验证**：三文件 39 passed；全量 `uv run pytest tests/ -q --timeout=30` → **1788 passed, 1 skipped**（基线 1720 + 68 新增，含并行 agent 的 settings/system/model 测试）。已清理 pytest 误生成的 `MagicMock/` 目录。
+
+---
+
+## 2026-08-06 模型收敛：web chat 15→4 + build 自创名删除
+
+**用户批准的破坏性变更**（决策记录见 `docs/model-mapping.md` §1/§7）。对齐 Go 上游 catalog 规范名，旧名**直接删除不留别名**（无兼容层）。
+
+### 映射表（legacy → canonical，应用于全部调用点）
+
+| 删除的旧名 | → 规范名 | ModeId | Tier | 附加 flag |
+|---|---|---|---|---|
+| `grok-4.20-0309-non-reasoning` / `-non-reasoning-super` / `-non-reasoning-heavy` / `grok-4.20-fast` / `grok-4.3-fast` | `grok-chat-fast` | FAST | BASIC | prefer_best=True |
+| `grok-4.20-0309` / `-super` / `-heavy` / `grok-4.20-auto` | `grok-chat-auto` | AUTO | SUPER | prefer_best=True |
+| `grok-4.20-0309-reasoning` / `-reasoning-super` / `-reasoning-heavy` / `grok-4.20-expert` | `grok-chat-expert` | EXPERT | SUPER | supports_reasoning=True, prefer_best=True |
+| `grok-4.20-heavy` / `grok-4.20-multi-agent-0309` | `grok-chat-heavy` | HEAVY | HEAVY | supports_reasoning=True, prefer_best=True |
+| `grok-4.5-latest` / `grok-build-latest` | **删除**（build 模型由远程发现，静态锚点保留 grok-4.5 / grok-4.5-mini / grok-4.5-build-free） | — | — | — |
+
+- web multi-agent（`grok-4.20-multi-agent-0309`）删除原因：web 侧无 agent 数开关（console 才有 effort→agent 数），与 `grok-chat-heavy` wire 等价（modeId=heavy），上游自决。
+- **协议层 wire 名不动**：`app/dataplane/reverse/protocol/xai_console_chat.py`（CONSOLE_MODELS 值、_MODELS_WITH_REASONING_FIELD、_MODEL_FIXED_EFFORT、_MODEL_MAX_OUTPUT_TOKENS、_MODELS_WITH_SEARCH_TOOLS）、`xai_build.py` `_XHIGH_SUPPORTED_MODELS`、`xai_chat.py` 等 wire 常量保留原字符串。
+
+### 涉及文件
+
+| 文件 | 改动 |
+|---|---|
+| `app/control/model/registry.py` | Chat 段 14 个旧 spec → 4 个 `grok-chat-*`；Build 段删除 `grok-4.5-latest` / `grok-build-latest` |
+| `app/products/openai/router.py` | `_CODEX_REASONING_MODELS` 6 旧名 → `grok-chat-expert`/`grok-chat-heavy`（console 名保留）；`_CODEX_CONTEXT_WINDOWS` 增 `"grok-chat": 131_072` |
+| `app/statics/js/webui/chat.js` | `PREFERRED_MODEL` → `grok-chat-fast` |
+| `README.md` / `docs/README.en.md` | 模型表收敛为 4 行 + 账号配置/curl 示例更新 |
+| `tests/`（11 文件） | 断言按映射更新；协议 wire 名断言不动 |
+
+**验证**：全量 `uv run pytest tests/ -q --timeout=30` 通过；已清理 pytest 误生成的 `MagicMock/` 目录。

@@ -201,14 +201,12 @@ Runtime config can also be overridden via `GROK_`-prefixed env vars, e.g. `GROK_
 
 | Model | mode | tier |
 |:---|:---|:---|
-| `grok-4.20-0309-non-reasoning` | `fast` | `basic` |
-| `grok-4.20-0309` | `auto` | `super` |
-| `grok-4.20-0309-reasoning` | `expert` | `super` |
-| `grok-4.20-fast` | `fast` | `basic` |
-| `grok-4.20-auto` | `auto` | `super` |
-| `grok-4.20-expert` | `expert` | `super` |
-| `grok-4.20-heavy` | `heavy` | `heavy` |
-| `grok-4.20-multi-agent-0309` | `heavy` | `heavy` |
+| `grok-chat-fast` | `fast` | `basic` |
+| `grok-chat-auto` | `auto` | `super` |
+| `grok-chat-expert` | `expert` | `super` |
+| `grok-chat-heavy` | `heavy` | `heavy` |
+
+> 2026-08-06: web chat models converged to 4 canonical `grok-chat-*` names (aligned with the Go upstream catalog); legacy versioned names (15 total) were deleted with no aliases. Requests only send modeId; the upstream picks the actual model by mode.
 
 ### Chat (free — console.x.ai)
 

@@ -94,13 +94,13 @@ class TestClientKeyService:
                 name="renamed",
                 enabled=False,
                 rpm_limit=20,
-                allowed_model_ids=["grok-4.20-auto"],
+                allowed_model_ids=["grok-chat-auto"],
             )
         )
         assert key.name == "renamed"
         assert key.enabled is False
         assert key.rpm_limit == 20
-        assert key.allowed_model_ids == ["grok-4.20-auto"]
+        assert key.allowed_model_ids == ["grok-chat-auto"]
 
     def test_update_clear_expires_at(self, ck_repo):
         svc = ClientKeyService(ck_repo)
@@ -371,7 +371,7 @@ class TestAdminEndpoints:
                 "name": "scoped",
                 "providerScope": ["grok_build", "grok_web"],
                 "tierScope": ["free"],
-                "allowedModelIds": ["grok-4.20-fast"],
+                "allowedModelIds": ["grok-chat-fast"],
             },
             headers=headers,
         )
@@ -379,7 +379,7 @@ class TestAdminEndpoints:
         key = resp.json()["key"]
         assert key["providerScope"] == ["grok_build", "grok_web"]
         assert key["tierScope"] == ["free"]
-        assert key["allowedModelIds"] == ["grok-4.20-fast"]
+        assert key["allowedModelIds"] == ["grok-chat-fast"]
 
     def test_invalid_scopes_400(self, admin_client):
         headers = self._auth()

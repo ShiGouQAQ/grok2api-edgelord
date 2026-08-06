@@ -317,20 +317,12 @@ basic 表示 free 账号，super 和 heavy 为付费。
 
 | 模型名 | mode | 账号等级 | 备注 |
 | :-- | :-- | :-- | :-- |
-| `grok-4.20-fast` / `grok-4.3-fast` | fast | basic（优先高等级） |
-| `grok-4.20-auto` | auto | super |
-| `grok-4.20-expert` | expert | super |
-| `grok-4.20-heavy` | heavy | heavy |
-| `grok-4.20-multi-agent-0309` | heavy | heavy |
-| `grok-4.20-0309-non-reasoning` | fast | basic |
-| `grok-4.20-0309` | auto | super |
-| `grok-4.20-0309-reasoning` | expert | super |
-| `grok-4.20-0309-non-reasoning-super` | fast | super |
-| `grok-4.20-0309-super` | auto | super |
-| `grok-4.20-0309-reasoning-super` | expert | super |
-| `grok-4.20-0309-non-reasoning-heavy` | fast | heavy |
-| `grok-4.20-0309-heavy` | auto | heavy |
-| `grok-4.20-0309-reasoning-heavy` | expert | heavy |
+| `grok-chat-fast` | fast | basic（优先高等级） |
+| `grok-chat-auto` | auto | super |
+| `grok-chat-expert` | expert | super（支持推理） |
+| `grok-chat-heavy` | heavy | heavy（支持推理，含 multi-agent 能力） |
+
+> 2026-08-06 收敛：web chat 模型统一为 4 个 `grok-chat-*` 规范名（对齐 Go 上游 catalog），旧版本名（grok-4.20-0309-* 系列等 15 个）已删除、不留别名。请求只发 modeId，上游按模式自选实际模型。
 
 ### Chat（console.x.ai）
 
@@ -378,7 +370,7 @@ basic 表示 free 账号，super 和 heavy 为付费。
 
 | 类型 | 等级 | 适用模型 |
 | :-- | :-- | :-- |
-| 付费账号（x.ai 官方） | super / heavy | `grok-4.20-*`、`grok-4.3-fast` |
+| 付费账号（x.ai 官方） | super / heavy | `grok-chat-auto` / `grok-chat-expert` / `grok-chat-heavy` |
 | 免费账号（console.x.ai SSO） | basic | 所有 `*-console` / `*-low` / `*-medium` / `*-high` / `*-xhigh` |
 
 **免费账号获取方式：**
@@ -461,7 +453,7 @@ basic 表示 free 账号，super 和 heavy 为付费。
 curl http://localhost:8000/v1/chat/completions \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"grok-4.20-auto","stream":true,"messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"grok-chat-auto","stream":true,"messages":[{"role":"user","content":"你好"}]}'
 
 # 免费账号对话
 curl http://localhost:8000/v1/chat/completions \

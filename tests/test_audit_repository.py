@@ -23,7 +23,7 @@ def _record(
     *,
     status_code=200,
     total=30,
-    model="grok-4.20-auto",
+    model="grok-chat-auto",
     created_at=None,
 ):
     rec = AuditRecord(
@@ -62,7 +62,7 @@ class TestAuditRepository:
         got = asyncio.run(audit_repo.get(rec_id))
         assert got is not None
         assert got.request_id == "r1"
-        assert got.model == "grok-4.20-auto"
+        assert got.model == "grok-chat-auto"
         assert got.status_code == 200
         assert got.total_tokens == 30
         assert len(got.attempts) == 1
@@ -123,10 +123,10 @@ class TestAuditRepository:
             asyncio.run(audit_repo.summary(period="1y"))
 
     def test_dashboard_aggregate(self, audit_repo):
-        asyncio.run(audit_repo.record(_record("d1", total=30, model="grok-4.20-auto")))
+        asyncio.run(audit_repo.record(_record("d1", total=30, model="grok-chat-auto")))
         asyncio.run(
             audit_repo.record(
-                _record("d2", total=70, model="grok-4.3-fast", status_code=500)
+                _record("d2", total=70, model="grok-chat-fast", status_code=500)
             )
         )
         agg = asyncio.run(audit_repo.dashboard_aggregate("24h"))
@@ -136,8 +136,8 @@ class TestAuditRepository:
         assert len(agg["series"]) == 1
         assert agg["series"][0]["requests"] == 2
         assert [m["model"] for m in agg["topModels"]] == [
-            "grok-4.20-auto",
-            "grok-4.3-fast",
+            "grok-chat-auto",
+            "grok-chat-fast",
         ]
         assert agg["topModels"][0]["requests"] == 1
 
@@ -175,7 +175,7 @@ class TestRouterRecording:
             resp = client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "grok-4.20-fast",
+                    "model": "grok-chat-fast",
                     "messages": [{"role": "user", "content": "hi"}],
                     "stream": False,
                 },
@@ -191,7 +191,7 @@ class TestRouterRecording:
             time.sleep(0.02)
         assert total == 1
         record = items[0]
-        assert record.model == "grok-4.20-fast"
+        assert record.model == "grok-chat-fast"
         assert record.operation == "chat"
         assert record.input_tokens == 5
         assert record.output_tokens == 9
@@ -213,7 +213,7 @@ class TestRouterRecording:
             resp = client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "grok-4.20-fast",
+                    "model": "grok-chat-fast",
                     "messages": [{"role": "user", "content": "hi"}],
                     "stream": False,
                 },

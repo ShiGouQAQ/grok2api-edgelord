@@ -103,10 +103,10 @@ class TestSpecPoolCandidates:
         assert spec.mode_id == CtrlModeId.BUILD
         assert spec.pool_candidates() == (3,)
 
-    def test_build_latest_targets_only_build_pool(self):
+    def test_build_mini_targets_only_build_pool(self):
         from app.control.model.registry import resolve
 
-        assert resolve("grok-build-latest").pool_candidates() == (3,)
+        assert resolve("grok-4.5-mini").pool_candidates() == (3,)
 
     def test_console_model_unaffected(self):
         from app.control.model.registry import resolve

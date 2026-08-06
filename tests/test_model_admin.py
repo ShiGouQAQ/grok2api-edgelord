@@ -139,8 +139,8 @@ def test_model_accounts_counts_by_tier(client):
     by_name = {i["public_id"]: i for i in items}
     # grok-4.3-console is BASIC tier → 2 basic accounts
     assert by_name["grok-4.3-console"]["supported_accounts"] == 2
-    # grok-4.20-auto is SUPER tier → 1 super account
-    assert by_name["grok-4.20-auto"]["supported_accounts"] == 1
+    # grok-chat-auto is SUPER tier → 1 super account
+    assert by_name["grok-chat-auto"]["supported_accounts"] == 1
 
 
 def test_model_accounts_build_remote(client):
@@ -168,7 +168,7 @@ def test_model_accounts_build_remote(client):
 
 
 def test_toggle_model_persists_override(client):
-    target = "grok-4.20-fast"
+    target = "grok-chat-fast"
     assert registry.is_enabled(target)
 
     resp = _admin(
@@ -194,7 +194,7 @@ def test_toggle_model_persists_override(client):
 
 
 def test_patch_model_tier_and_revert(client):
-    target = "grok-4.20-fast"
+    target = "grok-chat-fast"
     resp = _admin(
         client, "patch", f"/admin/api/models/{target}", json={"tier": "heavy"}
     )
@@ -221,7 +221,7 @@ def test_toggle_unknown_model_404(client):
 
 
 def test_batch_update(client):
-    targets = ["grok-4.20-fast", "grok-4.3-fast"]
+    targets = ["grok-chat-fast", "grok-chat-auto"]
     resp = _admin(
         client,
         "patch",
@@ -281,7 +281,7 @@ def test_sync_build_rediscovery(client):
 def test_delete_models_501(client):
     resp = _admin(client, "delete", "/admin/api/models")
     assert resp.status_code == 501
-    resp = _admin(client, "delete", "/admin/api/models/grok-4.20-fast")
+    resp = _admin(client, "delete", "/admin/api/models/grok-chat-fast")
     assert resp.status_code == 501
 
 
@@ -306,7 +306,7 @@ def test_public_v1_models_hides_disabled(client):
         ]
     )
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    target = "grok-4.20-fast"
+    target = "grok-chat-fast"
     before = {m["id"] for m in client.get("/v1/models", headers=headers).json()["data"]}
     assert target in before
 
@@ -319,7 +319,7 @@ def test_public_v1_models_hides_disabled(client):
 
 
 def test_chat_validation_rejects_disabled(client):
-    target = "grok-4.20-fast"
+    target = "grok-chat-fast"
     _admin(
         client, "post", "/admin/api/models", json={"model": target, "enabled": False}
     )

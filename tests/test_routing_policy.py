@@ -161,7 +161,7 @@ class TestStoredResponsesSingleAttempt:
         spec = SimpleNamespace(
             mode_id=2,
             pool_candidates=lambda: ["super"],
-            model_name="grok-4.20-auto",
+            model_name="grok-chat-auto",
             is_chat=lambda: True,
             is_console_chat=lambda: False,
             is_build=lambda: False,
@@ -204,7 +204,7 @@ class TestStoredResponsesSingleAttempt:
 
         with pytest.raises(UpstreamError):
             await resp_mod.create(
-                model="grok-4.20-auto",
+                model="grok-chat-auto",
                 input_val="hello",
                 instructions=None,
                 stream=False,
@@ -231,7 +231,7 @@ class TestStoredResponsesSingleAttempt:
         spec = SimpleNamespace(
             mode_id=2,
             pool_candidates=lambda: ["super"],
-            model_name="grok-4.20-auto",
+            model_name="grok-chat-auto",
             is_chat=lambda: True,
             is_console_chat=lambda: False,
             is_build=lambda: False,
@@ -275,7 +275,7 @@ class TestStoredResponsesSingleAttempt:
 
         with pytest.raises(UpstreamError):
             await resp_mod.create(
-                model="grok-4.20-auto",
+                model="grok-chat-auto",
                 input_val="hello",
                 instructions=None,
                 stream=False,

@@ -19,13 +19,13 @@ def audit_repo(tmp_path):
     return repo
 
 
-def _seed(audit_repo, *, count=4, tokens=40, model="grok-4.20-auto", status=200):
+def _seed(audit_repo, *, count=4, tokens=40, model="grok-chat-auto", status=200):
     for i in range(count):
         asyncio.run(
             audit_repo.record(
                 AuditRecord(
                     request_id=f"d{i}",
-                    model=model if i % 2 == 0 else "grok-4.3-fast",
+                    model=model if i % 2 == 0 else "grok-chat-fast",
                     provider="grok_web",
                     operation="chat",
                     status_code=status,
@@ -82,7 +82,7 @@ class TestDashboard:
         assert body["series"][0]["requests"] == 4
         assert body["series"][0]["tokens"] == 160
         assert len(body["topModels"]) == 2
-        assert body["topModels"][0]["model"] == "grok-4.20-auto"
+        assert body["topModels"][0]["model"] == "grok-chat-auto"
         providers = {p["provider"]: p for p in body["providers"]}
         assert providers["grok_web"]["accounts"] == 2
         assert providers["grok_web"]["available"] == 2

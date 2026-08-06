@@ -8,18 +8,6 @@ def test_grok45_model_registered():
     assert spec.is_build()
 
 
-def test_grok45_latest_registered():
-    spec = get("grok-4.5-latest")
-    assert spec is not None
-    assert spec.is_build()
-
-
-def test_grok_build_latest_registered():
-    spec = get("grok-build-latest")
-    assert spec is not None
-    assert spec.is_build()
-
-
 def test_build_model_tier_super():
     spec = get("grok-4.5")
     assert spec is not None
@@ -39,7 +27,7 @@ def test_build_model_mode_id():
 
 
 def test_build_models_enabled():
-    for name in ("grok-4.5", "grok-4.5-latest", "grok-build-latest"):
+    for name in ("grok-4.5", "grok-4.5-mini", "grok-4.5-build-free"):
         spec = get(name)
         assert spec is not None, f"{name} not registered"
         assert spec.enabled, f"{name} not enabled"
