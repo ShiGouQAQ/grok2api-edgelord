@@ -113,7 +113,14 @@ async def test_router_forwards_previous_response_id(monkeypatch):
     req = ResponsesCreateRequest(
         model="grok-4.20-auto", input="hi", previous_response_id="resp_abc"
     )
-    await router_module.responses_endpoint(req)
+    from types import SimpleNamespace
+
+    fake_request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(audit_repo=None)),
+        state=SimpleNamespace(),
+        url=SimpleNamespace(path="/v1/responses"),
+    )
+    await router_module.responses_endpoint(req, request=fake_request)
 
     assert captured["previous_response_id"] == "resp_abc"
 
@@ -124,7 +131,9 @@ async def test_router_forwards_previous_response_id(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_console_create_single_attempt_when_previous_id(monkeypatch, _fake_account_dir):
+async def test_console_create_single_attempt_when_previous_id(
+    monkeypatch, _fake_account_dir
+):
     calls = _install_policy_spies(monkeypatch, cr)
 
     await cr.create(
@@ -149,7 +158,9 @@ async def test_console_create_single_attempt_when_previous_id(monkeypatch, _fake
 
 
 @pytest.mark.asyncio
-async def test_console_create_default_policy_without_previous_id(monkeypatch, _fake_account_dir):
+async def test_console_create_default_policy_without_previous_id(
+    monkeypatch, _fake_account_dir
+):
     calls = _install_policy_spies(monkeypatch, cr)
     monkeypatch.setattr(cr, "selection_max_retries", lambda: 5)
 
@@ -170,7 +181,9 @@ async def test_console_create_default_policy_without_previous_id(monkeypatch, _f
 
 
 @pytest.mark.asyncio
-async def test_build_create_single_attempt_when_previous_id(monkeypatch, _fake_account_dir):
+async def test_build_create_single_attempt_when_previous_id(
+    monkeypatch, _fake_account_dir
+):
     calls = _install_policy_spies(monkeypatch, br)
 
     await br.create(
@@ -200,7 +213,9 @@ async def test_build_create_single_attempt_when_previous_id(monkeypatch, _fake_a
 
 
 @pytest.mark.asyncio
-async def test_build_create_forwards_previous_id_to_payload(monkeypatch, _fake_account_dir):
+async def test_build_create_forwards_previous_id_to_payload(
+    monkeypatch, _fake_account_dir
+):
     captured: dict[str, Any] = {}
 
     def fake_payload(**kwargs):

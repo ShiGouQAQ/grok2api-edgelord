@@ -19,6 +19,8 @@
 
 | 日期 | 提交 Hash | 提交描述 | 状态 | Python 版本/提交 | 备注 |
 |------|-----------|----------|------|-------------------|------|
+| 2026-08-06 | clientkey/audit/dashboard handler（Go 上游 `a16837c9` 之后的 admin API 域） | feat: 移植 3 个 admin API 域：client-keys / request-audits / dashboard | ✅ 已移植 | current (未提交) | 见下方「三域移植：client-keys / request-audits / dashboard」小节 |
+| 2026-08-06 | `settings-handler`+`system-handler`（Go 上游 `a16837c9` 之后的 settings/system API） | feat: 结构化 settings API + system/health 端点移植 | ✅ 已移植 | current (未提交) | `app/products/web/admin/settings.py` — GET/PUT `/admin/api/settings`，Go `settingsResponse` 形状 ↔ config.toml 双向投影（revision=sha256(backend overrides JSON)，409 乐观并发，未知字段 422 fail-closed，计算字段 tokenAuthConfigured/statsigManualConfigured 忽略）；无 Python 运行时的 Go 字段存惰性 `[settings]` 段保证 GET→PUT 往返。`app/products/web/admin/system.py` — GET `/system`、GET `/system/version`（pyproject 版本 + data/version_check.json 缓存）、POST `/system/update/check`（stub，updateAvailable=false，TODO 指向现有 `platform/update_check.py`）。`app/main.py` — GET `/healthz`、GET `/readyz`（分层 components）。测试 tests/test_settings_api.py + tests/test_system_health.py（14 个）|
 | 2026-07-15 | `c450dee`（本地移植提交，非 Go 上游） | feat(errors): Go→Python 结构化错误分类移植 | ✅ 已移植 | `c450dee` | Go `failure.go` → Python `errors.py` UpstreamError |
 | 2026-07-15 | `0fe097e`（本地移植提交，非 Go 上游） | test: add coverage for structured UpstreamError classification | ✅ 已移植 | `0fe097e` | 425 tests ported from Go `failure_test.go` patterns |
 | 2026-07-15 | `e376c22` | fix: prevent json_schema's own type field from overwriting response_format type | ✅ 已移植 | current | Ported `normalize_response_format()` to `chat.py` with type-skip fix; added `response_format` to `ChatCompletionRequest` schema |
@@ -174,11 +176,11 @@
 | 19 | `539a6ae` | 全协议 | 🟡 中 | ✅ 已移植 | `extract_soft_session()` 支持 `instructions`/`system` 顶层字段; `merge_usage()` 非零覆盖语义; prompt_cache.py v3 |
 | 20 | `4d48031` | 账号/Token | 🟡 中 | ⏭️ 跳过 | Python 已通过 `68bd35e` 移植 Anthropic cache token accounting; `credential_decrypt_failed` 恢复逻辑在 Python 中不适用（Python 无加密凭证，SSO cookie 直接失效走 EXPIRED） |
 | 21 | `e2fe5f2` | FlareSolverr | 🟡 中 | ⏭️ 跳过 | Go 的 egress manager `userAgent` 参数传递 + whitespace 修复；Python `FlareSolverrClearanceProvider._solve()` 已直接使用 profile user_agent，无需额外参数 |
-| 22 | `09d6f72` | Settings | 🟡 中 | ⏭️ 跳过 | Go 有独立 settings service（`application/settings/service.go`），Python 用 `config.toml` + `get_config()`，概念不同 |
-| 23 | `e89c0de` | Settings | 🟡 中 | ⏭️ 跳过 | 同上，Go settings service 的 runtime concurrency 回填逻辑不适用于 Python config.toml 架构 |
+| 22 | `09d6f72` | Settings | 🟡 中 | ✅ 已移植 (2026-08-06) | 结构化 settings API 已移植：`app/products/web/admin/settings.py` — GET/PUT /admin/api/settings，Go settingsResponse 形状 ↔ config.toml 投影层（revision sha256 + 409 乐观并发）；Python 存储仍是 config.toml，未引入 Go 的独立 settings service 架构 |
+| 23 | `e89c0de` | Settings | 🟡 中 | ⏭️ 跳过（runtime concurrency 回填部分） | 同上 09d6f72；runtime concurrency 回填逻辑仍不适用于 Python（无 Go 的 concurrency gate 运行时追踪，server.maxConcurrentRequests 作为 `[settings]` 惰性键存储） |
 | 24 | `502211e` | Console | 🟡 中 | ⏭️ 跳过 | Go 新增 `teamModelRateLimit` map 追踪 Team 级别限流（需 gateway service 架构），Python Console 429 走本地配额扣减（`record_failure_async()`），架构不同 |
 | 25 | `d6cc305` | 账号 | 🟡 中 | ⏭️ 跳过 | Go OAuth refresh token 退役逻辑（`resolvePermanentRefreshFailure()`），Python 不使用 OAuth tokens，用 SSO cookie 直接访问 |
-| 26 | `b34cb0f` | Settings | 🟡 中 | ⏭️ 跳过 | Go settings service 的 legacy concurrency 保留，Python 无 settings service |
+| 26 | `b34cb0f` | Settings | 🟡 中 | ✅ 已移植 (2026-08-06) | 同 09d6f72；routing.maxAttempts 已映射到 Python `routing.max_routing_attempts`（键缺失时保留 legacy 预算语义，None → 不写键） |
 | 27 | `5700827` | 账号 | 🟡 中 | ✅ 已移植 | 2026-08-04: AuthStatusReauthRequired 核心 — SSO 失效标 reauthRequired（保留账号仅提示重认证，而非 EXPIRED 移除）；access token 仍有效时不标 reauthRequired |
 | 28 | `4c918c8` | Egress | 🟡 中 | ⏭️ 跳过 | Python 无逐节点 enabled/disabled 状态跟踪 |
 | 29 | `80a0bc0` | Build | 🟡 中 | ⏭️ 跳过 | Python 路由架构不同，无 Go `selector`/`forwardResponse` billing 概念；Build 账号通过 console pool (mode_id=5) 统一调度 |
@@ -814,3 +816,71 @@ Go `QuotaMode()`：chat 模型 → "console"，Image/ImageEdit → "console_imag
 - 根因：Python registry `grok-4.3-beta` → ModeId.GROK_4_3 → modeId "grok-420-computer-use-sa"。Go web catalog（web/catalog.go:18-25）**只有 4 个 chat 模式（fast/auto/expert/heavy）+ 3 media**，grok-420-computer-use-sa 在 Go 重写（a16837c9）时已移除；生产实测 grok.com 返回 403 `{"code":7,"message":"Model is not found"}`（code 7 被 Go webResponseError 映射 errWebAntiBot 是干扰项，真实语义是模型不存在）。
 - 处理（用户决策：从 registry 移除 + 检查类似情况）：删除 `app/control/model/registry.py` grok-4.3-beta 模型注册 + 注释块；README.md（模型表 + 付费账号行）+ docs/README.en.md 同步删除。**保留** ModeId.GROK_4_3 枚举 + quota_grok_4_3 存储列 + xai_usage _MODE_NAMES[4]（枚举数字位移会破坏 CONSOLE=5/BUILD=6 持久化兼容，mode 4 槽位留空即可）。
 - 检查结果：registry 其余模型全部对应用效 Go 模式（web 8 模式全齐、console 6+3 media 对齐、build 动态、multi-agent 2M max_tokens 与 jiujiu532 L1 一致保留）。
+
+---
+
+## 2026-08-06 模型目录 Admin API 移植（transport/http/model/handler.go 表层）
+
+> 上游对照：Go `backend/internal/transport/http/model/handler.go`（9 路由：GET /models、/models/groups、/models/accounts、POST /models、/models/sync、PATCH /models/batch、DELETE /models、PATCH/DELETE /models/:id）+ `domain/model/` + `infra/persistence/relational/model_repository.go`。
+
+**移植决策（重要）**：Go 为完整 DB-backed 目录（model 表 + 账号绑定 + 远程同步），Python 数据源是**静态代码注册表**（`app/control/model/registry.py` MODELS）。本批只移植 **API 表面**，用 JSON override 文件模拟可写状态，**不建 DB 目录**（物理删除语义无法在静态注册表上实现 → 501 stub）。
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `app/products/web/admin/models.py`（新） | ✅ 已移植 | `/admin/api/models` 8 端点：list（分页+provider/status/tier/search 过滤）、groups（provider×capability 分组计数）、accounts（build=远程发现，其余=按 tier 统计活跃账号）、POST toggle（写 override 文件）、sync（build 清 TTL 缓存后重新远程发现，其余 no-op）、PATCH batch、PATCH `/{id}`（enabled/tier，`null` 回退静态默认）、DELETE（×2）→ **501 stub** |
+| `app/control/model/overrides.py`（新） | ✅ 已移植 | `data/model_overrides.json`：`{model_name: {enabled: bool, tier: str}}` 增量覆盖；mtime 单条目缓存，读盘零成本；静态注册表仍是默认值权威 |
+| `app/control/model/registry.py` | ✅ 已移植 | 新增 `is_enabled()`（静态 flag + override，override 优先）+ `list_models_with_overrides()`（admin 目录视图）；**未改动** `list_enabled`/`resolve`/`_BY_NAME` 等内部路由表语义 |
+| `app/products/openai/router.py` | ✅ 已移植 | 两处一行改动：`_model_available_for_pools` 与 `_validate_chat` 改用 `is_enabled()` → 公开 `/v1/models` 隐藏 admin 禁用模型、chat 校验返回 `model_not_found` |
+| `tests/test_model_admin.py`（新） | ✅ 已移植 | 15 用例：list/groups/accounts（tier 计数+build 远程 mock）/sync（build 重发现+非 build no-op）/toggle 持久化/批量/PATCH tier+null 回退/404/501 stubs/`/v1/models` 隐藏/chat 校验拒绝 |
+
+**override 合并语义**：`list_models_with_overrides()` 以静态 `MODELS` 为底，`overrides.load()` 增量只覆盖 `enabled`（tier 仅在 admin 序列化层展示，**不进入** chat 路由池选择——路由表保持静态，见 CLAUDE.md 红线）。PATCH 传 `null` 删除该字段；delta 清空后整条从 override 文件移除。
+
+**已知缺口（后续移植方向）**：① DELETE → 501（需 `model_repository.go` 完整 DB 目录迁移）；② tier override 仅展示不生效于路由；③ `bindingMode`/`accountIds`/`lastSyncedAt` 等 Go modelResponse 字段以常量/空值占位（Python 无账号-模型绑定关系）。
+
+**验证**：`uv run pytest tests/test_model_admin.py -q --timeout=30` → **15 passed**；全量 `uv run pytest tests/ -q --timeout=30` → **1749 passed / 1 skipped**（基线 1720 + 本批 15 + 并行 agent 审计功能 14）。
+
+---
+
+## 三域移植：client-keys / request-audits / dashboard（2026-08-06）
+
+上游对照：Go `backend/internal/transport/http/{clientkey,audit,dashboard}/handler.go` + `domain/{clientkey,audit,dashboard}` + `application/{clientkey,audit,dashboard}/service.go`。
+
+### 1. Client Keys（PRIORITY 1）
+
+| 文件 | 说明 |
+|------|------|
+| `app/control/clientkey/model.py`（新） | `ClientKey` dataclass；`DEFAULT_RPM_LIMIT=120`/`DEFAULT_MAX_CONCURRENT=8`（Go 同值），`0`=unlimited；时间戳用 epoch ms（Go 用 time.Time，DTO 层转 ISO） |
+| `app/control/clientkey/repository.py`（新） | SQLite WAL（仿 `account/backends/local.py`），`data/client_keys.db`；CRUD + `get_by_prefix`（认证用）+ `touch_usage`（last_used_at + billed_usage 累加）+ `count`（dashboard 资源数）；secret 明文存储（与账号 token 同姿态，Go 存 EncryptedSecret，Python 无加密层） |
+| `app/control/clientkey/service.py`（新） | 密钥生成 `grok2api_` + 32hex（41 字符，prefix = 前 17 字符）；校验（name/expiresAt/rpmLimit≤100000/maxConcurrent≤1024）；`resolve_scopes()` = Go `parseRequestedScopes`（accountPool 遗留映射 + providerScope/tierScope 组合校验）；异常映射 Go `clientkey.Err*` → `InvalidInputError/NotFoundError/ConflictError` |
+| `app/products/web/admin/client_keys.py`（新） | 7 端点镜像 Go：GET/POST `/client-keys`、GET `/:id/secret`（no-store）、PATCH/DELETE `/:id`、PATCH `/client-keys/batch`、DELETE `/client-keys`。**路由顺序坑**：batch 路由必须注册在 `{key_id}` 之前（FastAPI 按注册序匹配，`{key_id}` 会吞掉字面量 `batch`；gin 静态路由优先无此问题） |
+| `app/platform/auth/middleware.py`（改） | `verify_api_key` 扩展：①`app.api_key` 匹配原逻辑；②`grok2api_` 形状 token 严格走 client key 认证（enabled/expiresAt + rpmLimit 滑动窗口 60s + maxConcurrent 并发槽，generator dependency yield 释放）；**key 形状 token 即使 open mode 也强制校验**（伪造/禁用/过期 key 一律 403，防 shadowing）；③无 api_key 时保留 open mode。`request.state.client_key_id/name` 供审计。**ponytail**：限流为进程内内存计数，默认单 worker Granian 精确；多 worker 需共享存储 |
+
+### 2. Request Audits（PRIORITY 2）
+
+| 文件 | 说明 |
+|------|------|
+| `app/platform/audit/model.py`（新） | `AuditRecord`/`AuditAttempt` dataclass；Go 全字段裁剪为 Python 热路径可得的子集（无 media/pricing/billing 字段——成本核算移植是 TODO） |
+| `app/platform/audit/repository.py`（新） | SQLite 追加写 `data/audits.db`，主表 + attempts 子表（CASCADE）；`record()`（**立即插入**，单条 sub-ms，缓冲 flush 无收益）、`list_records`（page 模式）、`list_cursor`（id keyset 游标，空 cursor=MAX_ID）、`summary`（窗口聚合）、`dashboard_aggregate`（桶聚合）；period 支持 24h/7d/30d/90d |
+| `app/products/openai/router.py`（改） | `_AuditSink` + `_audit_wrap_stream`：5 个推理端点（chat/completions 含 image/video 分发、responses、images/generations、images/edits、videos）成功/失败/流式收尾均后台 fire-and-forget 落库（失败绝不影响响应）；非流式从 usage 取 token，流式 token=0（ponytail 上限）；provider 由 spec 派生（console/build/web）。**API 形状差异**：`responses_endpoint` 等新增 `request: Request` 参数，`tests/test_responses_previous_id.py` 直调签名处补最小 fake request |
+| `app/products/web/admin/audits.py`（新） | GET `/request-audits`（`pagination=cursor|page` 双模式 + search/model/status/key/account 过滤）、GET `/request-audits/summary`、GET `/request-audits/{id}`（含 attempts）；id 以字符串序列化（Go `id,string`） |
+
+### 3. Dashboard（PRIORITY 3）
+
+| 文件 | 说明 |
+|------|------|
+| `app/products/web/admin/dashboard.py`（新） | GET `/dashboard?period&timezone&refresh`（refresh=1 无操作——Python 实时聚合无短缓存）；audit 桶聚合（24h=24 小时桶、7d/30d=日桶、90d=13 周桶，对齐 Go `parsePeriod`）+ account directory `runtime_snapshot` 按 provider 统计 accounts/available；`totalCostUsd = estimated_cost_in_usd_ticks / 1e6` |
+
+### 语义决策（Go→Python）
+
+- **id 类型**：Go `uint64` 模型路由 id/账号 id → Python 一律用模型名/字符串；client key id 保持 int 但 API 序列化为 string（`id,string`）
+- **secret 存储**：Go EncryptedSecret → Python 明文（对齐账号 token 明文姿态）；前缀索引 `grok2api_` + 8hex
+- **audit 细节**：Go attempts 带账号/上游诊断 → Python 只记 gateway 级一条 attempt（账号/上游 URL 富化需从 chat.py 打洞，TODO）
+- **成本**：`costInUsdTicks`/`estimatedCostInUsdTicks` 恒 0（Go `domain/audit/pricing.go` 官方价目表移植为 TODO）；billing 组件不输出
+- **路由顺序**：FastAPI 注册序匹配 ≠ gin 静态优先，batch 路由前置（见上）
+- **open mode 语义**：无 api_key 时保留"不鉴权"；但 `grok2api_` 形状 token 例外强制校验
+
+### 测试（新增 39 个）
+
+`tests/test_client_keys.py`（CRUD/scope/admin 端点/认证集成/rpm 429/maxConcurrent 429）、`tests/test_audit_repository.py`（record/list/cursor/summary/dashboard_aggregate + 路由热路径落库）、`tests/test_dashboard.py`（聚合形状/period 校验/空数据）。
+
+**验证**：三文件 39 passed；全量 `uv run pytest tests/ -q --timeout=30` → **1788 passed, 1 skipped**（基线 1720 + 68 新增，含并行 agent 的 settings/system/model 测试）。已清理 pytest 误生成的 `MagicMock/` 目录。

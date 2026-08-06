@@ -154,6 +154,20 @@ async def lifespan(app: FastAPI):
     app.state.repository = repo
     app.state.directory = directory
 
+    # 2b. Client key store + audit store (SQLite, per-worker local files).
+    from app.control.clientkey.repository import ClientKeyRepository
+    from app.control.clientkey.service import ClientKeyService
+    from app.platform.audit.repository import AuditRepository
+
+    client_keys = ClientKeyRepository(data_path("client_keys.db"))
+    await client_keys.initialize()
+    app.state.client_keys = client_keys
+    app.state.client_key_service = ClientKeyService(client_keys)
+
+    audit_repo = AuditRepository(data_path("audits.db"))
+    await audit_repo.initialize()
+    app.state.audit_repo = audit_repo
+
     # 3. Account directory sync loop — all workers, lightweight incremental pull.
     #    Keeps each worker's in-memory table eventually consistent with the repo.
     #
@@ -568,6 +582,34 @@ def create_app() -> FastAPI:
     @app.get("/health", include_in_schema=False)
     def health():
         return {"status": "ok"}
+
+    @app.get("/healthz", include_in_schema=False)
+    def healthz():
+        return {"status": "ok"}
+
+    @app.get("/readyz", include_in_schema=False)
+    async def readyz(request: Request):
+        # Go→Python port of server.go readyz: layered readiness snapshot.
+        components: dict[str, str] = {}
+        try:
+            await _config.ensure_loaded()
+            components["config"] = "ok"
+        except Exception:
+            components["config"] = "error"
+        repo = getattr(request.app.state, "repository", None)
+        components["database"] = "ok" if repo is not None else "error"
+        from app.dataplane.account import _directory
+
+        components["account_directory"] = "ok" if _directory is not None else "error"
+        ready = all(value == "ok" for value in components.values())
+        return JSONResponse(
+            {
+                "ready": ready,
+                "state": "ready" if ready else "not_ready",
+                "components": components,
+            },
+            status_code=200 if ready else 503,
+        )
 
     return app
 

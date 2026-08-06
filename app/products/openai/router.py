@@ -1,10 +1,13 @@
 """OpenAI-compatible API router (/v1/*)."""
 
+import asyncio
 import base64
 import binascii
 import hashlib
 import mimetypes
-from typing import Annotated, AsyncGenerator, AsyncIterable, Literal
+import time
+import uuid
+from typing import Annotated, Any, AsyncGenerator, AsyncIterable, Literal
 
 import orjson
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
@@ -12,6 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 
 from app.control.account.enums import AccountStatus
 from app.control.account.state_machine import derive_status
+from app.platform.audit.model import AuditAttempt, AuditRecord
 from app.platform.auth.middleware import verify_api_key
 from app.platform.errors import AppError, ValidationError
 from app.platform.logging.logger import logger
@@ -38,6 +42,108 @@ _TAG_VIDEOS = "OpenAI - Videos"
 _TAG_FILES = "OpenAI - Files"
 
 
+# ---------------------------------------------------------------------------
+# Request audit recording (port of Go audit domain — gateway-level record)
+# ---------------------------------------------------------------------------
+# Fire-and-forget background insert so audit latency never adds to responses.
+# ponytail: streams record tokens=0 (usage only visible after stream end);
+# attempts are gateway-level only (account/upstream enrichment would need
+# plumbing from chat.py — add when the admin UI shows attempt details).
+
+_audit_tasks: set[asyncio.Task[Any]] = set()
+
+
+def _derive_provider(model: str) -> str:
+    spec = model_registry.get(model)
+    if spec is None:
+        return ""
+    if getattr(spec, "is_console_chat", lambda: False)():
+        return "grok_console"
+    if getattr(spec, "is_build", lambda: False)():
+        return "grok_build"
+    return "grok_web"
+
+
+class _AuditSink:
+    """Collects one request's audit fields and schedules the background insert."""
+
+    def __init__(
+        self, request: Request, model: str, operation: str, streaming: bool
+    ) -> None:
+        self._repo = getattr(request.app.state, "audit_repo", None)
+        self._key_id = getattr(request.state, "client_key_id", None)
+        self._key_name = getattr(request.state, "client_key_name", "")
+        self._start_ms = int(time.time() * 1000)
+        self._model = model
+        self._operation = operation
+        self._streaming = streaming
+        self._provider = _derive_provider(model)
+        self._request_path = request.url.path
+
+    def _schedule(self, record: AuditRecord) -> None:
+        if self._repo is None:
+            return
+        try:
+            task = asyncio.create_task(self._repo.record(record))
+            _audit_tasks.add(task)
+            task.add_done_callback(_audit_tasks.discard)
+        except Exception:
+            pass
+
+    def _build(self, status_code: int, error_code: str = "") -> AuditRecord:
+        duration = int(time.time() * 1000) - self._start_ms
+        return AuditRecord(
+            request_id=uuid.uuid4().hex[:16],
+            client_key_id=self._key_id,
+            client_key_name=self._key_name,
+            model=self._model,
+            provider=self._provider,
+            operation=self._operation,
+            status_code=status_code,
+            streaming=self._streaming,
+            duration_ms=max(0, duration),
+            error_code=error_code,
+            attempts=[
+                AuditAttempt(
+                    method="POST",
+                    request_path=self._request_path,
+                    started_at=self._start_ms,
+                    duration_ms=max(0, duration),
+                )
+            ],
+        )
+
+    def finish_ok(self, usage: Any = None) -> None:
+        record = self._build(200)
+        if isinstance(usage, dict):
+            record.input_tokens = int(usage.get("prompt_tokens") or 0)
+            record.output_tokens = int(usage.get("completion_tokens") or 0)
+            record.total_tokens = int(usage.get("total_tokens") or 0)
+        self._schedule(record)
+
+    def finish_error(self, exc: Exception) -> None:
+        status = getattr(exc, "status", 500)
+        code = (
+            getattr(exc, "upstream_code", "")
+            or getattr(exc, "code", "internal_error")
+            or "internal_error"
+        )
+        record = self._build(int(status) if isinstance(status, int) else 500, str(code))
+        self._schedule(record)
+
+
+async def _audit_wrap_stream(stream, sink: _AuditSink) -> AsyncGenerator[str, None]:
+    """Wraps an SSE generator; records the audit when the stream finishes."""
+    try:
+        async for chunk in stream:
+            yield chunk
+    except Exception as exc:
+        sink.finish_error(exc)
+        raise
+    else:
+        sink.finish_ok()
+
+
 async def _available_pools(request: Request) -> frozenset[str]:
     repo = getattr(request.app.state, "repository", None)
     if repo is None:
@@ -56,7 +162,7 @@ async def _available_pools(request: Request) -> frozenset[str]:
 
 
 def _model_available_for_pools(spec: ModelSpec, pools: frozenset[str]) -> bool:
-    if not spec.enabled:
+    if not model_registry.is_enabled(spec.model_name):
         return False
     for pool_id in spec.pool_candidates():
         pool = _POOL_ID_TO_NAME[pool_id]
@@ -269,7 +375,7 @@ def _validate_chat(req: ChatCompletionRequest) -> None:
     from app.platform.errors import ValidationError
 
     spec = model_registry.get(req.model)
-    if spec is None or not spec.enabled:
+    if spec is None or not model_registry.is_enabled(req.model):
         raise ValidationError(
             f"Model {req.model!r} does not exist or you do not have access to it.",
             param="model",
@@ -333,7 +439,7 @@ async def _upload_to_data_uri(upload: UploadFile, *, param: str) -> str:
 @router.post(
     "/chat/completions", tags=[_TAG_CHAT], dependencies=[Depends(verify_api_key)]
 )
-async def chat_completions_endpoint(req: ChatCompletionRequest):
+async def chat_completions_endpoint(req: ChatCompletionRequest, request: Request):
     _validate_chat(req)
     from app.platform.config.snapshot import get_config
 
@@ -351,6 +457,7 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
         )
     messages = [m.model_dump(exclude_none=True) for m in req.messages]
 
+    sink = _AuditSink(request, req.model, "chat", is_stream)
     try:
         # Dispatch by model capability.
         if spec.is_image_edit():
@@ -440,7 +547,8 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
                 response_format=req.response_format,
             )
 
-    except AppError:
+    except AppError as exc:
+        sink.finish_error(exc)
         raise
     except Exception as exc:
         logger.exception(
@@ -461,15 +569,20 @@ async def chat_completions_endpoint(req: ChatCompletionRequest):
                 yield f"event: error\ndata: {payload}\n\n"
                 yield "data: [DONE]\n\n"
 
+            sink.finish_error(exc)
             return StreamingResponse(
                 _err_stream(), media_type="text/event-stream", headers=_SSE_HEADERS
             )
+        sink.finish_error(exc)
         raise
 
     if isinstance(result, dict):
+        sink.finish_ok(usage=result.get("usage"))
         return JSONResponse(result)
     return StreamingResponse(
-        _safe_sse(result), media_type="text/event-stream", headers=_SSE_HEADERS
+        _audit_wrap_stream(_safe_sse(result), sink),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
     )
 
 
@@ -503,7 +616,7 @@ async def _safe_sse_responses(stream) -> AsyncGenerator[str, None]:
 @router.post(
     "/responses", tags=[_TAG_RESPONSES], dependencies=[Depends(verify_api_key)]
 )
-async def responses_endpoint(req: ResponsesCreateRequest):
+async def responses_endpoint(req: ResponsesCreateRequest, request: Request):
     from app.platform.config.snapshot import get_config
     from app.platform.errors import ValidationError as _ValidationError
 
@@ -533,23 +646,32 @@ async def responses_endpoint(req: ResponsesCreateRequest):
 
     from .responses import create as responses_create
 
-    result = await responses_create(
-        model=req.model,
-        input_val=req.input,
-        instructions=req.instructions,
-        stream=is_stream,
-        emit_think=emit_think,
-        temperature=req.temperature or 0.8,
-        top_p=req.top_p or 0.95,
-        tools=req.tools or None,
-        tool_choice=req.tool_choice,
-        previous_response_id=req.previous_response_id,
-    )
+    sink = _AuditSink(request, req.model, "responses", is_stream)
+    try:
+        result = await responses_create(
+            model=req.model,
+            input_val=req.input,
+            instructions=req.instructions,
+            stream=is_stream,
+            emit_think=emit_think,
+            temperature=req.temperature or 0.8,
+            top_p=req.top_p or 0.95,
+            tools=req.tools or None,
+            tool_choice=req.tool_choice,
+            previous_response_id=req.previous_response_id,
+        )
+    except AppError as exc:
+        sink.finish_error(exc)
+        raise
+    except Exception as exc:
+        sink.finish_error(exc)
+        raise
 
     if isinstance(result, dict):
+        sink.finish_ok(usage=result.get("usage"))
         return JSONResponse(result)
     return StreamingResponse(
-        _safe_sse_responses(result),
+        _audit_wrap_stream(_safe_sse_responses(result), sink),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
@@ -563,7 +685,7 @@ async def responses_endpoint(req: ResponsesCreateRequest):
 @router.post(
     "/images/generations", tags=[_TAG_IMAGES], dependencies=[Depends(verify_api_key)]
 )
-async def image_generations(req: ImageGenerationRequest):
+async def image_generations(req: ImageGenerationRequest, request: Request):
     spec = model_registry.get(req.model)
     if spec is None or not spec.enabled or not spec.is_image():
         raise ValidationError(
@@ -573,15 +695,24 @@ async def image_generations(req: ImageGenerationRequest):
 
     from .images import generate as img_gen
 
-    result = await img_gen(
-        model=req.model,
-        prompt=req.prompt,
-        n=req.n or 1,
-        size=req.size or "1024x1024",
-        response_format=req.response_format or "url",
-        stream=False,
-        chat_format=False,
-    )
+    sink = _AuditSink(request, req.model, "image", False)
+    try:
+        result = await img_gen(
+            model=req.model,
+            prompt=req.prompt,
+            n=req.n or 1,
+            size=req.size or "1024x1024",
+            response_format=req.response_format or "url",
+            stream=False,
+            chat_format=False,
+        )
+    except AppError as exc:
+        sink.finish_error(exc)
+        raise
+    except Exception as exc:
+        sink.finish_error(exc)
+        raise
+    sink.finish_ok(usage=result.get("usage") if isinstance(result, dict) else None)
     return JSONResponse(result)
 
 
@@ -592,6 +723,7 @@ async def image_generations(req: ImageGenerationRequest):
 
 @router.post("/videos", tags=[_TAG_VIDEOS], dependencies=[Depends(verify_api_key)])
 async def videos_create(
+    request: Request,
     model: Annotated[str, Form(...)],
     prompt: Annotated[str, Form(...)],
     seconds: Annotated[int, Form()] = 6,
@@ -615,15 +747,24 @@ async def videos_create(
             for f in input_reference[:7]
         ]
 
-    result = await create_video(
-        model=model or "grok-video",
-        prompt=prompt,
-        seconds=seconds,
-        size=size or "720x1280",
-        resolution_name=resolution_name,
-        preset=preset,
-        input_references=references_payload,
-    )
+    sink = _AuditSink(request, model or "grok-video", "video", False)
+    try:
+        result = await create_video(
+            model=model or "grok-video",
+            prompt=prompt,
+            seconds=seconds,
+            size=size or "720x1280",
+            resolution_name=resolution_name,
+            preset=preset,
+            input_references=references_payload,
+        )
+    except AppError as exc:
+        sink.finish_error(exc)
+        raise
+    except Exception as exc:
+        sink.finish_error(exc)
+        raise
+    sink.finish_ok(usage=result.get("usage") if isinstance(result, dict) else None)
     return JSONResponse(result)
 
 
@@ -657,6 +798,7 @@ async def videos_content(video_id: str):
     "/images/edits", tags=[_TAG_IMAGES], dependencies=[Depends(verify_api_key)]
 )
 async def image_edits(
+    request: Request,
     model: Annotated[str, Form(...)],
     prompt: Annotated[str, Form(...)],
     image: Annotated[list[UploadFile], File(..., alias="image[]")],
@@ -687,15 +829,24 @@ async def image_edits(
         for image_input in image_inputs
     )
     messages = [{"role": "user", "content": content}]
-    result = await img_edit(
-        model=model,
-        messages=messages,
-        n=n,
-        size=size,
-        response_format=response_format,
-        stream=False,
-        chat_format=False,
-    )
+    sink = _AuditSink(request, model, "image_edit", False)
+    try:
+        result = await img_edit(
+            model=model,
+            messages=messages,
+            n=n,
+            size=size,
+            response_format=response_format,
+            stream=False,
+            chat_format=False,
+        )
+    except AppError as exc:
+        sink.finish_error(exc)
+        raise
+    except Exception as exc:
+        sink.finish_error(exc)
+        raise
+    sink.finish_ok(usage=result.get("usage") if isinstance(result, dict) else None)
     return JSONResponse(result)
 
 

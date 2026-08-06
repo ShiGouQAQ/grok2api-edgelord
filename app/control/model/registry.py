@@ -2,6 +2,7 @@
 
 from .enums import Capability, ModeId, Tier
 from .spec import ModelSpec
+from . import overrides
 
 # ---------------------------------------------------------------------------
 # Master model list.
@@ -129,6 +130,53 @@ def resolve(model_name: str) -> ModelSpec:
     return spec
 
 
+def is_enabled(model_name: str) -> bool:
+    """Static ``enabled`` flag with admin override layered on top (override wins).
+
+    Gate for public listings and chat validation: an admin-disabled model is
+    hidden from ``/v1/models`` and rejected with ``model_not_found`` at request
+    time. Internal routing tables (mode/tier lookups) stay static.
+    """
+    spec = _BY_NAME.get(model_name)
+    if spec is None:
+        return False
+    override = overrides.enabled(model_name)
+    return spec.enabled if override is None else override
+
+
+def list_models_with_overrides() -> list[dict]:
+    """Admin catalog view: every static spec with its effective (override-merged) state.
+
+    Returns plain dicts so the admin API can add per-call fields (account
+    counts etc.) without mutating the frozen ``ModelSpec``.
+    """
+    effective = {m.model_name: m for m in MODELS}
+    for name, delta in overrides.load().items():
+        spec = effective.get(name)
+        if spec is None:
+            continue  # unknown name in override file — ignore, keep static truth
+        enabled = delta.get("enabled")
+        if isinstance(enabled, bool):
+            effective[name] = _with_flag(effective[name], enabled)
+    return [
+        {
+            "model_name": m.model_name,
+            "enabled": m.enabled,
+            "tier": m.tier,
+            "mode": m.mode_id,
+            "capability": m.capability,
+        }
+        for m in effective.values()
+    ]
+
+
+def _with_flag(spec: ModelSpec, enabled: bool) -> ModelSpec:
+    """Copy *spec* with ``enabled`` replaced (ModelSpec is frozen)."""
+    from dataclasses import replace
+
+    return replace(spec, enabled=enabled)
+
+
 def list_enabled() -> list[ModelSpec]:
     """Return all enabled models in registration order."""
     return [m for m in MODELS if m.enabled]
@@ -145,6 +193,8 @@ __all__ = [
     "get",
     "resolve",
     "resolve_alias",
+    "is_enabled",
     "list_enabled",
     "list_by_capability",
+    "list_models_with_overrides",
 ]

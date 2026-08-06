@@ -166,12 +166,24 @@ from .batch import router as _batch_router  # noqa: E402
 from .assets import router as _assets_router  # noqa: E402
 from .cache import router as _cache_router  # noqa: E402
 from .clearance import router as _clearance_router  # noqa: E402
+from .settings import router as _settings_router  # noqa: E402
+from .system import router as _system_router  # noqa: E402
+from .models import router as _models_router  # noqa: E402
+from .client_keys import router as _client_keys_router  # noqa: E402
+from .audits import router as _audits_router  # noqa: E402
+from .dashboard import router as _dashboard_router  # noqa: E402
 
 router.include_router(_tokens_router)
 router.include_router(_batch_router)
 router.include_router(_assets_router)
 router.include_router(_cache_router)
 router.include_router(_clearance_router)
+router.include_router(_settings_router)
+router.include_router(_system_router)
+router.include_router(_models_router)
+router.include_router(_client_keys_router)
+router.include_router(_audits_router)
+router.include_router(_dashboard_router)
 
 
 # ---------------------------------------------------------------------------
