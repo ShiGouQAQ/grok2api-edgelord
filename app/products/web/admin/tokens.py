@@ -17,7 +17,7 @@ import aiohttp
 import orjson
 from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import Response
-from pydantic import BaseModel, RootModel
+from pydantic import BaseModel, Field, RootModel
 
 from app.platform.errors import AppError, ErrorKind, UpstreamError, ValidationError
 from app.platform.config.snapshot import get_config
@@ -654,7 +654,8 @@ class BuildPollRequest(BaseModel):
 
 
 class BuildConvertRequest(BaseModel):
-    sso_tokens: list[str]
+    sso_tokens: list[str] = Field(default_factory=list)
+    all: bool = False
 
 
 class BuildBillingRefreshRequest(BaseModel):
@@ -765,6 +766,23 @@ async def build_convert(
     from app.platform.runtime.batch import run_batch
 
     results: dict = {"success": 0, "failed": 0, "errors": []}
+    if req.all:
+        tokens = []
+        page_num = 1
+        while True:
+            page = await repo.list_accounts(
+                ListAccountsQuery(page=page_num, page_size=2000)
+            )
+            tokens.extend(
+                r.token for r in page.items if r.pool != "build" and not r.is_deleted()
+            )
+            if page_num * 2000 >= page.total:
+                break
+            page_num += 1
+        if not tokens:
+            return _json({**results, "message": "no convertible accounts"})
+    else:
+        tokens = req.sso_tokens
 
     async def _convert_one(sso_token: str) -> None:
         try:
@@ -870,7 +888,7 @@ async def build_convert(
                     )
 
     await run_batch(
-        [t for t in req.sso_tokens if t.strip()],
+        [t for t in tokens if t.strip()],
         _convert_one,
         concurrency=5,
     )

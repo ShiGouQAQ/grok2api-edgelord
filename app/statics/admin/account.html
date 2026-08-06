@@ -1637,7 +1637,7 @@ function renderTable(view = getTokenView()) {
   });
   ['btn-convert-build'].forEach(id => {
     const el = document.getElementById(id);
-    if (el) el.style.display = showWeb && sel.size > 0 ? '' : 'none';
+    if (el) el.style.display = showWeb ? '' : 'none';
   });
 }
 
@@ -2326,8 +2326,25 @@ async function convertOneToBuild(token) {
 }
 
 async function batchConvertToBuild() {
-  if (!sel.size) return;
   const tokens = [...sel];
+  if (!tokens.length) {
+    openConfirm(tr('build.convertAllTitle', null, '全量转为构建'),
+      tr('build.convertAllBody', null, '确认将当前全部 Web 账号转为构建账号？<br><small style="color:var(--fg-muted)">已转换/已删除的账号会自动跳过。</small>'),
+      async () => {
+        const progress = showProgressToast(tr('build.convertingAll', null, '正在转换全部账号…'));
+        try {
+          const r = await _api('POST', '/tokens/build-convert', { all: true });
+          const msg = r.success > 0
+            ? tr('build.convertDone', { ok: r.success, fail: r.failed }, `转换完成：成功 ${r.success}，失败 ${r.failed}`)
+            : tr('build.convertAllNone', null, '没有可转换的 Web 账号');
+          progress.finish(msg, r.failed > 0 ? 'warning' : 'success');
+          load();
+        } catch (e) {
+          progress.finish(`${tr('build.convertFailed', null, '转换失败')}: ${e.message}`, 'error');
+        }
+      });
+    return;
+  }
   openConfirm(tr('build.convertBatchTitle', null, '批量转为构建'),
     tr('build.convertBatchBody', { n: tokens.length }, `确认将选中的 <b>${tokens.length}</b> 个 Web 账号转为构建账号？`),
     async () => {

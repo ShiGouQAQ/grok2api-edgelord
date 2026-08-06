@@ -324,3 +324,88 @@ async def test_convert_smoke_failure_does_not_touch_web_account():
     repo.upsert_accounts.assert_not_called()
     repo.patch_accounts.assert_not_called()
     repo.delete_accounts.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_convert_all_picks_non_build_accounts():
+    """all=True converts every non-build, non-deleted account and skips build ones."""
+    from app.control.account.models import AccountPage
+
+    repo = _mock_repo()
+    creds = BuildCredentialSeed(
+        access_token=_jwt({"exp": _future_exp()}),
+        refresh_token="r",
+        expires_in=3600,
+    )
+    billing = BuildBilling(plan_code="free")
+    web = AccountRecord(token="web-1", pool="basic", provider="grok_web", ext={})
+    super_web = AccountRecord(token="web-2", pool="super", provider="grok_web", ext={})
+    build = AccountRecord(token="build-1", pool="build", provider="grok_build", ext={})
+    deleted = AccountRecord(
+        token="web-del",
+        pool="basic",
+        provider="grok_web",
+        ext={},
+        deleted_at=1234,
+    )
+    repo.list_accounts = AsyncMock(
+        return_value=AccountPage(
+            items=[web, super_web, build, deleted],
+            total=4,
+            page=1,
+            page_size=2000,
+            total_pages=1,
+            revision=1,
+        )
+    )
+
+    with (
+        patch(
+            "app.control.account.sso_build.convert_sso_to_build",
+            AsyncMock(return_value=creds),
+        ),
+        patch(
+            "app.dataplane.reverse.protocol.xai_billing.fetch_build_billing",
+            AsyncMock(return_value=billing),
+        ),
+    ):
+        resp = await build_convert(
+            BuildConvertRequest(sso_tokens=[], all=True), repo=repo
+        )
+        body = orjson.loads(resp.body)
+
+    # Only web-1 and web-2 get converted; build-1 and deleted web-del are skipped
+    assert body["success"] == 2
+    assert body["failed"] == 0
+    assert repo.upsert_accounts.await_count == 2
+    upserted = [a.args[0][0].token for a in repo.upsert_accounts.await_args_list]
+    assert "build-1" not in upserted
+    assert "web-del" not in upserted
+
+
+@pytest.mark.asyncio
+async def test_convert_all_no_convertible_returns_empty():
+    """all=True with no non-build accounts short-circuits before any minting."""
+    from app.control.account.models import AccountPage
+
+    repo = _mock_repo()
+    repo.list_accounts = AsyncMock(
+        return_value=AccountPage(
+            items=[], total=0, page=1, page_size=2000, total_pages=1, revision=1
+        )
+    )
+
+    with patch(
+        "app.control.account.sso_build.convert_sso_to_build",
+        AsyncMock(),
+    ) as mock_convert:
+        resp = await build_convert(
+            BuildConvertRequest(sso_tokens=[], all=True), repo=repo
+        )
+        body = orjson.loads(resp.body)
+
+    assert body["success"] == 0
+    assert body["failed"] == 0
+    assert body["message"] == "no convertible accounts"
+    mock_convert.assert_not_awaited()
+    repo.upsert_accounts.assert_not_called()
