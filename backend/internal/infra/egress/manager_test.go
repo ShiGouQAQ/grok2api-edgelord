@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httptrace"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/tls-client/profiles"
 
+	application "github.com/chenyme/grok2api/backend/internal/application/egress"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	domain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	settingsdomain "github.com/chenyme/grok2api/backend/internal/domain/settings"
@@ -2897,7 +2900,7 @@ func TestMihomoSwitchSuccessSkipsGoCooldown(t *testing.T) {
 	manager.mihomo = mihomo
 	manager.mihomoMu.Unlock()
 
-	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	manager.FeedbackNodeBanned(context.Background(), 1)
 	waitForTrue(t, 3*time.Second, func() bool { return mihomo.SwitchCount() == 1 }, "mihomo switch completion")
 	if repository.updateCount() != 0 {
 		t.Fatalf("successful mihomo switch must not cool the Go node: updates=%d", repository.updateCount())
@@ -2925,7 +2928,7 @@ func TestMihomoSwitchFailureFallsBackToCooldown(t *testing.T) {
 	manager.mihomo = NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
 	manager.mihomoMu.Unlock()
 
-	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	manager.FeedbackNodeBanned(context.Background(), 1)
 	waitForTrue(t, 3*time.Second, func() bool { return repository.updateCount() == 1 }, "cooldown fallback after failed mihomo switch")
 	node := repository.snapshot()
 	if node.Health >= 1 || node.LastError != "anti-bot rejection" {
@@ -3048,8 +3051,8 @@ func TestMihomoSwitchMergedSkipsGoCooldown(t *testing.T) {
 	manager.mihomo = mihomo
 	manager.mihomoMu.Unlock()
 
-	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
-	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	manager.FeedbackNodeBanned(context.Background(), 1)
+	manager.FeedbackNodeBanned(context.Background(), 1)
 	waitForTrue(t, 3*time.Second, func() bool { return mihomo.SwitchCount() == 1 }, "mihomo switch completion")
 	time.Sleep(100 * time.Millisecond) // 等待第二个 403 的 Merged 分支处理完毕
 	switchMu.Lock()
@@ -3089,7 +3092,7 @@ func TestMihomoSwitchDoneInvokesQualityVerifier(t *testing.T) {
 		return nil
 	})
 
-	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	manager.FeedbackNodeBanned(context.Background(), 1)
 	waitForTrue(t, 3*time.Second, func() bool {
 		verifyMu.Lock()
 		defer verifyMu.Unlock()
@@ -3149,9 +3152,9 @@ func TestMihomoForbiddenUnconditionalGroupSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 组模型下所有 DB 节点共享同一个 Mihomo 组出口：任一节点 403（已被
-	// chat.go IsNodeBannedBody 分类为出口被封）都无条件轮换组出口，不冷却
-	// Go 节点。
+	// 组模型下所有 DB 节点共享同一个 Mihomo 组出口：显式分类为 NODE_BANNED
+	// （出口 IP 被封）的 403 轮换组出口，不冷却 Go 节点。未分类的 403 绝不
+	// 轮换（见 TestMihomoPlain403NeverRotates）。
 	repository := &synchronizedEgressRepository{node: domain.Node{ID: 100, Name: "node100", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
 	manager := NewManager(repository, cipher)
 	group, groupMu := mihomoTestGroup()
@@ -3164,8 +3167,8 @@ func TestMihomoForbiddenUnconditionalGroupSwitch(t *testing.T) {
 	manager.mihomo = mihomo
 	manager.mihomoMu.Unlock()
 
-	manager.Feedback(context.Background(), 100, http.StatusForbidden, nil)
-	waitForTrue(t, 3*time.Second, func() bool { return mihomo.SwitchCount() == 1 }, "unconditional group switch on 403")
+	manager.FeedbackNodeBanned(context.Background(), 100)
+	waitForTrue(t, 3*time.Second, func() bool { return mihomo.SwitchCount() == 1 }, "NODE_BANNED group switch on 403")
 	if repository.updateCount() != 0 {
 		t.Fatalf("403 with mihomo enabled must not cool the Go node: updates=%d", repository.updateCount())
 	}
@@ -3187,6 +3190,60 @@ func TestMihomoForbiddenNilMihomoCoolsNode(t *testing.T) {
 
 	manager.Feedback(context.Background(), 7, http.StatusForbidden, nil)
 	waitForTrue(t, 3*time.Second, func() bool { return repository.updateCount() == 1 }, "forbidden cooldown with mihomo disabled")
+	node := repository.snapshot()
+	if node.Health >= 1 || node.LastError != "anti-bot rejection" {
+		t.Fatalf("node must be cooled: %#v", node)
+	}
+}
+
+func TestMihomoPlain403NeverRotates(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 未分类 403（JS 挑战 / 账号级封禁 / 配额拒绝）：Mihomo 启用也不轮换组
+	// 出口，只冷却 Go 节点，与 mihomo==nil 路径一致。
+	repository := &synchronizedEgressRepository{node: domain.Node{ID: 1, Name: "node", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
+	manager := NewManager(repository, cipher)
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+	mihomo := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	manager.mihomoMu.Lock()
+	manager.mihomo = mihomo
+	manager.mihomoMu.Unlock()
+
+	manager.Feedback(context.Background(), 1, http.StatusForbidden, nil)
+	time.Sleep(100 * time.Millisecond) // 未分类 403 不发起异步切换，留足窗口证明无 PUT
+	switchMu.Lock()
+	puts := len(switches)
+	switchMu.Unlock()
+	if puts != 0 {
+		t.Fatalf("unclassified 403 must never rotate the group exit: puts=%d", puts)
+	}
+	if mihomo.SwitchCount() != 0 {
+		t.Fatalf("unclassified 403 must never call SwitchAndBlacklistCurrent: switches=%d", mihomo.SwitchCount())
+	}
+	waitForTrue(t, 3*time.Second, func() bool { return repository.updateCount() == 1 }, "unclassified 403 cools the node")
+	node := repository.snapshot()
+	if node.Health >= 1 || node.LastError != "anti-bot rejection" {
+		t.Fatalf("unclassified 403 must cool the node: %#v", node)
+	}
+}
+
+func TestMihomoNodeBannedNilMihomoCoolsNode(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// NODE_BANNED 信号在 mihomo==nil 时不能轮换（无出口可换），回退常规冷却。
+	repository := &synchronizedEgressRepository{node: domain.Node{ID: 7, Name: "n", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
+	manager := NewManager(repository, cipher)
+
+	manager.FeedbackNodeBanned(context.Background(), 7)
+	waitForTrue(t, 3*time.Second, func() bool { return repository.updateCount() == 1 }, "NODE_BANNED cooldown with mihomo disabled")
 	node := repository.snapshot()
 	if node.Health >= 1 || node.LastError != "anti-bot rejection" {
 		t.Fatalf("node must be cooled: %#v", node)
@@ -3237,5 +3294,309 @@ func TestMihomoRotateNil(t *testing.T) {
 	}
 	if rotation.Changed {
 		t.Fatalf("rotation must not report changed when mihomo is nil: %+v", rotation)
+	}
+}
+
+func TestUpdateMihomoConfigLegacyNoTestClient(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+	manager.UpdateMihomoConfig(MihomoConfig{Enabled: true, APIURL: "http://127.0.0.1:9093", GroupName: "XAI-GROUP"})
+	manager.mihomoMu.RLock()
+	testClient := manager.mihomoTest
+	testConfig := manager.mihomoTestConfig
+	manager.mihomoMu.RUnlock()
+	if testClient != nil || testConfig != (MihomoConfig{}) {
+		t.Fatalf("legacy single-group config must not create a test client: %#v", testConfig)
+	}
+}
+
+func TestUpdateMihomoConfigDualChannelEpochIsolation(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+
+	useGroup, useMu := mihomoTestGroup()
+	testGroup := mihomoGroup{All: []string{"t1", "t2"}, Now: "t1"}
+	testMu := &sync.Mutex{}
+	var testSwitches []string
+	var testSwitchMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/proxies/XAI-TEST-GROUP"):
+			var body struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			testSwitchMu.Lock()
+			testSwitches = append(testSwitches, body.Name)
+			testSwitchMu.Unlock()
+			testMu.Lock()
+			testGroup.Now = body.Name // 模拟测试组切换生效
+			testMu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/proxies/XAI-GROUP"):
+			w.Header().Set("Content-Type", "application/json")
+			useMu.Lock()
+			_ = json.NewEncoder(w).Encode(useGroup)
+			useMu.Unlock()
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/proxies/XAI-TEST-GROUP"):
+			w.Header().Set("Content-Type", "application/json")
+			testMu.Lock()
+			_ = json.NewEncoder(w).Encode(testGroup)
+			testMu.Unlock()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	manager.UpdateMihomoConfig(MihomoConfig{
+		Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP",
+		ExitProbeProxyURL: "http://127.0.0.1:7890",
+		TestGroupName:     "XAI-TEST-GROUP", TestProxyURL: "http://127.0.0.1:7891",
+	})
+	manager.mihomoMu.RLock()
+	testClient := manager.mihomoTest
+	useClient := manager.mihomo
+	manager.mihomoMu.RUnlock()
+	if testClient == nil {
+		t.Fatal("dual-channel config must create a test client")
+	}
+	testCfg, ok := testClient.configSnapshot()
+	if !ok || testCfg.GroupName != "XAI-TEST-GROUP" || testCfg.ExitProbeProxyURL != "http://127.0.0.1:7891" {
+		t.Fatalf("test client must target the test group via the test channel: %#v", testCfg)
+	}
+
+	useEpoch := useClient.Epoch()
+	useCount := useClient.SwitchCount()
+	if _, result := testClient.SwitchTestGroup(context.Background(), "t2", "guard_probe"); result != MihomoSwitchDone {
+		t.Fatalf("test switch: got %v, want Done", result)
+	}
+	// 生产客户端 epoch/切换计数零扰动：测试切换只作用于测试客户端自身。
+	if useClient.Epoch() != useEpoch {
+		t.Fatalf("test-group switch must not bump production epoch: %d -> %d", useEpoch, useClient.Epoch())
+	}
+	if useClient.SwitchCount() != useCount {
+		t.Fatalf("test-group switch must not affect production switch count: %d -> %d", useCount, useClient.SwitchCount())
+	}
+	if testClient.SwitchCount() != 1 {
+		t.Fatalf("test client switch count: got %d, want 1", testClient.SwitchCount())
+	}
+	testSwitchMu.Lock()
+	defer testSwitchMu.Unlock()
+	if len(testSwitches) != 1 || testSwitches[0] != "t2" {
+		t.Fatalf("test group must receive the explicit switch: %v", testSwitches)
+	}
+}
+
+func TestMihomoStatusExposesTestGroup(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+
+	useGroup, useMu := mihomoTestGroup()
+	testGroup := mihomoGroup{All: []string{"t1", "t2"}, Now: "t1"}
+	testMu := &sync.Mutex{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/proxies/XAI-GROUP"):
+			useMu.Lock()
+			_ = json.NewEncoder(w).Encode(useGroup)
+			useMu.Unlock()
+		case strings.HasSuffix(r.URL.Path, "/proxies/XAI-TEST-GROUP"):
+			testMu.Lock()
+			_ = json.NewEncoder(w).Encode(testGroup)
+			testMu.Unlock()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	manager.UpdateMihomoConfig(MihomoConfig{
+		Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP",
+		TestGroupName: "XAI-TEST-GROUP", TestProxyURL: "http://127.0.0.1:7891",
+	})
+	status := manager.MihomoStatus(context.Background())
+	if status.CurrentNode != "slow" {
+		t.Fatalf("production current node: got %q, want slow", status.CurrentNode)
+	}
+	if !status.TestEnabled || status.TestGroupName != "XAI-TEST-GROUP" {
+		t.Fatalf("test group status: enabled=%v group=%q", status.TestEnabled, status.TestGroupName)
+	}
+	if status.TestCurrentNode != "t1" {
+		t.Fatalf("test current node: got %q, want t1", status.TestCurrentNode)
+	}
+	if status.Epoch != manager.mihomoEpoch() {
+		t.Fatalf("status epoch must reflect the production client only")
+	}
+}
+
+func TestMihomoStatusZeroValuesWhenTestClientAbsent(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+	manager.UpdateMihomoConfig(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+
+	status := manager.MihomoStatus(context.Background())
+	if status.TestEnabled || status.TestGroupName != "" || status.TestCurrentNode != "" {
+		t.Fatalf("legacy config must surface zero test status: %+v", status)
+	}
+}
+
+// newDualChannelTestManager 组装启用测试组（t1/t2）的双通道 Manager 与测试
+// 服务，镜像 TestUpdateMihomoConfigDualChannelEpochIsolation 的服务器布局。
+func newDualChannelTestManager(t *testing.T) (*Manager, *httptest.Server) {
+	t.Helper()
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+	useGroup, useMu := mihomoTestGroup()
+	testGroup := mihomoGroup{All: []string{"t1", "t2"}, Now: "t1"}
+	testMu := &sync.Mutex{}
+	var testSwitches []string
+	var testSwitchMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/proxies/XAI-TEST-GROUP"):
+			var body struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			testSwitchMu.Lock()
+			testSwitches = append(testSwitches, body.Name)
+			testSwitchMu.Unlock()
+			testMu.Lock()
+			testGroup.Now = body.Name // 模拟测试组切换生效
+			testMu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPut:
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/proxies/XAI-GROUP"):
+			w.Header().Set("Content-Type", "application/json")
+			useMu.Lock()
+			_ = json.NewEncoder(w).Encode(useGroup)
+			useMu.Unlock()
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/proxies/XAI-TEST-GROUP"):
+			w.Header().Set("Content-Type", "application/json")
+			testMu.Lock()
+			_ = json.NewEncoder(w).Encode(testGroup)
+			testMu.Unlock()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	manager.UpdateMihomoConfig(MihomoConfig{
+		Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP",
+		TestGroupName: "XAI-TEST-GROUP", TestProxyURL: "http://127.0.0.1:7891",
+	})
+	return manager, server
+}
+
+func TestMihomoTestSelect(t *testing.T) {
+	manager, _ := newDualChannelTestManager(t)
+	manager.mihomoMu.RLock()
+	testClient := manager.mihomoTest
+	manager.mihomoMu.RUnlock()
+	if testClient == nil {
+		t.Fatal("dual-channel config must create a test client")
+	}
+
+	// 显式切换到测试组成员。
+	current, err := manager.MihomoTestSelect(context.Background(), "t2")
+	if err != nil {
+		t.Fatalf("MihomoTestSelect: %v", err)
+	}
+	if current != "t2" {
+		t.Fatalf("MihomoTestSelect currentNode: got %q, want t2", current)
+	}
+
+	// 生产客户端零扰动：测试切换只作用于测试客户端自身。
+	manager.mihomoMu.RLock()
+	useClient := manager.mihomo
+	manager.mihomoMu.RUnlock()
+	if useClient.SwitchCount() != 0 || useClient.Epoch() != 1 {
+		t.Fatalf("test select must not disturb production client: count=%d epoch=%d", useClient.SwitchCount(), useClient.Epoch())
+	}
+
+	// 未知节点必须被拒绝。
+	if _, err := manager.MihomoTestSelect(context.Background(), "ghost"); err == nil {
+		t.Fatal("expected error when selecting a node absent from the test group")
+	}
+	// 空节点名必须被拒绝。
+	if _, err := manager.MihomoTestSelect(context.Background(), ""); err == nil {
+		t.Fatal("expected error when selecting an empty node")
+	}
+}
+
+func TestMihomoTestSelectNilTestClient(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+	if _, err := manager.MihomoTestSelect(context.Background(), "t1"); !errors.Is(err, application.ErrMihomoUnavailable) {
+		t.Fatalf("expected ErrMihomoUnavailable when test client is nil, got %v", err)
+	}
+}
+
+func TestMihomoTestBanUnban(t *testing.T) {
+	manager, _ := newDualChannelTestManager(t)
+
+	banned, err := manager.MihomoTestBan("t1")
+	if err != nil || banned != 1 {
+		t.Fatalf("MihomoTestBan(t1): count=%d err=%v, want 1 nil", banned, err)
+	}
+	// 重复封禁同一节点只刷新 TTL，不重复计数。
+	banned, err = manager.MihomoTestBan("t1")
+	if err != nil || banned != 1 {
+		t.Fatalf("MihomoTestBan(t1) again: count=%d err=%v, want 1 nil", banned, err)
+	}
+	banned, err = manager.MihomoTestBan("t2")
+	if err != nil || banned != 2 {
+		t.Fatalf("MihomoTestBan(t2): count=%d err=%v, want 2 nil", banned, err)
+	}
+	banned, err = manager.MihomoTestUnban("t1")
+	if err != nil || banned != 1 {
+		t.Fatalf("MihomoTestUnban(t1): count=%d err=%v, want 1 nil", banned, err)
+	}
+	// 解禁未封禁节点保持计数不变。
+	banned, err = manager.MihomoTestUnban("t1")
+	if err != nil || banned != 1 {
+		t.Fatalf("MihomoTestUnban(t1) again: count=%d err=%v, want 1 nil", banned, err)
+	}
+}
+
+func TestMihomoTestBanUnbanNilTestClient(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+	if _, err := manager.MihomoTestBan("t1"); !errors.Is(err, application.ErrMihomoUnavailable) {
+		t.Fatalf("expected ErrMihomoUnavailable for ban, got %v", err)
+	}
+	if _, err := manager.MihomoTestUnban("t1"); !errors.Is(err, application.ErrMihomoUnavailable) {
+		t.Fatalf("expected ErrMihomoUnavailable for unban, got %v", err)
 	}
 }

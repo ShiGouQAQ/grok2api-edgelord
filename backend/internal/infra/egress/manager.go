@@ -173,8 +173,10 @@ type Manager struct {
 	clearanceLoads         singleflight.Group
 	mihomoMu               sync.RWMutex
 	mihomo                 *MihomoClient
+	mihomoTest             *MihomoClient
 	mihomoFallbackNext     time.Time
 	mihomoConfig           MihomoConfig
+	mihomoTestConfig       MihomoConfig
 	clearanceConfig        ClearanceConfig
 	clearanceVersion       uint64
 	clearances             map[string]clearanceState
@@ -473,7 +475,9 @@ func (m *Manager) UpdateClearanceConfig(value ClearanceConfig) {
 }
 
 // UpdateMihomoConfig 热更新 Mihomo 出口配置，镜像 UpdateClearanceConfig 的
-// 模式：未启用或缺少关键字段时置空客户端，否则创建或复用并更新。
+// 模式：未启用或缺少关键字段时置空客户端，否则创建或复用并更新。测试组
+// 客户端（mihomoTest）仅在 TestGroupName 与 TestProxyURL 均非空时启用，
+// 否则为 nil（legacy 单组行为，零回归）。
 func (m *Manager) UpdateMihomoConfig(value MihomoConfig) {
 	value.APIURL = strings.TrimRight(strings.TrimSpace(value.APIURL), "/")
 	value.GroupName = strings.TrimSpace(value.GroupName)
@@ -481,7 +485,9 @@ func (m *Manager) UpdateMihomoConfig(value MihomoConfig) {
 	defer m.mihomoMu.Unlock()
 	if !value.Enabled || value.APIURL == "" || value.GroupName == "" {
 		m.mihomo = nil
+		m.mihomoTest = nil
 		m.mihomoConfig = MihomoConfig{}
+		m.mihomoTestConfig = MihomoConfig{}
 		return
 	}
 	if m.mihomo == nil {
@@ -491,6 +497,31 @@ func (m *Manager) UpdateMihomoConfig(value MihomoConfig) {
 		m.mihomo.UpdateConfig(value)
 	}
 	m.mihomoConfig = value
+	m.updateMihomoTestLocked(value)
+}
+
+// updateMihomoTestLocked 同步测试组客户端。测试客户端是独立实例，与生产
+// 客户端各自维护黑名单/switching/epoch —— 测试组切换只 bump 自身 epoch，
+// 生产出口指纹（mihomoEpoch 只读生产客户端）不受扰动。测试组的出口 IP
+// 校验经 TestProxyURL（本地测试通道端口）转发。调用方须持有 m.mihomoMu。
+func (m *Manager) updateMihomoTestLocked(value MihomoConfig) {
+	testGroupName := strings.TrimSpace(value.TestGroupName)
+	testProxyURL := strings.TrimSpace(value.TestProxyURL)
+	if testGroupName == "" || testProxyURL == "" {
+		m.mihomoTest = nil
+		m.mihomoTestConfig = MihomoConfig{}
+		return
+	}
+	testCfg := value
+	testCfg.GroupName = testGroupName
+	testCfg.ExitProbeProxyURL = testProxyURL
+	m.mihomoTestConfig = testCfg
+	if m.mihomoTest == nil {
+		m.mihomoTest = NewMihomoClient(testCfg)
+		m.mihomoTest.SetLogger(m.log())
+	} else {
+		m.mihomoTest.UpdateConfig(testCfg)
+	}
 }
 
 // MihomoStatus 是 Mihomo 出口状态的只读快照，供状态 API 展示。
@@ -504,6 +535,11 @@ type MihomoStatus struct {
 	Epoch       uint64
 	Reachable   bool
 	LastError   string
+	// TestEnabled/TestGroupName/TestCurrentNode 是测试组（双通道守卫探测）
+	// 状态；未启用测试组客户端时为零值。
+	TestEnabled     bool
+	TestGroupName   string
+	TestCurrentNode string
 }
 
 // MihomoStatus 返回 Mihomo 出口的当前状态；获取当前节点失败时
@@ -511,7 +547,9 @@ type MihomoStatus struct {
 func (m *Manager) MihomoStatus(ctx context.Context) MihomoStatus {
 	m.mihomoMu.RLock()
 	mihomo := m.mihomo
+	testMihomo := m.mihomoTest
 	config := m.mihomoConfig
+	testConfig := m.mihomoTestConfig
 	m.mihomoMu.RUnlock()
 	status := MihomoStatus{
 		Enabled:   config.Enabled,
@@ -533,6 +571,15 @@ func (m *Manager) MihomoStatus(ctx context.Context) MihomoStatus {
 	}
 	status.CurrentNode = current
 	status.Reachable = true
+	if testMihomo != nil {
+		status.TestEnabled = testConfig.Enabled
+		status.TestGroupName = testConfig.GroupName
+		testCtx, testCancel := context.WithTimeout(ctx, 3*time.Second)
+		defer testCancel()
+		if node, err := testMihomo.GetCurrentNode(testCtx); err == nil {
+			status.TestCurrentNode = node
+		}
+	}
 	return status
 }
 
@@ -583,6 +630,76 @@ func (m *Manager) MihomoRotate(ctx context.Context) (application.MihomoRotation,
 	default:
 		return application.MihomoRotation{}, errors.New("Mihomo 出口轮换失败")
 	}
+}
+
+// MihomoTestSelect 将测试组显式切换到指定节点（质量守护 select_node 契约）。
+// 切换前先验证目标节点确实存在于测试组，拒绝未知节点；经测试客户端
+// SwitchTestGroup（guard_select）执行。Done 与 Merged 均视为成功（镜像
+// MihomoRotate 对单飞合并的静默语义）；Failed 返回错误。测试组未启用
+// （mihomoTest 为 nil，legacy 单组配置）时返回 ErrMihomoUnavailable。
+func (m *Manager) MihomoTestSelect(ctx context.Context, nodeName string) (string, error) {
+	m.mihomoMu.RLock()
+	testMihomo := m.mihomoTest
+	m.mihomoMu.RUnlock()
+	if testMihomo == nil {
+		return "", application.ErrMihomoUnavailable
+	}
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" {
+		return "", errors.New("Mihomo 测试组切换目标节点为空")
+	}
+	nodes, err := testMihomo.GetGroupNodes(ctx)
+	if err != nil {
+		return "", fmt.Errorf("读取 Mihomo 测试组节点: %w", err)
+	}
+	if !mihomoContains(nodes, nodeName) {
+		return "", fmt.Errorf("Mihomo 测试组不存在节点 %q", nodeName)
+	}
+	name, result := testMihomo.SwitchTestGroup(ctx, nodeName, "guard_select")
+	switch result {
+	case MihomoSwitchDone:
+		return name, nil
+	case MihomoSwitchMerged:
+		// 单飞合并：切换可能仍在进行，当前节点读取失败只影响回报，不判定失败。
+		current, err := testMihomo.GetCurrentNode(ctx)
+		if err != nil {
+			m.log().Warn("mihomo_test_select_merged", "target", nodeName, "error", err)
+			return "", nil
+		}
+		return current, nil
+	default:
+		return "", errors.New("Mihomo 测试组切换失败")
+	}
+}
+
+// MihomoTestBan 封禁测试组内一个节点（TTL 10 分钟自动解禁），返回当前测试组
+// 黑名单节点数。测试组未启用（mihomoTest 为 nil）时返回 ErrMihomoUnavailable。
+func (m *Manager) MihomoTestBan(nodeName string) (int, error) {
+	m.mihomoMu.RLock()
+	testMihomo := m.mihomoTest
+	m.mihomoMu.RUnlock()
+	if testMihomo == nil {
+		return 0, application.ErrMihomoUnavailable
+	}
+	if strings.TrimSpace(nodeName) == "" {
+		return 0, errors.New("Mihomo 测试组封禁目标节点为空")
+	}
+	return testMihomo.BanNode(nodeName), nil
+}
+
+// MihomoTestUnban 解禁测试组内一个节点，返回剩余黑名单节点数。测试组未启用
+// （mihomoTest 为 nil）时返回 ErrMihomoUnavailable。
+func (m *Manager) MihomoTestUnban(nodeName string) (int, error) {
+	m.mihomoMu.RLock()
+	testMihomo := m.mihomoTest
+	m.mihomoMu.RUnlock()
+	if testMihomo == nil {
+		return 0, application.ErrMihomoUnavailable
+	}
+	if strings.TrimSpace(nodeName) == "" {
+		return 0, errors.New("Mihomo 测试组解禁目标节点为空")
+	}
+	return testMihomo.UnbanNode(nodeName), nil
 }
 
 // maybeMihomoFallback 在节点池枯竭时异步触发一次 Mihomo 出口切换。
@@ -1780,11 +1897,30 @@ func (m *Manager) invalidateAllClientVersionsLocked() {
 	clear(m.clientVersions)
 }
 
+// Feedback reports transport/status feedback for a Web-scope node. A 403 sent
+// through this path is unclassified (JS challenge, account-level block, quota
+// rejection, or any other hard block) and therefore never rotates the shared
+// Mihomo group exit: it cools the node like the mihomo==nil path. Only
+// FeedbackNodeBanned carries the NODE_BANNED classification that rotates.
 func (m *Manager) Feedback(ctx context.Context, nodeID uint64, status int, transportErr error) {
-	m.FeedbackForScope(ctx, domain.ScopeWeb, nodeID, status, transportErr)
+	m.feedbackForScope(ctx, domain.ScopeWeb, nodeID, status, transportErr, false)
+}
+
+// FeedbackNodeBanned reports a NODE_BANNED 403: the egress exit IP itself is
+// blocked by Cloudflare (attention-required / you-have-been-blocked /
+// ddos-protection), not a transient challenge. This is the ONLY feedback path
+// that rotates the shared Mihomo group exit; callers must classify the response
+// body with provider.IsNodeBannedBody before using it. With Mihomo disabled it
+// cools the node like any other 403.
+func (m *Manager) FeedbackNodeBanned(ctx context.Context, nodeID uint64) {
+	m.feedbackForScope(ctx, domain.ScopeWeb, nodeID, http.StatusForbidden, nil, true)
 }
 
 func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, nodeID uint64, status int, transportErr error) {
+	m.feedbackForScope(ctx, scope, nodeID, status, transportErr, false)
+}
+
+func (m *Manager) feedbackForScope(ctx context.Context, scope domain.Scope, nodeID uint64, status int, transportErr error, nodeBanned bool) {
 	if status == clientClosedRequestStatus || errors.Is(transportErr, context.Canceled) {
 		return
 	}
@@ -1858,14 +1994,14 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 		m.mihomoMu.RLock()
 		mihomo := m.mihomo
 		m.mihomoMu.RUnlock()
-		if mihomo != nil {
+		if mihomo != nil && nodeBanned {
 			// Mihomo 出口 = 超大共享池：不冷却 Go 节点；异步轮换出口 IP，
 			// Clearance 在下次获取时基于新 IP 重新绑定。切换失败则回退冷却，
 			// 避免节点持续在失效出口上重试；切换被合并（Merged）说明已有在途
 			// 切换负责出口轮换，同样不加冷却。
-			// 所有 DB 节点共享同一个 Mihomo 组出口；到达此处的 403 已被
-			// chat.go IsNodeBannedBody 分类为出口被封（NODE_BANNED），因此
-			// 无条件轮换组出口。切换失败才回退冷却该节点。
+			// 所有 DB 节点共享同一个 Mihomo 组出口；只有调用方显式分类为
+			// NODE_BANNED（出口 IP 被封）的 403 才轮换组出口，未分类的 403
+			// （JS 挑战、账号级封禁、配额拒绝）一律冷却节点，绝不轮换共享出口。
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()

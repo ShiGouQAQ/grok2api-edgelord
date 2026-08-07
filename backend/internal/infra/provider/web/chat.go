@@ -212,7 +212,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 					UpstreamURL: responseUpstreamURL(upstream),
 					Body: &releaseBody{ReadCloser: io.NopCloser(bytes.NewReader(body)), release: func() {
 						if nodeBanned {
-							a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, upstream.StatusCode, nil)
+							a.egress.FeedbackNodeBanned(context.WithoutCancel(ctx), lease.NodeID)
 						}
 						lease.Release()
 					}},
