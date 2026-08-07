@@ -87,6 +87,9 @@ export const settingsSchema = z.object({
     flareSolverrURL: z.string().trim().max(2048),
     clearanceTimeout: durationSchema.refine((value) => durationSeconds(value) >= 10 && durationSeconds(value) <= 300),
     clearanceRefresh: durationSchema.refine((value) => durationSeconds(value) >= 60 && durationSeconds(value) <= 86_400),
+    mihomoEnabled: z.boolean(),
+    mihomoAPIURL: z.string().trim().max(2048),
+    mihomoGroupName: z.string().trim().max(256),
     quotaTimeout: durationSchema, chatTimeout: durationSchema, streamIdleTimeout: providerStreamIdleDuration, imageTimeout: durationSchema, videoTimeout: durationSchema,
     mediaConcurrency: positiveInteger.max(64), allowNSFW: z.boolean(),
     recoveryBackoffBase: durationSchema, recoveryBackoffMax: durationSchema,
@@ -110,6 +113,9 @@ export const settingsSchema = z.object({
     }
     if (value.clearanceMode === "flaresolverr" && !validHTTPURL(value.flareSolverrURL)) {
       context.addIssue({ code: "custom", path: ["flareSolverrURL"], message: "invalid" });
+    }
+    if (value.mihomoEnabled && !validHTTPURL(value.mihomoAPIURL)) {
+      context.addIssue({ code: "custom", path: ["mihomoAPIURL"], message: "invalid" });
     }
   }),
   providerConsole: z.object({

@@ -9,6 +9,7 @@ export type SettingsConfigDTO = {
     baseURL: string; quotaTimeout: string; chatTimeout: string; streamIdleTimeout: string; imageTimeout: string; videoTimeout: string;
     statsigMode: "manual" | "url"; statsigManualValue?: string; statsigManualConfigured: boolean; statsigSignerURL: string;
     clearanceMode: "manual" | "flaresolverr"; flareSolverrURL: string; clearanceTimeout: string; clearanceRefresh: string;
+    mihomoEnabled: boolean; mihomoAPIURL: string; mihomoGroupName: string;
     mediaConcurrency: number; allowNSFW: boolean;
     recoveryBackoffBase: string; recoveryBackoffMax: string;
   };
@@ -109,6 +110,7 @@ const settingsConfigValidator = hasShape({
     statsigMode: isOneOf("manual", "url"), statsigManualValue: isOptional(isString), statsigManualConfigured: isBoolean,
     statsigSignerURL: isString, clearanceMode: isOneOf("manual", "flaresolverr"), flareSolverrURL: isString,
     clearanceTimeout: isString, clearanceRefresh: isString, mediaConcurrency: isNumber, allowNSFW: isBoolean, recoveryBackoffBase: isString, recoveryBackoffMax: isString,
+    mihomoEnabled: isOptional(isBoolean), mihomoAPIURL: isOptional(isString), mihomoGroupName: isOptional(isString),
   }),
   providerConsole: hasShape({ baseURL: isString, chatTimeout: isString, streamIdleTimeout: isOptional(isString) }),
   batch: hasShape({ importConcurrency: isNumber, conversionConcurrency: isNumber, syncConcurrency: isNumber, refreshConcurrency: isNumber, randomDelay: isString }),
@@ -148,6 +150,9 @@ function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDT
       ...snapshot.config,
       providerWeb: {
         ...snapshot.config.providerWeb,
+        mihomoEnabled: snapshot.config.providerWeb.mihomoEnabled ?? false,
+        mihomoAPIURL: snapshot.config.providerWeb.mihomoAPIURL ?? "",
+        mihomoGroupName: snapshot.config.providerWeb.mihomoGroupName ?? "",
         streamIdleTimeout: snapshot.config.providerWeb.streamIdleTimeout || "1m30s",
       },
       providerConsole: {
@@ -303,6 +308,40 @@ export function getSettings(): Promise<SettingsSnapshotDTO> {
 
 export function updateSettings(revision: string, config: SettingsConfigDTO): Promise<SettingsSnapshotDTO> {
   return apiRequest("/api/admin/v1/settings", { method: "PUT", body: { revision, config } }, decodeSettingsSnapshot);
+}
+
+export type MihomoStatusDTO = {
+  enabled: boolean;
+  apiUrl: string;
+  groupName: string;
+  currentNode: string;
+  bannedNodes: string[];
+  switchCount: number;
+  reachable: boolean;
+  lastError: string;
+};
+
+const mihomoStatusValidator = createObjectDecoder<MihomoStatusDTO>("mihomo status", {
+  enabled: isBoolean,
+  apiUrl: isString,
+  groupName: isString,
+  currentNode: isString,
+  bannedNodes: isArrayOf(isString),
+  switchCount: isNumber,
+  reachable: isBoolean,
+  lastError: isString,
+});
+
+export function getMihomoStatus(): Promise<MihomoStatusDTO> {
+  return apiRequest("/api/admin/v1/egress-mihomo/status", {}, mihomoStatusValidator);
+}
+
+export function switchMihomoNode(): Promise<{ switched: boolean; node: string }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/switch", { method: "POST" }, createObjectDecoder<{ switched: boolean; node: string }>("mihomo switch", { switched: isBoolean, node: isString }));
+}
+
+export function clearMihomoBlacklist(): Promise<{ cleared: number }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/blacklist/clear", { method: "POST" }, createObjectDecoder<{ cleared: number }>("mihomo blacklist clear", { cleared: isNumber }));
 }
 
 type ListEgressNodesInput = {

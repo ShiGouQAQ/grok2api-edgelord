@@ -14,6 +14,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { EgressNodes } from "@/features/settings/egress-nodes";
+import { MihomoStatusPanel } from "@/features/settings/egress-mihomo";
 import { VersionUpdateSection } from "@/features/system/version-update";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { isByteSizeUnit, isDurationUnit, MAX_ROUTING_ATTEMPTS, type ByteSizeValue, type DurationValue, UNLIMITED_ROUTING_ATTEMPTS } from "@/features/settings/settings-model";
@@ -39,6 +40,7 @@ export function SettingsPage() {
   const loading = settingsQuery.isPending;
   const statsigMode = form.watch("providerWeb.statsigMode");
   const draftClearanceMode = form.watch("providerWeb.clearanceMode");
+  const draftMihomoEnabled = form.watch("providerWeb.mihomoEnabled");
   const activeClearanceMode = snapshot?.config.providerWeb.clearanceMode ?? draftClearanceMode;
   const statsigManualConfigured = form.watch("providerWeb.statsigManualConfigured");
   const buildClientVersion = form.watch("providerBuild.clientVersion");
@@ -203,6 +205,21 @@ export function SettingsPage() {
                 <SettingsField controlId="egress-clearance-timeout" label={t("settings.web.clearanceTimeout")} description={t("settings.web.clearanceTimeoutHelp")} error={form.formState.errors.providerWeb?.clearanceTimeout?.message}><Controller control={form.control} name="providerWeb.clearanceTimeout" render={({ field }) => <DurationInput id="egress-clearance-timeout" value={field.value} onChange={field.onChange} />} /></SettingsField>
                 <SettingsField controlId="egress-clearance-refresh" label={t("settings.web.clearanceRefresh")} description={t("settings.web.clearanceRefreshHelp")} error={form.formState.errors.providerWeb?.clearanceRefresh?.message}><Controller control={form.control} name="providerWeb.clearanceRefresh" render={({ field }) => <DurationInput id="egress-clearance-refresh" value={field.value} onChange={field.onChange} />} /></SettingsField>
               </> : null}
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title={t("settings.egress.mihomo")}>
+            <div className="space-y-0">
+              <SettingsField controlId="egress-mihomo-enabled" className="sm:col-span-2" label={t("settings.web.mihomoEnabled")} description={t("settings.web.mihomoEnabledHelp")}>
+                <Controller control={form.control} name="providerWeb.mihomoEnabled" render={({ field }) => <div className="flex h-8 items-center"><Switch id="egress-mihomo-enabled" checked={field.value} onCheckedChange={field.onChange} /></div>} />
+              </SettingsField>
+              {draftMihomoEnabled ? <>
+                <SettingsField controlId="egress-mihomo-api-url" className="sm:col-span-2" label={t("settings.web.mihomoAPIURL")} description={t("settings.web.mihomoAPIURLHelp")} error={form.formState.errors.providerWeb?.mihomoAPIURL?.message}><Input id="egress-mihomo-api-url" type="url" placeholder="http://127.0.0.1:9093" {...form.register("providerWeb.mihomoAPIURL")} /></SettingsField>
+                <SettingsField controlId="egress-mihomo-group-name" className="sm:col-span-2" label={t("settings.web.mihomoGroupName")} description={t("settings.web.mihomoGroupNameHelp")} error={form.formState.errors.providerWeb?.mihomoGroupName?.message}><Input id="egress-mihomo-group-name" placeholder="XAI-GROUP" {...form.register("providerWeb.mihomoGroupName")} /></SettingsField>
+              </> : null}
+              <div className="sm:col-span-2">
+                <MihomoStatusPanel />
+              </div>
             </div>
           </SettingsSection>
 
