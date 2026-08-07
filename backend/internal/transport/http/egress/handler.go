@@ -74,6 +74,9 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/egress-operations", h.operationsConfig)
 	router.PUT("/egress-operations", h.updateOperationsConfig)
 	router.POST("/egress-operations/rebalance", h.rebalance)
+	router.GET("/egress-mihomo/status", h.mihomoStatus)
+	router.POST("/egress-mihomo/switch", h.mihomoSwitch)
+	router.POST("/egress-mihomo/blacklist/clear", h.mihomoClearBlacklist)
 }
 
 // RegisterQualityGuard exposes the minimum egress surface required by the
@@ -85,11 +88,75 @@ func (h *Handler) RegisterQualityGuard(router *gin.RouterGroup) {
 	router.POST("/egress-nodes/:id/test", h.testNode)
 	router.POST("/egress-nodes/:id/quality-test", h.testQualityGuardNode)
 	router.GET("/egress-operations", h.operationsConfig)
+	router.GET("/egress-mihomo/status", h.mihomoStatus)
+	router.POST("/egress-mihomo/rotate", h.mihomoRotate)
 }
 
 // A fully populated 2,000-node guard state is slightly larger than 1 MiB.
 // Keep a bounded limit while leaving headroom for audit cursors and events.
 const maxQualityGuardStateBytes = 8 << 20
+
+func (h *Handler) mihomoStatus(c *gin.Context) {
+	value, err := h.service.MihomoStatus(c.Request.Context())
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	bannedNodes := value.BannedNodes
+	if bannedNodes == nil {
+		bannedNodes = []string{}
+	}
+	response.Success(c, http.StatusOK, gin.H{
+		"enabled": value.Enabled, "apiUrl": value.APIURL, "groupName": value.GroupName,
+		"currentNode": value.CurrentNode, "bannedNodes": bannedNodes, "switchCount": value.SwitchCount,
+		"epoch": value.Epoch, "reachable": value.Reachable, "lastError": value.LastError,
+	})
+}
+
+func (h *Handler) mihomoSwitch(c *gin.Context) {
+	node, err := h.service.MihomoSwitch(c.Request.Context())
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"switched": true, "node": node})
+}
+
+func (h *Handler) mihomoClearBlacklist(c *gin.Context) {
+	cleared, err := h.service.MihomoClearBlacklist()
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"cleared": cleared})
+}
+
+// mihomoRotateRequest 镜像 quality_guard.py rotate_node 的请求体
+// （{"nodeId": "...", "oldExitIp": "..."}，字段大小写兼容 camelCase）。
+type mihomoRotateRequest struct {
+	NodeID    string `json:"nodeId"`
+	OldExitIP string `json:"oldExitIp"`
+}
+
+// mihomoRotate 实现质量守护 rotate_node 契约：组模型下所有 DB 节点共享
+// 同一个 Mihomo 组出口，nodeId 仅作契约校验、不参与选路。响应只读字段是
+// changed（guard 要求 changed==true 否则判定轮换失败）。
+func (h *Handler) mihomoRotate(c *gin.Context) {
+	var request mihomoRotateRequest
+	if c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.NodeID) == "" {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	value, err := h.service.Rotate(c.Request.Context())
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{
+		"changed": value.Changed, "nodeId": request.NodeID, "oldExitIp": request.OldExitIP,
+		"newExitIp": "", "newNode": value.NewNode,
+	})
+}
 
 type qualityGuardState struct {
 	Version           int                              `json:"version"`
@@ -1149,6 +1216,8 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 		response.Error(c, http.StatusBadGateway, "egressSubscriptionSyncFailed", "代理订阅同步失败")
 	case errors.Is(err, egressapp.ErrClearanceUnavailable):
 		response.Error(c, http.StatusConflict, "clearanceRefreshUnavailable", err.Error())
+	case errors.Is(err, egressapp.ErrMihomoUnavailable):
+		response.Error(c, http.StatusServiceUnavailable, "egressMihomoUnavailable", err.Error())
 	case errors.Is(err, egressapp.ErrQualityProbeUnavailable):
 		response.Error(c, http.StatusServiceUnavailable, "egressQualityProbeUnavailable", err.Error())
 	case strings.Contains(err.Error(), "FlareSolverr") || strings.Contains(err.Error(), "Clearance"):

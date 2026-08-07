@@ -2,6 +2,7 @@ package egress
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
 	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
+	"github.com/chenyme/grok2api/backend/internal/transport/http/middleware"
 	"github.com/gin-gonic/gin"
 )
 
@@ -292,5 +294,65 @@ func TestOperationsConfigResponseReportsSubscriptionProxyWithoutExposingIt(t *te
 	}
 	if response.ProbeProvider != "cloudflare" {
 		t.Fatalf("probe provider=%q", response.ProbeProvider)
+	}
+}
+
+type stubMihomoManager struct {
+	rotation egressapp.MihomoRotation
+	err      error
+}
+
+func (value stubMihomoManager) MihomoStatus(context.Context) egressapp.MihomoStatus {
+	return egressapp.MihomoStatus{}
+}
+func (value stubMihomoManager) MihomoSwitch(context.Context) (string, error) { return "", nil }
+func (value stubMihomoManager) MihomoClearBlacklist() (int, error)           { return 0, nil }
+func (value stubMihomoManager) Rotate(context.Context) (egressapp.MihomoRotation, error) {
+	return value.rotation, value.err
+}
+
+func newQualityGuardRotateRouter(service *egressapp.Service) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	internal := router.Group("/api/internal/v1/quality-guard")
+	internal.Use(middleware.QualityGuardAuth("guard-secret"))
+	NewHandler(service).RegisterQualityGuard(internal)
+	return router
+}
+
+func TestQualityGuardRotateRequiresToken(t *testing.T) {
+	router := newQualityGuardRotateRouter(nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/rotate", bytes.NewBufferString(`{"nodeId":"8"}`)))
+	if recorder.Code != 401 || !strings.Contains(recorder.Body.String(), `"code":"qualityGuardUnauthorized"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardRotateReportsChanged(t *testing.T) {
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{rotation: egressapp.MihomoRotation{Changed: true, NewNode: "fast"}})
+	router := newQualityGuardRotateRouter(service)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/rotate", bytes.NewBufferString(`{"nodeId":"8","oldExitIp":"10.0.0.1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"changed":true`) || !strings.Contains(recorder.Body.String(), `"nodeId":"8"`) || !strings.Contains(recorder.Body.String(), `"oldExitIp":"10.0.0.1"`) || !strings.Contains(recorder.Body.String(), `"newNode":"fast"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardRotateRejectsEmptyNodeID(t *testing.T) {
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{rotation: egressapp.MihomoRotation{Changed: true}})
+	router := newQualityGuardRotateRouter(service)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/rotate", bytes.NewBufferString(`{"nodeId":""}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 400 || !strings.Contains(recorder.Body.String(), `"code":"invalidRequest"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
