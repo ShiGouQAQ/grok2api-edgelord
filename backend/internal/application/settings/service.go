@@ -62,6 +62,8 @@ type ProviderWebConfig struct {
 	MihomoIPProbeURL        string
 	MihomoMaxAttempts       int
 	MihomoVerifyTimeout     string
+	MihomoTestGroupName     string
+	MihomoTestProxyURL      string
 	// ClearanceProvided distinguishes older admin clients that predate the
 	// managed-clearance fields from an explicit update to those fields.
 	ClearanceProvided bool
@@ -363,6 +365,14 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 	if mihomoVerifyTimeout <= 0 {
 		mihomoVerifyTimeout = base.Provider.Web.MihomoVerifyTimeout.Value()
 	}
+	mihomoTestGroupName := strings.TrimSpace(value.ProviderWeb.MihomoTestGroupName)
+	if mihomoTestGroupName == "" {
+		mihomoTestGroupName = base.Provider.Web.MihomoTestGroupName
+	}
+	mihomoTestProxyURL := strings.TrimSpace(value.ProviderWeb.MihomoTestProxyURL)
+	if mihomoTestProxyURL == "" {
+		mihomoTestProxyURL = base.Provider.Web.MihomoTestProxyURL
+	}
 	base.Provider.Web = config.WebProviderConfig{
 		BaseURL: value.ProviderWeb.BaseURL, QuotaTimeout: config.Duration(value.ProviderWeb.QuotaTimeout),
 		StatsigMode: value.ProviderWeb.StatsigMode, StatsigManualValue: value.ProviderWeb.StatsigManualValue, StatsigSignerURL: value.ProviderWeb.StatsigSignerURL,
@@ -376,6 +386,7 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		MihomoEnabled: value.ProviderWeb.MihomoEnabled, MihomoAPIURL: mihomoAPIURL, MihomoGroupName: mihomoGroupName,
 		MihomoExitProbeProxyURL: mihomoExitProbe, MihomoIPProbeURL: mihomoIPProbe, MihomoMaxAttempts: mihomoMaxAttempts,
 		MihomoVerifyTimeout: config.Duration(mihomoVerifyTimeout),
+		MihomoTestGroupName: mihomoTestGroupName, MihomoTestProxyURL: mihomoTestProxyURL,
 	}
 	if value.ProviderWeb.StreamIdleTimeout <= 0 {
 		base.Provider.Web.StreamIdleTimeout = config.Duration(settingsdomain.DefaultWebStreamIdleTimeout)
@@ -483,6 +494,7 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			MihomoEnabled: value.Provider.Web.MihomoEnabled, MihomoAPIURL: value.Provider.Web.MihomoAPIURL, MihomoGroupName: value.Provider.Web.MihomoGroupName,
 			MihomoExitProbeProxyURL: value.Provider.Web.MihomoExitProbeProxyURL, MihomoIPProbeURL: value.Provider.Web.MihomoIPProbeURL,
 			MihomoMaxAttempts: value.Provider.Web.MihomoMaxAttempts, MihomoVerifyTimeout: value.Provider.Web.MihomoVerifyTimeout.Value(),
+			MihomoTestGroupName: value.Provider.Web.MihomoTestGroupName, MihomoTestProxyURL: value.Provider.Web.MihomoTestProxyURL,
 		},
 		ProviderConsole: settingsdomain.ProviderConsoleConfig{
 			BaseURL: value.Provider.Console.BaseURL, ChatTimeout: value.Provider.Console.ChatTimeout.Value(),
@@ -584,6 +596,12 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	}
 	if value := strings.TrimSpace(input.ProviderWeb.MihomoIPProbeURL); value != "" {
 		next.Provider.Web.MihomoIPProbeURL = value
+	}
+	if value := strings.TrimSpace(input.ProviderWeb.MihomoTestGroupName); value != "" {
+		next.Provider.Web.MihomoTestGroupName = value
+	}
+	if value := strings.TrimSpace(input.ProviderWeb.MihomoTestProxyURL); value != "" {
+		next.Provider.Web.MihomoTestProxyURL = value
 	}
 	if input.ProviderWeb.MihomoMaxAttempts > 0 {
 		next.Provider.Web.MihomoMaxAttempts = input.ProviderWeb.MihomoMaxAttempts
@@ -722,6 +740,7 @@ func toEditable(cfg config.Config) EditableConfig {
 			MihomoEnabled: cfg.Provider.Web.MihomoEnabled, MihomoAPIURL: cfg.Provider.Web.MihomoAPIURL, MihomoGroupName: cfg.Provider.Web.MihomoGroupName,
 			MihomoExitProbeProxyURL: cfg.Provider.Web.MihomoExitProbeProxyURL, MihomoIPProbeURL: cfg.Provider.Web.MihomoIPProbeURL,
 			MihomoMaxAttempts: cfg.Provider.Web.MihomoMaxAttempts, MihomoVerifyTimeout: cfg.Provider.Web.MihomoVerifyTimeout.String(),
+			MihomoTestGroupName: cfg.Provider.Web.MihomoTestGroupName, MihomoTestProxyURL: cfg.Provider.Web.MihomoTestProxyURL,
 		},
 		ProviderConsole: ProviderConsoleConfig{
 			BaseURL: cfg.Provider.Console.BaseURL, ChatTimeout: cfg.Provider.Console.ChatTimeout.String(),

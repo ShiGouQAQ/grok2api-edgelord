@@ -80,6 +80,8 @@ type ProviderWebConfig struct {
 	MihomoIPProbeURL        string
 	MihomoMaxAttempts       int
 	MihomoVerifyTimeout     time.Duration
+	MihomoTestGroupName     string
+	MihomoTestProxyURL      string
 }
 
 // BatchConfig 定义账号导入、转换、同步和凭据刷新的并发上限。

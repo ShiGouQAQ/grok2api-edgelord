@@ -33,6 +33,8 @@ const (
 	DefaultMihomoIPProbeURL        = "https://1.1.1.1/cdn-cgi/trace"
 	DefaultMihomoMaxAttempts       = 3
 	DefaultMihomoVerifyTimeout     = 15 * time.Second
+	DefaultMihomoTestGroupName     = "XAI-TEST-GROUP"
+	DefaultMihomoTestProxyURL      = "http://127.0.0.1:7891"
 	RecommendedBuildClientVersion  = "0.2.119"
 	RecommendedBuildUserAgent      = "grok-shell/" + RecommendedBuildClientVersion + " (linux; x86_64)"
 
@@ -192,6 +194,9 @@ type WebProviderConfig struct {
 	MihomoIPProbeURL        string   `yaml:"mihomoIPProbeURL"`
 	MihomoMaxAttempts       int      `yaml:"mihomoMaxAttempts"`
 	MihomoVerifyTimeout     Duration `yaml:"mihomoVerifyTimeout"`
+	// 双通道测试组（守卫探测专用）：两者皆空 = legacy 单组行为（零回归）。
+	MihomoTestGroupName string `yaml:"mihomoTestGroupName"`
+	MihomoTestProxyURL  string `yaml:"mihomoTestProxyURL"`
 }
 
 type ConsoleProviderConfig struct {
@@ -821,6 +826,7 @@ func defaultConfig() Config {
 				MihomoEnabled:      false, MihomoAPIURL: DefaultMihomoAPIURL, MihomoGroupName: DefaultMihomoGroupName,
 				MihomoExitProbeProxyURL: DefaultMihomoExitProbeProxyURL, MihomoIPProbeURL: DefaultMihomoIPProbeURL,
 				MihomoMaxAttempts: DefaultMihomoMaxAttempts, MihomoVerifyTimeout: Duration(DefaultMihomoVerifyTimeout),
+				MihomoTestGroupName: DefaultMihomoTestGroupName, MihomoTestProxyURL: DefaultMihomoTestProxyURL,
 			},
 			Console: ConsoleProviderConfig{BaseURL: "https://console.x.ai", ChatTimeout: Duration(5 * time.Minute), StreamIdleTimeout: Duration(settingsdomain.DefaultConsoleStreamIdleTimeout)},
 		},

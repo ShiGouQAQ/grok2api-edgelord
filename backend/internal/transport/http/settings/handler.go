@@ -93,6 +93,8 @@ type providerWebConfigDTO struct {
 	MihomoIPProbeURL        string  `json:"mihomoIPProbeURL"`
 	MihomoMaxAttempts       int     `json:"mihomoMaxAttempts"`
 	MihomoVerifyTimeout     string  `json:"mihomoVerifyTimeout"`
+	MihomoTestGroupName     string  `json:"mihomoTestGroupName"`
+	MihomoTestProxyURL      string  `json:"mihomoTestProxyURL"`
 }
 
 type batchConfigDTO struct {
@@ -213,6 +215,7 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			MihomoEnabled: value.ProviderWeb.MihomoEnabled, MihomoAPIURL: value.ProviderWeb.MihomoAPIURL, MihomoGroupName: value.ProviderWeb.MihomoGroupName,
 			MihomoExitProbeProxyURL: value.ProviderWeb.MihomoExitProbeProxyURL, MihomoIPProbeURL: value.ProviderWeb.MihomoIPProbeURL,
 			MihomoMaxAttempts: value.ProviderWeb.MihomoMaxAttempts, MihomoVerifyTimeout: value.ProviderWeb.MihomoVerifyTimeout,
+			MihomoTestGroupName: value.ProviderWeb.MihomoTestGroupName, MihomoTestProxyURL: value.ProviderWeb.MihomoTestProxyURL,
 		},
 		ProviderConsole: settingsapp.ProviderConsoleConfig{
 			BaseURL: value.ProviderConsole.BaseURL, ChatTimeout: value.ProviderConsole.ChatTimeout,
@@ -296,6 +299,7 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				MihomoEnabled: config.ProviderWeb.MihomoEnabled, MihomoAPIURL: config.ProviderWeb.MihomoAPIURL, MihomoGroupName: config.ProviderWeb.MihomoGroupName,
 				MihomoExitProbeProxyURL: config.ProviderWeb.MihomoExitProbeProxyURL, MihomoIPProbeURL: config.ProviderWeb.MihomoIPProbeURL,
 				MihomoMaxAttempts: config.ProviderWeb.MihomoMaxAttempts, MihomoVerifyTimeout: config.ProviderWeb.MihomoVerifyTimeout,
+				MihomoTestGroupName: config.ProviderWeb.MihomoTestGroupName, MihomoTestProxyURL: config.ProviderWeb.MihomoTestProxyURL,
 			},
 			ProviderConsole: providerConsoleConfigDTO{
 				BaseURL: config.ProviderConsole.BaseURL, ChatTimeout: config.ProviderConsole.ChatTimeout,

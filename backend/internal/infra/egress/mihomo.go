@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,10 @@ import (
 )
 
 const maxMihomoResponseBytes = 4 << 20
+
+// mihomoDelayProbeTimeout 是主动延迟探测的单节点探测截止时长，同时作为
+// ProbeGroupDelays 的默认 timeout 参数。
+const mihomoDelayProbeTimeout = 5 * time.Second
 
 // mihomoBlacklistTTL 是黑名单条目的存活时长，对齐 Go 节点指数冷却的上限
 // (min(10*time.Minute, ...))：封禁超过 TTL 后节点自动解禁，避免节点集稳定
@@ -80,6 +85,20 @@ type MihomoConfig struct {
 	MaxAttempts int
 	// VerifyTimeout 是每次尝试内出口 IP 轮询的截止时长（默认 15s）。
 	VerifyTimeout time.Duration
+	// TestGroupName 是测试组名称（如 XAI-TEST-GROUP，见
+	// tools/mihomo/mihomo-dual-channel.yaml）。与 TestProxyURL 同时非空时启用
+	// 双通道：Manager 为测试组创建独立 MihomoClient 实例（各自维护黑名单/
+	// switching/epoch），测试组切换只作用于测试客户端自身，绝不扰动生产出口。
+	// 两者皆空 = legacy 单组行为（零回归）。
+	TestGroupName string
+	// TestProxyURL 是测试组本地代理端口（如 http://127.0.0.1:7891，listener
+	// 直连测试组）。测试客户端的出口 IP 校验经它转发；TestGroupName 为空时忽略。
+	TestProxyURL string
+	// DelayProbeURL 是延迟探测目标 URL（如 http://www.gstatic.com/generate_204）。
+	// 非空时 SelectOptimal 在历史延迟数据缺失时调用 Mihomo /group/{group}/delay
+	// 主动探测各节点延迟（select 组不产生 history）；探测失败回退首可用节点。
+	// 空 = 现有行为（零回归）。
+	DelayProbeURL string
 }
 
 // mihomoGroup 是 GET /proxies/{group} 的响应子集。
@@ -160,6 +179,8 @@ func (c *MihomoClient) log() *slog.Logger {
 func (c *MihomoClient) UpdateConfig(cfg MihomoConfig) {
 	cfg.APIURL = strings.TrimRight(strings.TrimSpace(cfg.APIURL), "/")
 	cfg.GroupName = strings.TrimSpace(cfg.GroupName)
+	cfg.TestGroupName = strings.TrimSpace(cfg.TestGroupName)
+	cfg.TestProxyURL = strings.TrimSpace(cfg.TestProxyURL)
 	if cfg.IPProbeURL == "" {
 		cfg.IPProbeURL = defaultExitIPProbeURL
 	}
@@ -229,6 +250,36 @@ func (c *MihomoClient) ClearBlacklist() int {
 	return count
 }
 
+// BanNode 将节点加入黑名单（TTL mihomoBlacklistTTL，到期自动解禁），返回
+// 当前黑名单节点数。已封禁节点重复封禁只刷新 TTL。黑名单只影响
+// SelectOptimal/SelectOptimalInGroup 的候选集，不直接切换节点；质量守护用它
+// 封禁测试组内探测失败的成员。
+func (c *MihomoClient) BanNode(name string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return len(c.blacklist)
+	}
+	if _, exists := c.blacklist[name]; !exists {
+		c.epoch.Add(1)
+	}
+	c.blacklist[name] = time.Now().UTC().Add(mihomoBlacklistTTL)
+	return len(c.blacklist)
+}
+
+// UnbanNode 将节点移出黑名单（解禁），返回剩余黑名单节点数。
+func (c *MihomoClient) UnbanNode(name string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	name = strings.TrimSpace(name)
+	if _, exists := c.blacklist[name]; exists {
+		delete(c.blacklist, name)
+		c.epoch.Add(1)
+	}
+	return len(c.blacklist)
+}
+
 // GetGroupNodes 获取代理组当前的全部节点列表（GET /proxies/{group} 的 all）。
 // 非 200 或连接失败返回错误。
 func (c *MihomoClient) GetGroupNodes(ctx context.Context) ([]string, error) {
@@ -288,7 +339,17 @@ func (c *MihomoClient) SwitchNode(ctx context.Context, name string) error {
 // updateBlacklistOnNodeChangeLocked（节点集变化）或 UpdateConfig（配置变化）
 // 清空，避免失败的切换触发源不断重复轮换同一批节点。
 func (c *MihomoClient) SelectOptimal(ctx context.Context, excludeCurrent bool) (string, error) {
-	group, err := c.fetchGroup(ctx)
+	return c.selectOptimalInGroup(ctx, "", excludeCurrent)
+}
+
+// SelectOptimalInGroup 在指定组内选择最优节点（groupName 为空时使用客户端
+// 当前配置组）。规则与 SelectOptimal 一致，供按名操作组（双通道测试组）复用。
+func (c *MihomoClient) SelectOptimalInGroup(ctx context.Context, groupName string, excludeCurrent bool) (string, error) {
+	return c.selectOptimalInGroup(ctx, groupName, excludeCurrent)
+}
+
+func (c *MihomoClient) selectOptimalInGroup(ctx context.Context, groupName string, excludeCurrent bool) (string, error) {
+	group, err := c.fetchGroupNamed(ctx, groupName)
 	if err != nil {
 		return "", err
 	}
@@ -330,6 +391,17 @@ func (c *MihomoClient) SelectOptimal(ctx context.Context, excludeCurrent bool) (
 			}
 			if current, exists := latencies[node.Name]; !exists || delay < current {
 				latencies[node.Name] = delay
+			}
+		}
+	}
+	if len(latencies) == 0 {
+		// 没有历史延迟数据（select 组不产生 history）：配置了 DelayProbeURL
+		// 时主动探测一次，仍无数据则回退第一个可用节点（保持旧版语义）。
+		if fresh, ok := c.delayProbe(ctx, groupName, available); ok {
+			for name, delay := range fresh {
+				if current, exists := latencies[name]; !exists || delay < current {
+					latencies[name] = delay
+				}
 			}
 		}
 	}
@@ -381,6 +453,51 @@ func (c *MihomoClient) Rotate(ctx context.Context, reason string) (string, Mihom
 		c.log().Warn("mihomo_rotate_get_current", "reason", reason, "error", err)
 		return "", MihomoSwitchDone
 	}
+	return name, MihomoSwitchDone
+}
+
+// SwitchTestGroup 将组切换到指定节点（显式目标，不经过 SelectOptimal）。
+// 质量守护在测试组上逐节点探测时使用：目标明确，无需延迟择优。单飞语义与
+// doSwitch 一致；切换只在本客户端自身递增 switchCount/epoch —— 双通道下
+// 测试客户端是独立实例，测试切换绝不作用于生产出口指纹。
+func (c *MihomoClient) SwitchTestGroup(ctx context.Context, name, reason string) (string, MihomoSwitchResult) {
+	c.mu.Lock()
+	if c.switching {
+		c.mu.Unlock()
+		c.log().Info("mihomo_switch_merged", "reason", reason)
+		return "", MihomoSwitchMerged
+	}
+	c.switching = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.switching = false
+		c.mu.Unlock()
+	}()
+
+	if _, ok := c.configSnapshot(); !ok {
+		c.recordError()
+		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "config", "error", "Mihomo 未启用或未配置")
+		return "", MihomoSwitchFailed
+	}
+	if strings.TrimSpace(name) == "" {
+		c.recordError()
+		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "target", "error", "切换目标节点为空")
+		return "", MihomoSwitchFailed
+	}
+	if err := c.SwitchNode(ctx, name); err != nil {
+		c.recordError()
+		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "switch", "target", name, "error", err)
+		return "", MihomoSwitchFailed
+	}
+	if err := c.verifySwitch(ctx, name); err != nil {
+		c.recordError()
+		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "verify", "target", name, "error", err)
+		return "", MihomoSwitchFailed
+	}
+	c.switchCount.Add(1)
+	c.epoch.Add(1)
+	c.log().Info("mihomo_test_switch", "reason", reason, "to", name, "switch_count", c.switchCount.Load(), "epoch", c.epoch.Load())
 	return name, MihomoSwitchDone
 }
 
@@ -481,6 +598,77 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 	return node, MihomoSwitchDone
 }
 
+// ProbeGroupDelays 调用 Mihomo REST API（GET /group/{group}/delay）探测组内
+// 全部节点的延迟（url 为延迟测试目标，timeout 为单节点探测截止时长），返回
+// 节点名 -> 毫秒 的映射；探测失败（不可达/超时）的节点为 0 或缺失。整个请求
+// 失败返回错误。对 select 组只记录延迟、不改变当前选择（mihomo 仅对
+// URLTest/Fallback 自动组清除 fixed 选择），因此对生产出口零扰动。
+func (c *MihomoClient) ProbeGroupDelays(ctx context.Context, groupName, probeURL string, timeout time.Duration) (map[string]int, error) {
+	cfg, ok := c.configSnapshot()
+	if !ok {
+		return nil, errors.New("Mihomo 未启用或未配置")
+	}
+	if strings.TrimSpace(groupName) == "" {
+		groupName = cfg.GroupName
+	}
+	if timeout <= 0 {
+		timeout = mihomoDelayProbeTimeout
+	}
+	endpoint := cfg.APIURL + "/group/" + groupName + "/delay?url=" + url.QueryEscape(strings.TrimSpace(probeURL)) + "&timeout=" + strconv.Itoa(int(timeout/time.Millisecond))
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建 Mihomo 延迟探测请求: %w", err)
+	}
+	response, err := c.client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("调用 Mihomo 延迟探测 API: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxMihomoResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("读取 Mihomo 延迟响应: %w", err)
+	}
+	if len(body) > maxMihomoResponseBytes {
+		return nil, errors.New("Mihomo 响应过大")
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Mihomo 返回 HTTP %d", response.StatusCode)
+	}
+	var delays map[string]int
+	if err := json.Unmarshal(body, &delays); err != nil {
+		return nil, fmt.Errorf("解析 Mihomo 延迟响应: %w", err)
+	}
+	return delays, nil
+}
+
+// delayProbe 在配置了 DelayProbeURL 时对组内可用节点做一次主动延迟探测，
+// 返回可用（delay>0 且未被黑名单排除）节点的最新延迟；未配置或探测失败
+// 时 ok 为 false，调用方回退历史/首可用节点。
+func (c *MihomoClient) delayProbe(ctx context.Context, groupName string, available []string) (map[string]int, bool) {
+	cfg, ok := c.configSnapshot()
+	if !ok || strings.TrimSpace(cfg.DelayProbeURL) == "" {
+		return nil, false
+	}
+	delays, err := c.ProbeGroupDelays(ctx, groupName, cfg.DelayProbeURL, mihomoDelayProbeTimeout)
+	if err != nil {
+		c.log().Warn("mihomo_delay_probe_failed", "group", groupName, "error", err)
+		return nil, false
+	}
+	fresh := make(map[string]int, len(available))
+	for name, delay := range delays {
+		if delay <= 0 || !mihomoContains(available, name) {
+			continue
+		}
+		if current, exists := fresh[name]; !exists || delay < current {
+			fresh[name] = delay
+		}
+	}
+	if len(fresh) == 0 {
+		return nil, false
+	}
+	return fresh, true
+}
+
 // verifySwitch 切换后拉取一次组状态确认 now 已是目标节点。Mihomo 对 PUT
 // 返回 204 不代表选择器立即生效（URLTest 组可能异步重新选点）；验证失败
 // 时上层按未生效处理（回退 Go 节点冷却）。
@@ -568,11 +756,20 @@ func mihomoParseExitIP(body string) string {
 
 // fetchGroup 拉取并解析代理组完整响应。
 func (c *MihomoClient) fetchGroup(ctx context.Context) (mihomoGroup, error) {
+	return c.fetchGroupNamed(ctx, "")
+}
+
+// fetchGroupNamed 拉取并解析指定代理组完整响应；groupName 为空时使用客户端
+// 当前配置组。
+func (c *MihomoClient) fetchGroupNamed(ctx context.Context, groupName string) (mihomoGroup, error) {
 	cfg, ok := c.configSnapshot()
 	if !ok {
 		return mihomoGroup{}, errors.New("Mihomo 未启用或未配置")
 	}
-	endpoint := cfg.APIURL + "/proxies/" + cfg.GroupName
+	if strings.TrimSpace(groupName) == "" {
+		groupName = cfg.GroupName
+	}
+	endpoint := cfg.APIURL + "/proxies/" + groupName
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return mihomoGroup{}, fmt.Errorf("创建 Mihomo 请求: %w", err)

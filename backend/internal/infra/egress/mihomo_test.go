@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -735,5 +736,321 @@ func TestRotateMergedWhileSwitching(t *testing.T) {
 	defer switchMu.Unlock()
 	if len(switches) != 0 {
 		t.Fatalf("merged Rotate must not issue a PUT, got %v", switches)
+	}
+}
+
+// mihomoGroupAndDelayServer 同时提供 GET /proxies/{group} 与
+// GET /group/{group}/delay 的模拟服务，用于延迟探测与择优测试。
+func mihomoGroupAndDelayServer(t *testing.T, group *mihomoGroup, mu *sync.Mutex, delays func() map[string]int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/group/") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(delays())
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/proxies/") {
+			w.Header().Set("Content-Type", "application/json")
+			mu.Lock()
+			_ = json.NewEncoder(w).Encode(group)
+			mu.Unlock()
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+}
+
+func TestProbeGroupDelays(t *testing.T) {
+	var seenURL string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenURL = r.URL.RequestURI()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]int{"slow": 300, "fast": 50, "dead": 0})
+	}))
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	delays, err := client.ProbeGroupDelays(context.Background(), "XAI-GROUP", "http://www.gstatic.com/generate_204", 3*time.Second)
+	if err != nil {
+		t.Fatalf("ProbeGroupDelays: %v", err)
+	}
+	if delays["fast"] != 50 || delays["slow"] != 300 || delays["dead"] != 0 {
+		t.Fatalf("unexpected delays: %v", delays)
+	}
+	if !strings.Contains(seenURL, "/group/XAI-GROUP/delay?url=") || !strings.Contains(seenURL, "timeout=3000") {
+		t.Fatalf("unexpected delay request URL: %s", seenURL)
+	}
+}
+
+func TestProbeGroupDelaysNonOK(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	if _, err := client.ProbeGroupDelays(context.Background(), "XAI-GROUP", "http://example.com", time.Second); err == nil {
+		t.Fatal("expected error on non-200")
+	}
+}
+
+func TestProbeGroupDelaysDisabled(t *testing.T) {
+	client := NewMihomoClient(MihomoConfig{Enabled: false})
+	if _, err := client.ProbeGroupDelays(context.Background(), "XAI-GROUP", "http://example.com", time.Second); err == nil {
+		t.Fatal("expected error while disabled")
+	}
+}
+
+func TestSwitchTestGroup(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-TEST-GROUP"})
+	epoch := client.Epoch()
+	name, result := client.SwitchTestGroup(context.Background(), "slow", "guard_probe")
+	if result != MihomoSwitchDone {
+		t.Fatalf("SwitchTestGroup: got %v, want Done", result)
+	}
+	if name != "slow" {
+		t.Fatalf("SwitchTestGroup: got %q, want slow", name)
+	}
+	if client.SwitchCount() != 1 {
+		t.Fatalf("switchCount: got %d, want 1", client.SwitchCount())
+	}
+	if client.Epoch() != epoch+1 {
+		t.Fatalf("epoch: got %d, want %d", client.Epoch(), epoch+1)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 1 || switches[0] != "slow" {
+		t.Fatalf("explicit target switch: got %v, want [slow]", switches)
+	}
+}
+
+func TestSwitchTestGroupMergedWhileSwitching(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-TEST-GROUP"})
+	client.mu.Lock()
+	client.switching = true
+	client.mu.Unlock()
+	defer func() {
+		client.mu.Lock()
+		client.switching = false
+		client.mu.Unlock()
+	}()
+
+	name, result := client.SwitchTestGroup(context.Background(), "slow", "guard_probe")
+	if result != MihomoSwitchMerged {
+		t.Fatalf("SwitchTestGroup during in-flight switch: got %v, want Merged", result)
+	}
+	if name != "" {
+		t.Fatalf("merged switch must return empty name, got %q", name)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 0 {
+		t.Fatalf("merged switch must not issue a PUT, got %v", switches)
+	}
+}
+
+func TestSwitchTestGroupEmptyTarget(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-TEST-GROUP"})
+	if _, result := client.SwitchTestGroup(context.Background(), "", "guard_probe"); result != MihomoSwitchFailed {
+		t.Fatalf("empty target: got %v, want Failed", result)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 0 {
+		t.Fatalf("empty target must not issue a PUT, got %v", switches)
+	}
+}
+
+func TestSelectOptimalPrefersDelayProbeData(t *testing.T) {
+	// select 组不产生 history：配置 DelayProbeURL 时 SelectOptimal 主动探测择优。
+	group := mihomoGroup{All: []string{"first", "second"}, Now: "first"}
+	groupMu := &sync.Mutex{}
+	server := mihomoGroupAndDelayServer(t, &group, groupMu, func() map[string]int {
+		return map[string]int{"first": 200, "second": 40}
+	})
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{
+		Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP",
+		DelayProbeURL: "http://www.gstatic.com/generate_204",
+	})
+	best, err := client.SelectOptimal(context.Background(), false)
+	if err != nil {
+		t.Fatalf("SelectOptimal: %v", err)
+	}
+	if best != "second" {
+		t.Fatalf("delay-probe selection: got %q, want second (40ms)", best)
+	}
+}
+
+func TestSelectOptimalDelayProbeFailureFallsBack(t *testing.T) {
+	// 延迟探测失败（500）：回退第一个可用节点，保持旧版语义。
+	group := mihomoGroup{All: []string{"first", "second"}, Now: "first"}
+	groupMu := &sync.Mutex{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/group/") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		groupMu.Lock()
+		_ = json.NewEncoder(w).Encode(group)
+		groupMu.Unlock()
+	}))
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{
+		Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP",
+		DelayProbeURL: "http://www.gstatic.com/generate_204",
+	})
+	best, err := client.SelectOptimal(context.Background(), false)
+	if err != nil {
+		t.Fatalf("SelectOptimal: %v", err)
+	}
+	if best != "first" {
+		t.Fatalf("probe failure must fall back to first available: got %q, want first", best)
+	}
+}
+
+func TestSelectOptimalDelayProbeDisabledPreservesLegacy(t *testing.T) {
+	// 未配置 DelayProbeURL：即使组无历史数据也只回退首可用节点，不发探测请求。
+	group := mihomoGroup{All: []string{"first", "second"}, Now: "first"}
+	groupMu := &sync.Mutex{}
+	var groupProbes atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/group/") {
+			groupProbes.Add(1)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		groupMu.Lock()
+		_ = json.NewEncoder(w).Encode(group)
+		groupMu.Unlock()
+	}))
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	best, err := client.SelectOptimal(context.Background(), false)
+	if err != nil {
+		t.Fatalf("SelectOptimal: %v", err)
+	}
+	if best != "first" {
+		t.Fatalf("legacy fallback: got %q, want first", best)
+	}
+	if groupProbes.Load() != 0 {
+		t.Fatalf("delay probe must be skipped when DelayProbeURL is empty")
+	}
+}
+
+func TestSelectOptimalInGroup(t *testing.T) {
+	useGroup, useMu := mihomoTestGroup()
+	testGroup := mihomoGroup{
+		All: []string{"a", "b"},
+		Now: "a",
+		Providers: map[string]mihomoProvider{"p1": {Nodes: []mihomoNode{
+			{Name: "a", History: []mihomoDelay{{Delay: 300}}},
+			{Name: "b", History: []mihomoDelay{{Delay: 30}}},
+		}}},
+	}
+	testMu := &sync.Mutex{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/proxies/XAI-GROUP"):
+			useMu.Lock()
+			_ = json.NewEncoder(w).Encode(useGroup)
+			useMu.Unlock()
+		case strings.HasSuffix(r.URL.Path, "/proxies/XAI-TEST-GROUP"):
+			testMu.Lock()
+			_ = json.NewEncoder(w).Encode(testGroup)
+			testMu.Unlock()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	ctx := context.Background()
+	best, err := client.SelectOptimalInGroup(ctx, "XAI-TEST-GROUP", false)
+	if err != nil {
+		t.Fatalf("SelectOptimalInGroup: %v", err)
+	}
+	if best != "b" {
+		t.Fatalf("named-group selection: got %q, want b", best)
+	}
+	best, err = client.SelectOptimalInGroup(ctx, "", false)
+	if err != nil {
+		t.Fatalf("SelectOptimalInGroup default: %v", err)
+	}
+	if best != "fast" {
+		t.Fatalf("default-group selection: got %q, want fast", best)
+	}
+}
+
+func TestBanNode(t *testing.T) {
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: "http://127.0.0.1:9093", GroupName: "XAI-TEST-GROUP"})
+	epoch := client.Epoch()
+	if count := client.BanNode("slow"); count != 1 {
+		t.Fatalf("BanNode(slow): count=%d, want 1", count)
+	}
+	if client.Epoch() != epoch+1 {
+		t.Fatalf("ban must bump epoch: %d -> %d", epoch, client.Epoch())
+	}
+	// 重复封禁同一节点只刷新 TTL，不重复计数也不重复 bump。
+	if count := client.BanNode("slow"); count != 1 {
+		t.Fatalf("BanNode(slow) again: count=%d, want 1", count)
+	}
+	if client.Epoch() != epoch+1 {
+		t.Fatalf("re-ban must not bump epoch again: %d", client.Epoch())
+	}
+	if count := client.BanNode("fast"); count != 2 {
+		t.Fatalf("BanNode(fast): count=%d, want 2", count)
+	}
+	banned := client.BannedNodes()
+	if len(banned) != 2 || banned[0] != "fast" || banned[1] != "slow" {
+		t.Fatalf("BannedNodes: got %v, want [fast slow]", banned)
+	}
+}
+
+func TestUnbanNode(t *testing.T) {
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: "http://127.0.0.1:9093", GroupName: "XAI-TEST-GROUP"})
+	client.BanNode("slow")
+	client.BanNode("fast")
+	epoch := client.Epoch()
+	if count := client.UnbanNode("slow"); count != 1 {
+		t.Fatalf("UnbanNode(slow): count=%d, want 1", count)
+	}
+	if client.Epoch() != epoch+1 {
+		t.Fatalf("unban must bump epoch: %d -> %d", epoch, client.Epoch())
+	}
+	banned := client.BannedNodes()
+	if len(banned) != 1 || banned[0] != "fast" {
+		t.Fatalf("BannedNodes after unban: got %v, want [fast]", banned)
+	}
+	// 解禁未封禁节点保持计数不变，不 bump。
+	if count := client.UnbanNode("slow"); count != 1 {
+		t.Fatalf("UnbanNode(slow) again: count=%d, want 1", count)
+	}
+	if client.Epoch() != epoch+1 {
+		t.Fatalf("unban of non-banned node must not bump epoch: %d", client.Epoch())
 	}
 }
