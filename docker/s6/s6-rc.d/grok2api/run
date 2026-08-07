@@ -1,0 +1,3 @@
+#!/command/with-contenv sh
+set -eu
+exec su-exec "${PUID}:${PGID}" /app/grok2api --config /app/config.yaml --listen 0.0.0.0:8000
