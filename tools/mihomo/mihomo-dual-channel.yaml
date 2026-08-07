@@ -1,0 +1,100 @@
+# ============================================================
+# Mihomo 双通道配置模板（使用通道 + 测试通道）
+# ============================================================
+# 本模板是从 python-main 分支提取的 mihomo-xai.yaml 改进而来，
+# 实现"生产/测试流量物理隔离"的双通道架构：
+#
+#   use-group   (XAI-GROUP)      → mixed-port 7890 → DB 节点 ProxyURL 指向这里（生产流量）
+#   test-group  (XAI-TEST-GROUP) → listener  7891 → 质量守卫探测专用（只有守卫在动它）
+#
+# 关键点：
+#   1. 两个组 use 同一个 proxy-provider（同一批节点），各自独立选择状态
+#   2. 测试组只经 listener 直连（绕过 rules），生产流量仍走 rules 分流
+#   3. 守卫在测试组上自由切换探测成员质量，生产出口零扰动
+#   4. 两组的 now 相互独立；Go 侧双 client 实例各自维护 epoch/黑名单
+#
+# 依赖：mihomo v1.18+（listeners 功能）
+# ============================================================
+
+mixed-port: 7890          # 使用通道端口（生产流量；DB 节点 ProxyURL 指向 http://127.0.0.1:7890）
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: warning
+ipv6: false
+external-controller: 0.0.0.0:9093
+
+geodata-mode: true
+geodata-loader: memconservative
+geox-url:
+  geoip: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat"
+  geosite: "https://testingcf.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat"
+  mmdb: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb"
+  asn: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb"
+
+geo-auto-update: true
+geo-update-interval: 24
+
+geosite-matcher: mph
+
+tcp-concurrent: true
+unified-delay: true
+
+dns:
+  enable: true
+  listen: 0.0.0.0:53
+  ipv6: false
+  enhanced-mode: redir-host
+  nameserver:
+    - "https://doh.pub/dns-query"
+    - "223.5.5.5"
+
+# ------------------------------------------------------------
+# 代理组：同一批节点，两个独立选择状态
+# ------------------------------------------------------------
+proxy-groups:
+  # 使用组：生产流量出口。只有确认质量问题/403 封锁时才切换。
+  - name: XAI-GROUP
+    type: select              # 手动选择（不是 URLTest！URLTest 会在黑名单 TTL 后回选被禁节点）
+    use:
+      - xai-nodes
+
+  # 测试组：质量守卫探测专用。守卫可自由切换探测成员，不影响生产。
+  - name: XAI-TEST-GROUP
+    type: select              # 手动选择：守卫探测目标
+    use:
+      - xai-nodes
+
+# ------------------------------------------------------------
+# 多入口监听：测试通道经 listener 直连测试组（绕过 rules）
+# ------------------------------------------------------------
+listeners:
+  - name: test-inbound
+    type: mixed               # mixed = HTTP + SOCKS5 同端口
+    port: 7891                # 测试通道端口（守卫探测经 http://127.0.0.1:7891）
+    proxy: XAI-TEST-GROUP     # 直连测试组，不经过 rules 分流
+
+# ------------------------------------------------------------
+# 机场订阅（同一订阅喂给两个组）
+# ------------------------------------------------------------
+proxy-providers:
+  xai-nodes:
+    type: http
+    interval: 3600
+    health-check:
+      enable: true
+      url: "https://grok.com"
+      interval: 60
+      timeout: 5000
+    proxy: DIRECT
+    url: "YOUR_SUBSCRIPTION_URL"
+
+# ------------------------------------------------------------
+# 规则：仅生产流量经此分流；测试通道经 listener 绕过
+# ------------------------------------------------------------
+rules:
+  - GEOSITE,xai,XAI-GROUP
+  # Cloudflare
+  - GEOIP,cloudflare,XAI-GROUP
+  - GEOIP,CN,DIRECT
+  - MATCH,DIRECT

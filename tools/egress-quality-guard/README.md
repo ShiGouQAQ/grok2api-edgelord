@@ -14,7 +14,7 @@ your own traffic before allowing automatic quarantine.
 
 - Supports Grok Build streaming requests after egress nodes and request audits are configured in grok2api.
 - At least one schedulable Grok Build account must be able to serve the probe model. The account does not have to be bound to every managed node.
-- The main service automatically provisions a non-exportable system probe identity. The sidecar reaches only a scoped internal API over the Compose network.
+- The main service automatically provisions a non-exportable system probe identity. The guard reaches only a scoped internal API over the container loopback.
 - Classification is heuristic evidence. It cannot prove that upstream model capability changed and does not replace application-level regression tests.
 
 ## How it works
@@ -100,7 +100,7 @@ The page also reports cumulative automatic checks, active probes, passive audits
 
 The main Compose file owns the private shared state volume. grok2api writes a
 versioned bootstrap file containing normalized `config.yaml` settings and a
-derived, quality-guard-only credential; the sidecar never reads or stores the
+derived, quality-guard-only credential; the guard never reads or stores the
 administrator password. Saved policy changes from the admin UI are hot-reloaded
 in about one second without restarting containers. Public and administrator
 responses never return the internal credential, client-key secret, proxy URL,
@@ -167,28 +167,27 @@ traffic. Choose a longer active interval when upstream quota is limited.
 
 ## Docker Compose quick start
 
-The repository's main `docker-compose.yml` includes the sidecar behind the
-optional `quality-guard` profile. A normal `docker compose up -d` does not start
-it or generate probe traffic.
+The guard runs inside the main `grok2api` container as the s6-overlay service
+`egress-quality-guard`; it starts with `docker compose up -d` and generates probe
+traffic only when `qualityGuard.enabled` is true.
 
 Run from the repository root:
 
 ```sh
-docker compose --profile quality-guard config --quiet
-docker compose --profile quality-guard up -d --build
+docker compose config --quiet
+docker compose up -d --build
 ```
 
-After changing the base `qualityGuard` settings in `config.yaml`, run
-`docker compose --profile quality-guard restart grok2api egress-quality-guard`
-so the main service regenerates the bootstrap. Policy changes saved in the
-admin page still hot-reload without a restart.
+After changing the base `qualityGuard` settings in `config.yaml`, restart the
+main container (`docker compose restart grok2api`) so the main service
+regenerates the bootstrap. Policy changes saved in the admin page still
+hot-reload without a restart.
 
 Verify the managed nodes, model, and minimum healthy-node count before leaving
-the sidecar running. Never commit the state volume or
-production logs.
-Stop only the guard with
-`docker compose --profile quality-guard stop egress-quality-guard`; the main
-API remains available.
+the guard running. Never commit the state volume or production logs.
+To stop only the guard, set `qualityGuard.enabled` to false and restart the
+container; the guard stays down on clean exit while the main API remains
+available.
 
 ## Known limitations
 
