@@ -185,6 +185,9 @@ class FakeApi:
     def fixed_fallback_node_ids(self):
         return set(self.fixed_fallback_ids)
 
+    def get_mihomo_status(self):
+        return None
+
     def quality_test(self, node_id):
         self.quality_calls.append(node_id)
         value = self.results.pop(0)
@@ -680,6 +683,57 @@ class GuardTests(unittest.TestCase):
             guard.run_passive_cycle()
             self.assertEqual(api.enabled_calls, [])
             self.assertEqual(guard.state["nodes"]["2"]["error_strikes"], 1)
+
+    def test_probe_result_is_discarded_when_egress_epoch_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = config(
+                state_file=Path(directory) / "state.json",
+                lock_file=Path(directory) / "lock",
+                node_ids=("1",),
+            )
+
+            class SwitchingApi(FakeApi):
+                def get_mihomo_status(self):
+                    self._epoch = getattr(self, "_epoch", 0) + 1
+                    return {"enabled": True, "epoch": self._epoch}
+
+            hard = {
+                "expectedMatched": True,
+                "outputTokens": 100,
+                "outputTokensPerSecond": 1200,
+            }
+            api = SwitchingApi(self.nodes(), [hard])
+            guard = quality_guard.Guard(cfg, api)
+            guard.run_cycle()
+            self.assertEqual(api.quality_calls, ["1"])
+            self.assertEqual(api.enabled_calls, [])
+            state = guard.state["nodes"]["1"]
+            self.assertFalse(state["disabled_by_guard"])
+            self.assertEqual(state["active_soft_strikes"], 0)
+            self.assertEqual(guard.state["statistics"]["active"]["hard"], 0)
+
+    def test_probe_is_kept_when_egress_epoch_is_stable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = config(
+                state_file=Path(directory) / "state.json",
+                lock_file=Path(directory) / "lock",
+                node_ids=("1",),
+            )
+
+            class StableApi(FakeApi):
+                def get_mihomo_status(self):
+                    return {"enabled": True, "epoch": 7}
+
+            hard = {
+                "expectedMatched": True,
+                "outputTokens": 100,
+                "outputTokensPerSecond": 1200,
+            }
+            api = StableApi(self.nodes(), [hard])
+            guard = quality_guard.Guard(cfg, api)
+            guard.run_cycle()
+            self.assertEqual(api.enabled_calls, [("1", False)])
+            self.assertTrue(guard.state["nodes"]["1"]["disabled_by_guard"])
 
     @staticmethod
     def audit(audit_id, node_id, output_tps, quality_probe=False):
