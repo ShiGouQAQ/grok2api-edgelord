@@ -34,6 +34,7 @@ const DefaultUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 const nodeSnapshotTTL = time.Second
 const operationsConfigSnapshotTTL = time.Second
 const proxyPoolRetryLimit = 2
+const mihomoFallbackMinInterval = 30 * time.Second
 const clientCacheIdleTTL = 30 * time.Minute
 const clientCacheCleanupInterval = time.Minute
 const clientCacheTouchInterval = time.Minute
@@ -84,6 +85,9 @@ type requestClient interface {
 }
 
 type FailureProber func(context.Context, uint64) (domain.ProbeResult, error)
+
+// QualityVerifier 模型质量探测；失败返回 error。镜像 SetFailureProber 模式。
+type QualityVerifier func(context.Context, uint64) error
 
 type failureProbeState struct {
 	running       bool
@@ -162,8 +166,15 @@ type Manager struct {
 	failureProbeMu         sync.Mutex
 	failureProber          FailureProber
 	failureProbes          map[uint64]failureProbeState
+	qualityVerifierMu      sync.Mutex
+	qualityVerifier        QualityVerifier
+	qualityVerifyFailures  atomic.Uint64
 	lastClientCleanup      time.Time
 	clearanceLoads         singleflight.Group
+	mihomoMu               sync.RWMutex
+	mihomo                 *MihomoClient
+	mihomoFallbackNext     time.Time
+	mihomoConfig           MihomoConfig
 	clearanceConfig        ClearanceConfig
 	clearanceVersion       uint64
 	clearances             map[string]clearanceState
@@ -306,6 +317,32 @@ func (m *Manager) scheduleFailureProbe(node domain.Node) {
 	}()
 }
 
+// SetQualityVerifier 设置 Mihomo 切换成功后的模型质量验证回调；nil 清除。
+// 验证结果仅用于诊断（见 verifyNodeAfterSwitch），绝不触发冷却。
+func (m *Manager) SetQualityVerifier(value QualityVerifier) {
+	m.qualityVerifierMu.Lock()
+	m.qualityVerifier = value
+	m.qualityVerifierMu.Unlock()
+}
+
+// verifyNodeAfterSwitch 在 Mihomo 切换成功后对节点做一次模型质量验证。
+// 验证失败只记录日志并累加诊断计数 qualityVerifyFailures，绝不施加冷却：
+// 403 已表明 Go 节点本身健康，失败更多反映新出口的瞬时状态。
+func (m *Manager) verifyNodeAfterSwitch(ctx context.Context, node domain.Node) {
+	m.qualityVerifierMu.Lock()
+	verifier := m.qualityVerifier
+	m.qualityVerifierMu.Unlock()
+	if verifier == nil {
+		return
+	}
+	if err := verifier(ctx, node.ID); err != nil {
+		m.qualityVerifyFailures.Add(1)
+		m.log().Warn("egress_quality_verify_failed", "node_id", node.ID, "node_name", node.Name, "scope", node.Scope, "error", err)
+		return
+	}
+	m.log().Info("egress_quality_verify_completed", "node_id", node.ID, "node_name", node.Name, "scope", node.Scope)
+}
+
 func (m *Manager) waitForFailureProbe(ctx context.Context, nodeID uint64) (bool, error) {
 	now := time.Now().UTC()
 	m.failureProbeMu.Lock()
@@ -433,6 +470,136 @@ func (m *Manager) UpdateClearanceConfig(value ClearanceConfig) {
 		m.clientMu.Unlock()
 	}
 	m.clearanceMu.Unlock()
+}
+
+// UpdateMihomoConfig 热更新 Mihomo 出口配置，镜像 UpdateClearanceConfig 的
+// 模式：未启用或缺少关键字段时置空客户端，否则创建或复用并更新。
+func (m *Manager) UpdateMihomoConfig(value MihomoConfig) {
+	value.APIURL = strings.TrimRight(strings.TrimSpace(value.APIURL), "/")
+	value.GroupName = strings.TrimSpace(value.GroupName)
+	m.mihomoMu.Lock()
+	defer m.mihomoMu.Unlock()
+	if !value.Enabled || value.APIURL == "" || value.GroupName == "" {
+		m.mihomo = nil
+		m.mihomoConfig = MihomoConfig{}
+		return
+	}
+	if m.mihomo == nil {
+		m.mihomo = NewMihomoClient(value)
+		m.mihomo.SetLogger(m.log())
+	} else {
+		m.mihomo.UpdateConfig(value)
+	}
+	m.mihomoConfig = value
+}
+
+// MihomoStatus 是 Mihomo 出口状态的只读快照，供状态 API 展示。
+type MihomoStatus struct {
+	Enabled     bool
+	APIURL      string
+	GroupName   string
+	CurrentNode string
+	BannedNodes []string
+	SwitchCount uint64
+	Epoch       uint64
+	Reachable   bool
+	LastError   string
+}
+
+// MihomoStatus 返回 Mihomo 出口的当前状态；获取当前节点失败时
+// Reachable 为 false 并填充 LastError。永不 panic。
+func (m *Manager) MihomoStatus(ctx context.Context) MihomoStatus {
+	m.mihomoMu.RLock()
+	mihomo := m.mihomo
+	config := m.mihomoConfig
+	m.mihomoMu.RUnlock()
+	status := MihomoStatus{
+		Enabled:   config.Enabled,
+		APIURL:    config.APIURL,
+		GroupName: config.GroupName,
+	}
+	if mihomo == nil {
+		return status
+	}
+	status.BannedNodes = mihomo.BannedNodes()
+	status.SwitchCount = mihomo.SwitchCount()
+	status.Epoch = mihomo.Epoch()
+	statusCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	current, err := mihomo.GetCurrentNode(statusCtx)
+	if err != nil {
+		status.LastError = err.Error()
+		return status
+	}
+	status.CurrentNode = current
+	status.Reachable = true
+	return status
+}
+
+// MihomoSwitch 手动切换到当前最优节点（不封禁当前节点）。
+// 返回切换目标；Mihomo 未启用或无可切换节点时返回错误。
+func (m *Manager) MihomoSwitch(ctx context.Context) (string, error) {
+	m.mihomoMu.RLock()
+	mihomo := m.mihomo
+	m.mihomoMu.RUnlock()
+	if mihomo == nil {
+		return "", errors.New("Mihomo 未启用或未配置")
+	}
+	node, result := mihomo.SwitchToOptimal(ctx, "manual")
+	if result != MihomoSwitchDone {
+		return "", errors.New("Mihomo 切换未执行：已在切换中或无可用节点")
+	}
+	return node, nil
+}
+
+// MihomoClearBlacklist 清空 Mihomo 黑名单，返回被清空的节点数量。
+func (m *Manager) MihomoClearBlacklist() (int, error) {
+	m.mihomoMu.RLock()
+	mihomo := m.mihomo
+	m.mihomoMu.RUnlock()
+	if mihomo == nil {
+		return 0, errors.New("Mihomo 未启用或未配置")
+	}
+	return mihomo.ClearBlacklist(), nil
+}
+
+// MihomoRotate 轮换 Mihomo 组出口（质量守护 rotate_node 契约）：封禁当前
+// 节点并切换到下一健康节点。Done 与 Merged 均视为已轮换（Changed: true，
+// 镜像 403 分支对单飞合并的静默语义，避免守护进程误报 rotation 失败）；
+// Failed 或 Mihomo 未启用时返回错误。
+func (m *Manager) MihomoRotate(ctx context.Context) (application.MihomoRotation, error) {
+	m.mihomoMu.RLock()
+	mihomo := m.mihomo
+	m.mihomoMu.RUnlock()
+	if mihomo == nil {
+		return application.MihomoRotation{}, errors.New("Mihomo 未启用或未配置")
+	}
+	name, result := mihomo.Rotate(ctx, "quality_guard")
+	switch result {
+	case MihomoSwitchDone:
+		return application.MihomoRotation{Changed: true, NewNode: name}, nil
+	case MihomoSwitchMerged:
+		return application.MihomoRotation{Changed: true}, nil
+	default:
+		return application.MihomoRotation{}, errors.New("Mihomo 出口轮换失败")
+	}
+}
+
+// maybeMihomoFallback 在节点池枯竭时异步触发一次 Mihomo 出口切换。
+// Mihomo 是全局共享出口：切换会影响所有走该代理端口的节点（与代理池
+// 的多出口/多作用域隔离不同），因此节流限频、不阻塞 acquire，也不封禁
+// 当前节点（仅轮换到最优）。切换后新出口由既有 probe 机制验证。
+func (m *Manager) maybeMihomoFallback() {
+	m.mihomoMu.Lock()
+	mihomo := m.mihomo
+	now := time.Now().UTC()
+	if mihomo == nil || now.Before(m.mihomoFallbackNext) {
+		m.mihomoMu.Unlock()
+		return
+	}
+	m.mihomoFallbackNext = now.Add(mihomoFallbackMinInterval)
+	m.mihomoMu.Unlock()
+	go mihomo.SwitchToOptimal(context.Background(), "acquire_fallback")
 }
 
 func (m *Manager) Acquire(ctx context.Context, scope domain.Scope, affinity string) (*Lease, error) {
@@ -908,6 +1075,7 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 			return lease, fallbackConfigured, nil
 		}
 		if primaryErr != nil {
+			m.maybeMihomoFallback()
 			return nil, false, primaryErr
 		}
 		if !allowDirect {
@@ -1687,22 +1855,33 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 			// A request-level 403 does not prove that a shared proxy pool is unhealthy.
 			return
 		}
-		value.FailureCount++
-		value.Health = max(0.05, value.Health*0.7)
-		value.CooldownUntil = nil
-		value.LastError = "anti-bot rejection"
-		m.clearanceMu.Lock()
-		if isGrokWebScope(scope) && m.clearanceConfig.Mode == "flaresolverr" {
-			key := clearanceCacheKey(nodeID, "", false)
-			state := m.clearances[key]
-			state.invalid = true
-			state.used = true
-			m.clearances[key] = state
+		m.mihomoMu.RLock()
+		mihomo := m.mihomo
+		m.mihomoMu.RUnlock()
+		if mihomo != nil {
+			// Mihomo 出口 = 超大共享池：不冷却 Go 节点；异步轮换出口 IP，
+			// Clearance 在下次获取时基于新 IP 重新绑定。切换失败则回退冷却，
+			// 避免节点持续在失效出口上重试；切换被合并（Merged）说明已有在途
+			// 切换负责出口轮换，同样不加冷却。
+			// 所有 DB 节点共享同一个 Mihomo 组出口；到达此处的 403 已被
+			// chat.go IsNodeBannedBody 分类为出口被封（NODE_BANNED），因此
+			// 无条件轮换组出口。切换失败才回退冷却该节点。
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				switch mihomo.SwitchAndBlacklistCurrent(ctx, "request_403") {
+				case MihomoSwitchDone:
+					m.verifyNodeAfterSwitch(ctx, value)
+				case MihomoSwitchFailed:
+					m.applyForbiddenCooldown(ctx, value, scope)
+				case MihomoSwitchMerged:
+					// 在途切换负责出口，静默
+				}
+			}()
+			return
 		}
-		m.clearanceMu.Unlock()
-		m.clientMu.Lock()
-		stale = m.invalidateClientLocked(nodeID)
-		m.clientMu.Unlock()
+		m.applyForbiddenCooldown(ctx, value, scope)
+		return
 	case transportErr != nil:
 		if m.isProxyPoolNode(value) {
 			return
@@ -1739,6 +1918,37 @@ func (m *Manager) FeedbackForScope(ctx context.Context, scope domain.Scope, node
 	}
 }
 
+// applyForbiddenCooldown marks a node as anti-bot rejected and persists the
+// health change. Proxy-pool nodes and Mihomo-managed exits do not reach it.
+func (m *Manager) applyForbiddenCooldown(ctx context.Context, value domain.Node, scope domain.Scope) {
+	value.FailureCount++
+	value.Health = max(0.05, value.Health*0.7)
+	value.CooldownUntil = nil
+	value.LastError = "anti-bot rejection"
+	m.clearanceMu.Lock()
+	if isGrokWebScope(scope) && m.clearanceConfig.Mode == "flaresolverr" {
+		key := clearanceCacheKey(value.ID, "", false)
+		state := m.clearances[key]
+		state.invalid = true
+		state.used = true
+		m.clearances[key] = state
+	}
+	m.clearanceMu.Unlock()
+	m.clientMu.Lock()
+	stale := m.invalidateClientLocked(value.ID)
+	m.clientMu.Unlock()
+	closeRequestClients(stale)
+	if stateRepository, ok := m.repository.(egressStateRepository); ok {
+		if err := stateRepository.UpdateEgressNodeHealth(ctx, value.ID, value.Health, value.FailureCount, value.CooldownUntil, value.LastError); err == nil {
+			m.invalidateNodes(value.Scope)
+		}
+		return
+	}
+	if _, err := m.repository.UpdateEgressNode(ctx, value); err == nil {
+		m.invalidateNodes(value.Scope)
+	}
+}
+
 func (m *Manager) cachedNodeIsHealthy(nodeID uint64) bool {
 	m.nodeMu.Lock()
 	validUntil, ok := m.healthyNodes[nodeID]
@@ -1766,8 +1976,8 @@ func (m *Manager) ensureClearance(ctx context.Context, node domain.Node, proxyUR
 	version := m.clearanceVersion
 	interval := clearanceRefreshInterval(cfg)
 	now := time.Now().UTC()
-	fingerprint := clearanceFingerprint(cfg, proxyURL)
-	bindingFingerprint := clearanceBindingFingerprint(cfg, proxyURL)
+	fingerprint := m.clearanceFingerprint(cfg, proxyURL)
+	bindingFingerprint := m.clearanceBindingFingerprint(cfg, proxyURL)
 	m.cleanupClearanceCacheLocked(now, interval)
 	state, known := m.clearances[key]
 	if key == "direct" {
@@ -1824,7 +2034,7 @@ func (m *Manager) ensureClearance(ctx context.Context, node domain.Node, proxyUR
 	m.clearanceMu.Unlock()
 
 	result, err, _ := m.clearanceLoads.Do(key, func() (any, error) {
-		return m.refreshNode(ctx, node, proxyURL, key, persist, forceRefresh, !fallbackAllowed, refreshAfter)
+		return m.refreshNode(ctx, node, proxyURL, key, persist, forceRefresh, !fallbackAllowed, !fallbackAllowed, refreshAfter)
 	})
 	if err != nil {
 		if fallbackAllowed {
@@ -1836,7 +2046,7 @@ func (m *Manager) ensureClearance(ctx context.Context, node domain.Node, proxyUR
 	return solution.Cookies, solution.UserAgent, nil
 }
 
-func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, key string, persist, force, waitForPeer bool, refreshAfter time.Time) (clearanceSolution, error) {
+func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, key string, persist, force, waitForPeer bool, switchOnFailure bool, refreshAfter time.Time) (clearanceSolution, error) {
 	m.clearanceMu.Lock()
 	cfg := m.clearanceConfig
 	solveVersion := m.clearanceVersion
@@ -1850,8 +2060,8 @@ func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, k
 	if timeout <= 0 {
 		timeout = time.Minute
 	}
-	fingerprint := clearanceFingerprint(cfg, proxyURL)
-	bindingFingerprint := clearanceBindingFingerprint(cfg, proxyURL)
+	fingerprint := m.clearanceFingerprint(cfg, proxyURL)
+	bindingFingerprint := m.clearanceBindingFingerprint(cfg, proxyURL)
 	interval := clearanceRefreshInterval(cfg)
 	if persist && node.ID != 0 && lock != nil {
 		release, acquired, err := lock.Acquire(ctx, "egress-clearance:"+strconv.FormatUint(node.ID, 10), timeout+clearanceLockGrace)
@@ -1885,6 +2095,27 @@ func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, k
 	defer cancel()
 	solution, err := solver.Solve(solveCtx, cfg, proxyURL)
 	if err != nil {
+		// 仅在无回退 cookie 可用（switchOnFailure）时才轮换 Mihomo 出口：
+		// 有回退时旧 cookie 仍可继续使用，盲目切换只会让已绑定旧出口 IP 的
+		// cookie 失效并加剧切换循环。
+		if switchOnFailure {
+			m.mihomoMu.RLock()
+			mihomo := m.mihomo
+			m.mihomoMu.RUnlock()
+			if mihomo != nil {
+				// 与 request_403 分支对齐：切换失败时回退 Go 节点冷却，避免
+				// 节点持续在失效出口上重试。切换成功则依赖新出口重新解 CF；
+				// 合并（Merged）说明在途切换负责出口轮换，同样不加冷却。
+				go func() {
+					switch mihomo.SwitchAndBlacklistCurrent(context.Background(), "clearance_solve_failed") {
+					case MihomoSwitchDone, MihomoSwitchMerged:
+						// 切换成功或已在途：新出口负责后续重新解 CF，静默。
+					case MihomoSwitchFailed:
+						m.applyForbiddenCooldown(context.Background(), node, node.Scope)
+					}
+				}()
+			}
+		}
 		m.recordClearanceError(ctx, node, persist)
 		return clearanceSolution{}, fmt.Errorf("刷新出口 %q 的 Cloudflare Clearance: %w", node.Name, err)
 	}
@@ -2025,14 +2256,30 @@ func clearanceRefreshInterval(cfg ClearanceConfig) time.Duration {
 	return 10 * time.Minute
 }
 
-func clearanceFingerprint(cfg ClearanceConfig, proxyURL string) string {
-	value := strings.TrimSpace(cfg.FlareSolverrURL) + "\x00" + clearanceBindingFingerprint(cfg, proxyURL)
+func (m *Manager) clearanceFingerprint(cfg ClearanceConfig, proxyURL string) string {
+	value := strings.TrimSpace(cfg.FlareSolverrURL) + "\x00" + m.clearanceBindingFingerprint(cfg, proxyURL)
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(value)))
 }
 
-func clearanceBindingFingerprint(cfg ClearanceConfig, proxyURL string) string {
+// clearanceBindingFingerprint 标识 clearance 与出口的绑定关系。除 TargetURL 与
+// Go 节点代理 URL 外，还纳入 Mihomo 出口代际版本号：Mihomo 切换、节点集刷新、
+// 订阅更新改写默认连接节点、清空黑名单或配置变化都会更换出口 IP，旧 clearance
+// 绑定旧 IP 必然失效，epoch 变化使指纹随之变化，旧缓存自动作废。
+func (m *Manager) clearanceBindingFingerprint(cfg ClearanceConfig, proxyURL string) string {
 	value := strings.TrimRight(strings.TrimSpace(cfg.TargetURL), "/") + "\x00" + strings.TrimSpace(proxyURL)
+	if epoch := m.mihomoEpoch(); epoch > 0 {
+		value += "\x00mihomo" + strconv.FormatUint(epoch, 10)
+	}
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(value)))
+}
+
+func (m *Manager) mihomoEpoch() uint64 {
+	m.mihomoMu.RLock()
+	defer m.mihomoMu.RUnlock()
+	if m.mihomo == nil {
+		return 0
+	}
+	return m.mihomo.Epoch()
 }
 
 func (m *Manager) recordClearanceError(ctx context.Context, node domain.Node, persist bool) {
@@ -2058,7 +2305,7 @@ func (m *Manager) recordClearanceError(ctx context.Context, node domain.Node, pe
 func (m *Manager) RefreshClearance(ctx context.Context, nodeID uint64) error {
 	if nodeID == 0 {
 		_, err, _ := m.clearanceLoads.Do("direct", func() (any, error) {
-			return m.refreshNode(ctx, domain.Node{Name: "direct", Scope: domain.ScopeWeb, Enabled: true}, "", "direct", false, true, true, time.Time{})
+			return m.refreshNode(ctx, domain.Node{Name: "direct", Scope: domain.ScopeWeb, Enabled: true}, "", "direct", false, true, true, false, time.Time{})
 		})
 		return err
 	}
@@ -2082,7 +2329,7 @@ func (m *Manager) RefreshClearance(ctx context.Context, nodeID uint64) error {
 	}
 	key := clearanceCacheKey(node.ID, proxyURL, false)
 	_, err, _ = m.clearanceLoads.Do(key, func() (any, error) {
-		return m.refreshNode(ctx, node, proxyURL, key, true, true, true, time.Time{})
+		return m.refreshNode(ctx, node, proxyURL, key, true, true, true, false, time.Time{})
 	})
 	return err
 }
@@ -2234,7 +2481,7 @@ func (m *Manager) RefreshDueClearances(ctx context.Context, force bool) error {
 		key := clearanceCacheKey(node.ID, proxyURL, false)
 		state, known := m.clearances[key]
 		m.clearanceMu.Unlock()
-		fingerprint := clearanceFingerprint(cfg, proxyURL)
+		fingerprint := m.clearanceFingerprint(cfg, proxyURL)
 		memoryFresh := known && !state.invalid && state.version == version && state.fingerprint == fingerprint && now.Sub(state.refreshedAt) < interval
 		persistedFresh := (!known || !state.invalid) && node.ClearanceRefreshedAt != nil && node.ClearanceFingerprint == fingerprint && now.Sub(*node.ClearanceRefreshedAt) < interval
 		if !force && (memoryFresh || persistedFresh) {
@@ -2246,7 +2493,7 @@ func (m *Manager) RefreshDueClearances(ctx context.Context, force bool) error {
 			refreshAfter = state.refreshedAt
 		}
 		_, refreshErr, _ := m.clearanceLoads.Do(key, func() (any, error) {
-			return m.refreshNode(ctx, node, proxyURL, key, true, refreshForce, false, refreshAfter)
+			return m.refreshNode(ctx, node, proxyURL, key, true, refreshForce, false, false, refreshAfter)
 		})
 		if refreshErr != nil {
 			refreshErrors = append(refreshErrors, refreshErr)
@@ -2255,7 +2502,7 @@ func (m *Manager) RefreshDueClearances(ctx context.Context, force bool) error {
 	shouldUseDirect := direct.used || force && webNodeCount == 0
 	if shouldUseDirect && (force || direct.invalid || direct.userAgent == "" || direct.version != version || now.Sub(direct.refreshedAt) >= interval) {
 		_, err, _ := m.clearanceLoads.Do("direct", func() (any, error) {
-			return m.refreshNode(ctx, domain.Node{Name: "direct", Scope: domain.ScopeWeb, Enabled: true}, "", "direct", false, force, false, time.Time{})
+			return m.refreshNode(ctx, domain.Node{Name: "direct", Scope: domain.ScopeWeb, Enabled: true}, "", "direct", false, force, false, false, time.Time{})
 		})
 		if err != nil {
 			refreshErrors = append(refreshErrors, err)

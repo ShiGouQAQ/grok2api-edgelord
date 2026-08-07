@@ -1,0 +1,739 @@
+package egress
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// mihomoTestServer 返回一个模拟 Clash API 的测试服务。
+// group 由调用方持有并在 handler 内通过 mutex 读取，便于测试中变更节点集。
+func mihomoTestServer(t *testing.T, group *mihomoGroup, mu *sync.Mutex, switchStatus int, switchDelay time.Duration, switches *[]string, switchMu *sync.Mutex) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			mu.Lock()
+			_ = json.NewEncoder(w).Encode(group)
+			mu.Unlock()
+		case http.MethodPut:
+			if switchDelay > 0 {
+				time.Sleep(switchDelay)
+			}
+			var body struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			switchMu.Lock()
+			*switches = append(*switches, body.Name)
+			switchMu.Unlock()
+			mu.Lock()
+			group.Now = body.Name // 模拟切换生效，使 verifySwitch 通过
+			mu.Unlock()
+			w.WriteHeader(switchStatus)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+}
+
+// mihomoIPServer 返回 IP 回显服务：每次请求返回 body() 的当前值，
+// 模拟真实出口 IP 探测端点（/cdn-cgi/trace 风格）。
+func mihomoIPServer(body func() string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, body())
+	}))
+}
+
+// mihomoProxyServer 模拟本地 mihomo 代理端口：把收到的代理请求转发到
+// target 后原样回传（探测请求经 ExitProbeProxyURL 到达这里）。
+func mihomoProxyServer(target *httptest.Server) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetURL := r.URL.String()
+		if !r.URL.IsAbs() {
+			targetURL = target.URL + r.URL.RequestURI()
+		}
+		request, err := http.NewRequest(r.Method, targetURL, r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		defer response.Body.Close()
+		w.WriteHeader(response.StatusCode)
+		_, _ = io.Copy(w, response.Body)
+	}))
+}
+
+func mihomoTestGroup() (mihomoGroup, *sync.Mutex) {
+	group := mihomoGroup{
+		All: []string{"slow", "fast", "dead"},
+		Now: "slow",
+		Providers: map[string]mihomoProvider{
+			"p1": {Nodes: []mihomoNode{
+				{Name: "slow", History: []mihomoDelay{{Delay: 300}}},
+				{Name: "fast", History: []mihomoDelay{{Delay: 50}}},
+				{Name: "dead", History: []mihomoDelay{{Delay: -1}}},
+			}},
+		},
+	}
+	return group, &sync.Mutex{}
+}
+
+func TestGetGroupNodes(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	nodes, err := client.GetGroupNodes(context.Background())
+	if err != nil {
+		t.Fatalf("GetGroupNodes: %v", err)
+	}
+	if len(nodes) != 3 || nodes[0] != "slow" || nodes[1] != "fast" || nodes[2] != "dead" {
+		t.Fatalf("unexpected nodes: %v", nodes)
+	}
+}
+
+func TestGetGroupNodesNonOK(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	if _, err := client.GetGroupNodes(context.Background()); err == nil {
+		t.Fatal("expected error on non-200")
+	}
+	if _, err := client.GetCurrentNode(context.Background()); err == nil {
+		t.Fatal("expected error on non-200")
+	}
+}
+
+func TestSwitchNode(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	if err := client.SwitchNode(context.Background(), "fast"); err != nil {
+		t.Fatalf("SwitchNode: %v", err)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 1 || switches[0] != "fast" {
+		t.Fatalf("unexpected switches: %v", switches)
+	}
+}
+
+func TestSwitchNodeNon204(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusBadRequest, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	if err := client.SwitchNode(context.Background(), "fast"); err == nil {
+		t.Fatal("expected error on non-204")
+	}
+}
+
+func TestSelectOptimal(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	ctx := context.Background()
+
+	best, err := client.SelectOptimal(ctx, false)
+	if err != nil {
+		t.Fatalf("SelectOptimal: %v", err)
+	}
+	if best != "fast" {
+		t.Fatalf("min-delay selection: got %q, want fast", best)
+	}
+
+	client.mu.Lock()
+	client.blacklist["fast"] = time.Now().UTC().Add(mihomoBlacklistTTL)
+	client.mu.Unlock()
+	best, err = client.SelectOptimal(ctx, false)
+	if err != nil {
+		t.Fatalf("SelectOptimal: %v", err)
+	}
+	if best != "slow" {
+		t.Fatalf("blacklist exclusion: got %q, want slow", best)
+	}
+
+	best, err = client.SelectOptimal(ctx, true)
+	if err != nil {
+		t.Fatalf("SelectOptimal: %v", err)
+	}
+	// 当前节点 slow 被排除；dead 虽无可用延迟仍是唯一候选，作为兜底返回。
+	if best != "dead" {
+		t.Fatalf("exclude current: got %q, want dead", best)
+	}
+
+	client.mu.Lock()
+	client.blacklist["slow"] = time.Now().UTC().Add(mihomoBlacklistTTL)
+	client.blacklist["dead"] = time.Now().UTC().Add(mihomoBlacklistTTL)
+	client.mu.Unlock()
+	if _, err = client.SelectOptimal(ctx, false); err == nil {
+		t.Fatal("expected error when all nodes blacklisted")
+	}
+	// 全部被黑名单覆盖时不自动清空，等待节点集刷新或配置变更，避免切换循环。
+	if banned := client.BannedNodes(); len(banned) != 3 {
+		t.Fatalf("blacklist should be preserved, got %v", banned)
+	}
+}
+
+func TestSelectOptimalNoDelayData(t *testing.T) {
+	group := mihomoGroup{All: []string{"first", "second"}, Now: "first"}
+	groupMu := &sync.Mutex{}
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	best, err := client.SelectOptimal(context.Background(), false)
+	if err != nil {
+		t.Fatalf("SelectOptimal: %v", err)
+	}
+	if best != "first" {
+		t.Fatalf("no delay data: got %q, want first", best)
+	}
+}
+
+func TestSwitchAndBlacklistCurrent(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("expected a switch to happen, got %v", result)
+	}
+	if client.SwitchCount() != 1 {
+		t.Fatalf("switchCount: got %d, want 1", client.SwitchCount())
+	}
+	banned := client.BannedNodes()
+	if len(banned) != 1 || banned[0] != "slow" {
+		t.Fatalf("current node should be blacklisted: %v", banned)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 1 || switches[0] != "fast" {
+		t.Fatalf("should switch to optimal 'fast', got %v", switches)
+	}
+}
+
+func TestSwitchToOptimal(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	node, result := client.SwitchToOptimal(context.Background(), "manual")
+	if result != MihomoSwitchDone {
+		t.Fatalf("expected a switch to happen, got %v", result)
+	}
+	if node != "fast" {
+		t.Fatalf("should switch to optimal 'fast', got %q", node)
+	}
+	if client.SwitchCount() != 1 {
+		t.Fatalf("switchCount: got %d, want 1", client.SwitchCount())
+	}
+	if banned := client.BannedNodes(); len(banned) != 0 {
+		t.Fatalf("manual switch must not touch the blacklist: %v", banned)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 1 || switches[0] != "fast" {
+		t.Fatalf("should switch to optimal 'fast', got %v", switches)
+	}
+}
+
+func TestClearBlacklist(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	client.SwitchAndBlacklistCurrent(context.Background(), "test")
+	if cleared := client.ClearBlacklist(); cleared != 1 {
+		t.Fatalf("cleared: got %d, want 1", cleared)
+	}
+	if banned := client.BannedNodes(); len(banned) != 0 {
+		t.Fatalf("blacklist should be empty after clear: %v", banned)
+	}
+}
+
+func TestSwitchAndBlacklistCurrentSingleFlight(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 150*time.Millisecond, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	results := make([]MihomoSwitchResult, 4)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range results {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i] = client.SwitchAndBlacklistCurrent(context.Background(), "test")
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	done, merged := 0, 0
+	for _, result := range results {
+		switch result {
+		case MihomoSwitchDone:
+			done++
+		case MihomoSwitchMerged:
+			merged++
+		case MihomoSwitchFailed:
+			t.Fatalf("unexpected failed result: %v", results)
+		}
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if done != 1 || merged != 3 || len(switches) != 1 {
+		t.Fatalf("single-flight violated: done=%d merged=%d put=%d", done, merged, len(switches))
+	}
+}
+
+func TestNodeSetChangeClearsBlacklist(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	ctx := context.Background()
+	if _, err := client.SelectOptimal(ctx, false); err != nil {
+		t.Fatalf("SelectOptimal: %v", err)
+	}
+	client.mu.Lock()
+	client.blacklist["fast"] = time.Now().UTC().Add(mihomoBlacklistTTL)
+	client.mu.Unlock()
+
+	groupMu.Lock()
+	group.All = []string{"x", "y", "z"}
+	group.Now = "x"
+	group.Providers = nil
+	groupMu.Unlock()
+
+	if _, err := client.SelectOptimal(ctx, false); err != nil {
+		t.Fatalf("SelectOptimal: %v", err)
+	}
+	if banned := client.BannedNodes(); len(banned) != 0 {
+		t.Fatalf("node set change should clear blacklist, got %v", banned)
+	}
+}
+
+func TestUpdateConfig(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: false, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	if _, err := client.GetGroupNodes(context.Background()); err == nil {
+		t.Fatal("expected error while disabled")
+	}
+	client.UpdateConfig(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	if _, err := client.GetGroupNodes(context.Background()); err != nil {
+		t.Fatalf("GetGroupNodes after enable: %v", err)
+	}
+	client.UpdateConfig(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: ""})
+	if _, err := client.GetGroupNodes(context.Background()); err == nil {
+		t.Fatal("expected error when group name cleared")
+	}
+}
+
+func TestBlacklistExpiresAfterTTL(t *testing.T) {
+	group := mihomoGroup{
+		All: []string{"nodeA", "nodeB"},
+		Now: "nodeA",
+		Providers: map[string]mihomoProvider{
+			"p1": {Nodes: []mihomoNode{
+				{Name: "nodeA", History: []mihomoDelay{{Delay: 300}}},
+				{Name: "nodeB", History: []mihomoDelay{{Delay: 50}}},
+			}},
+		},
+	}
+	groupMu := &sync.Mutex{}
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	client.mu.Lock()
+	client.blacklist["nodeA"] = time.Now().UTC().Add(-time.Second) // 已过期
+	client.blacklist["nodeB"] = time.Now().UTC().Add(mihomoBlacklistTTL)
+	client.mu.Unlock()
+
+	banned := client.BannedNodes()
+	if len(banned) != 1 || banned[0] != "nodeB" {
+		t.Fatalf("expired entry must be pruned: got %v, want [nodeB]", banned)
+	}
+	best, err := client.SelectOptimal(context.Background(), false)
+	if err != nil {
+		t.Fatalf("SelectOptimal: %v", err)
+	}
+	if best != "nodeA" {
+		t.Fatalf("expired node must be selectable again: got %q, want nodeA", best)
+	}
+}
+
+func TestSwitchVerifiesCurrentNode(t *testing.T) {
+	// PUT 返回 204 但 GET 恒返回固定 now（"slow"）：verifySwitch 拉取发现
+	// now 仍是旧节点，切换必须判定失败且版本号不增加。
+	group, groupMu := mihomoTestGroup()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			groupMu.Lock()
+			_ = json.NewEncoder(w).Encode(group)
+			groupMu.Unlock()
+		case http.MethodPut:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchFailed {
+		t.Fatalf("switch must fail when now does not converge to the target, got %v", result)
+	}
+	if client.SwitchCount() != 0 {
+		t.Fatalf("switchCount: got %d, want 0", client.SwitchCount())
+	}
+}
+
+func TestSwitchAndBlacklistCurrentSkipsCurrentWhenSelectFails(t *testing.T) {
+	// 当前节点 slow 与全部候选节点均被黑名单覆盖，SelectOptimal 失败：
+	// 黑名单加入必须发生在 select 成功之后，slow 不得被封禁。
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusInternalServerError, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	client.mu.Lock()
+	client.blacklist["fast"] = time.Now().UTC().Add(mihomoBlacklistTTL)
+	client.blacklist["dead"] = time.Now().UTC().Add(mihomoBlacklistTTL)
+	client.mu.Unlock()
+
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchFailed {
+		t.Fatalf("expected switch to fail when every candidate is blacklisted, got %v", result)
+	}
+	banned := client.BannedNodes()
+	if mihomoContains(banned, "slow") {
+		t.Fatalf("current node must not be blacklisted when select fails: %v", banned)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 0 {
+		t.Fatalf("no PUT should be issued when select fails, got %v", switches)
+	}
+}
+
+func TestUnsetExitProbeConfigPreservesLegacyBehavior(t *testing.T) {
+	// 仅设置旧字段（无出口 IP 校验、无映射）：行为必须与旧版完全一致。
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("result: got %v, want Done", result)
+	}
+	if client.SwitchCount() != 1 {
+		t.Fatalf("switchCount: got %d, want 1", client.SwitchCount())
+	}
+	if banned := client.BannedNodes(); len(banned) != 1 || banned[0] != "slow" {
+		t.Fatalf("banned: %v", banned)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 1 || switches[0] != "fast" {
+		t.Fatalf("switches: %v", switches)
+	}
+}
+
+func TestExitIPChangeSuccess(t *testing.T) {
+	// 切换后出口 IP 立即变化：一次尝试即成功。
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	api := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer api.Close()
+	ip := mihomoIPServer(func() string {
+		groupMu.Lock()
+		defer groupMu.Unlock()
+		ipByNode := map[string]string{"slow": "10.0.0.1", "fast": "10.0.0.2"}
+		return "ip=" + ipByNode[group.Now] + "\n"
+	})
+	defer ip.Close()
+	proxy := mihomoProxyServer(ip)
+	defer proxy.Close()
+
+	client := NewMihomoClient(MihomoConfig{
+		Enabled: true, APIURL: api.URL, GroupName: "XAI-GROUP",
+		ExitProbeProxyURL: proxy.URL,
+		IPProbeURL:        ip.URL,
+		VerifyTimeout:     300 * time.Millisecond,
+	})
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("result: got %v, want Done", result)
+	}
+	if client.SwitchCount() != 1 {
+		t.Fatalf("switchCount: got %d, want 1", client.SwitchCount())
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 1 || switches[0] != "fast" {
+		t.Fatalf("switches: %v", switches)
+	}
+}
+
+func TestExitIPSameIPRetriesToNextNode(t *testing.T) {
+	// slow 与 fast 共享同一出口 IP（粘滞会话未换 IP）：首次切换后出口 IP
+	// 未变化 → 封禁 fast 并重选 dead（出口 IP 不同）→ 成功。
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	api := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer api.Close()
+	ip := mihomoIPServer(func() string {
+		groupMu.Lock()
+		defer groupMu.Unlock()
+		ipByNode := map[string]string{"slow": "10.0.0.1", "fast": "10.0.0.1", "dead": "10.0.0.9"}
+		return "ip=" + ipByNode[group.Now] + "\n"
+	})
+	defer ip.Close()
+	proxy := mihomoProxyServer(ip)
+	defer proxy.Close()
+
+	client := NewMihomoClient(MihomoConfig{
+		Enabled: true, APIURL: api.URL, GroupName: "XAI-GROUP",
+		ExitProbeProxyURL: proxy.URL,
+		IPProbeURL:        ip.URL,
+		MaxAttempts:       1, // 首次 + 1 次重试
+		VerifyTimeout:     300 * time.Millisecond,
+	})
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("result: got %v, want Done", result)
+	}
+	if client.SwitchCount() != 1 {
+		t.Fatalf("switchCount: got %d, want 1", client.SwitchCount())
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 2 || switches[0] != "fast" || switches[1] != "dead" {
+		t.Fatalf("switches: %v", switches)
+	}
+	banned := client.BannedNodes()
+	if len(banned) != 2 || banned[0] != "fast" || banned[1] != "slow" {
+		t.Fatalf("banned: %v", banned)
+	}
+}
+
+func TestExitIPSameIPAllRetriesFailed(t *testing.T) {
+	// 出口 IP 永不变化：首次尝试 + 重试全部同 IP → Failed，版本号不增加。
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	api := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer api.Close()
+	ip := mihomoIPServer(func() string { return "ip=10.0.0.1\n" })
+	defer ip.Close()
+	proxy := mihomoProxyServer(ip)
+	defer proxy.Close()
+
+	client := NewMihomoClient(MihomoConfig{
+		Enabled: true, APIURL: api.URL, GroupName: "XAI-GROUP",
+		ExitProbeProxyURL: proxy.URL,
+		IPProbeURL:        ip.URL,
+		MaxAttempts:       1,
+		VerifyTimeout:     300 * time.Millisecond,
+	})
+	epoch := client.Epoch()
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchFailed {
+		t.Fatalf("result: got %v, want Failed", result)
+	}
+	if client.SwitchCount() != 0 {
+		t.Fatalf("switchCount: got %d, want 0", client.SwitchCount())
+	}
+	// 失败的切换自身不增加版本号；唯一的 +1 来自第二次 SelectOptimal 观察到
+	// now 变化（slow→fast，既有语义），切换完成路径的 +1 不应当发生。
+	if client.Epoch() != epoch+1 {
+		t.Fatalf("epoch: got %d, want %d (only the now-change bump)", client.Epoch(), epoch+1)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 2 {
+		t.Fatalf("switches: %v", switches)
+	}
+}
+
+func TestExitProbeFailureDegradesToNodeLevel(t *testing.T) {
+	// 旧 IP 探测失败（代理不可达）：切换不得失败，降级为仅节点级验证。
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	api := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer api.Close()
+	deadProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadProxy.Close() // 探测目标已关闭：连接失败
+
+	client := NewMihomoClient(MihomoConfig{
+		Enabled: true, APIURL: api.URL, GroupName: "XAI-GROUP",
+		ExitProbeProxyURL: deadProxy.URL,
+		IPProbeURL:        "http://127.0.0.1:1/ip",
+	})
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("result: got %v, want Done (degraded)", result)
+	}
+	if client.SwitchCount() != 1 {
+		t.Fatalf("switchCount: got %d, want 1", client.SwitchCount())
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 1 || switches[0] != "fast" {
+		t.Fatalf("switches: %v", switches)
+	}
+}
+
+func TestExitProbeFailureMidVerifyDegradesToNodeLevel(t *testing.T) {
+	// 旧 IP 探测成功，切换后轮询探测全程失败：降级为仅节点级验证，切换成功。
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	api := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer api.Close()
+	var probes atomic.Int64
+	ip := mihomoIPServer(func() string {
+		if probes.Add(1) == 1 {
+			return "ip=10.0.0.1\n"
+		}
+		return "" // 模拟后续探测失败
+	})
+	defer ip.Close()
+	proxy := mihomoProxyServer(ip)
+	defer proxy.Close()
+
+	client := NewMihomoClient(MihomoConfig{
+		Enabled: true, APIURL: api.URL, GroupName: "XAI-GROUP",
+		ExitProbeProxyURL: proxy.URL,
+		IPProbeURL:        ip.URL,
+		VerifyTimeout:     300 * time.Millisecond,
+	})
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("result: got %v, want Done (degraded)", result)
+	}
+	if client.SwitchCount() != 1 {
+		t.Fatalf("switchCount: got %d, want 1", client.SwitchCount())
+	}
+}
+
+func TestRotate(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	name, result := client.Rotate(context.Background(), "guard")
+	if result != MihomoSwitchDone {
+		t.Fatalf("Rotate: got %v, want Done", result)
+	}
+	if name != "fast" {
+		t.Fatalf("Rotate: got %q, want fast", name)
+	}
+	if client.SwitchCount() != 1 {
+		t.Fatalf("switchCount: got %d, want 1", client.SwitchCount())
+	}
+	banned := client.BannedNodes()
+	if len(banned) != 1 || banned[0] != "slow" {
+		t.Fatalf("rotated-away node must be blacklisted: %v", banned)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 1 || switches[0] != "fast" {
+		t.Fatalf("switches: %v", switches)
+	}
+}
+
+func TestRotateMergedWhileSwitching(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	client.mu.Lock()
+	client.switching = true // 模拟在途切换占用单飞位
+	client.mu.Unlock()
+	defer func() {
+		client.mu.Lock()
+		client.switching = false
+		client.mu.Unlock()
+	}()
+
+	name, result := client.Rotate(context.Background(), "guard")
+	if result != MihomoSwitchMerged {
+		t.Fatalf("Rotate during in-flight switch: got %v, want Merged", result)
+	}
+	if name != "" {
+		t.Fatalf("merged Rotate must return empty name, got %q", name)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 0 {
+		t.Fatalf("merged Rotate must not issue a PUT, got %v", switches)
+	}
+}

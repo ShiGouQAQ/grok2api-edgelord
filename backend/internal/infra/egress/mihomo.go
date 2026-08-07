@@ -1,0 +1,688 @@
+// Package egress 提供出口链路管理（节点选择、Clearance、Mihomo 出口切换）。
+//
+// Mihomo 出口切换设计：当 Go 节点收到 403 或 Clearance 求解失败时，出口被
+// 视为超大共享池，不冷却 Go 节点本身；而是异步（fire-and-forget）触发
+// Mihomo 代理组切换到下一个可用节点。切换是单飞的（single-flight）：并发
+// 触发会合并为一次真实切换。切换完成后出口 IP 变化，Clearance 在下一次
+// 获取时基于新 IP 重新绑定，无需显式失效。
+//
+// 可选出口 IP 校验：配置 ExitProbeProxyURL 后，切换在节点级验证通过之后
+// 还会通过本地 Mihomo 代理端口轮询出口 IP，确认其确实变化；同一 IP 会封禁
+// 目标节点并重选重试。探测失败只降级为节点级验证（不判定切换失败）。未配置
+// 时行为与旧版完全一致。
+package egress
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/url"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+const maxMihomoResponseBytes = 4 << 20
+
+// mihomoBlacklistTTL 是黑名单条目的存活时长，对齐 Go 节点指数冷却的上限
+// (min(10*time.Minute, ...))：封禁超过 TTL 后节点自动解禁，避免节点集稳定
+// 时黑名单永久覆盖全部节点导致"全部节点均已被封禁"死锁。
+const mihomoBlacklistTTL = 10 * time.Minute
+
+// 出口 IP 校验的默认参数（镜像 tools/egress-quality-guard/session_rotator.py
+// 的 ROTATOR_* 默认值语义；MaxAttempts 是重试次数上限，加上首次尝试共
+// MaxAttempts+1 次切换，对齐 Python max_attempts=4 的总尝试次数）。
+const (
+	defaultExitIPProbeURL     = "https://1.1.1.1/cdn-cgi/trace"
+	defaultExitRetryCap       = 3
+	defaultExitVerifyTimeout  = 15 * time.Second
+	mihomoExitProbeTimeout    = 8 * time.Second
+	mihomoExitProbePollPeriod = time.Second
+)
+
+// MihomoSwitchResult 是切换调用的三态结果。
+//
+//	MihomoSwitchMerged 单飞合并：切换已在进行，本次调用未执行任何操作，
+//	                       调用方不得据此应用冷却。
+//	MihomoSwitchFailed 执行但失败（含同出口 IP 重试耗尽）。
+//	MihomoSwitchDone   真实切换成功（节点级验证通过；配置出口 IP 校验时
+//	                   还要求观察到出口 IP 变化，或探测失败降级）。
+type MihomoSwitchResult int
+
+const (
+	MihomoSwitchMerged MihomoSwitchResult = iota
+	MihomoSwitchFailed
+	MihomoSwitchDone
+)
+
+// MihomoConfig 是 Mihomo REST API 的运行时配置，由管理端设置热更新。
+// 除 Enabled/APIURL/GroupName 外均为可选字段：全部留空时行为与旧版一致。
+type MihomoConfig struct {
+	Enabled   bool
+	APIURL    string
+	GroupName string
+
+	// ExitProbeProxyURL 是本地 mihomo 代理端口（如 http://127.0.0.1:7890），
+	// 出口 IP 探测经它转发；为空时跳过出口 IP 校验（纯旧版路径）。
+	ExitProbeProxyURL string
+	// IPProbeURL 是 IP 回显端点；默认 https://1.1.1.1/cdn-cgi/trace
+	// （解析 ip= 行），也支持纯文本 IP 响应体。
+	IPProbeURL string
+	// MaxAttempts 是出口 IP 未变化时的重试次数上限（默认 3，加首次尝试共
+	// MaxAttempts+1 次切换）。
+	MaxAttempts int
+	// VerifyTimeout 是每次尝试内出口 IP 轮询的截止时长（默认 15s）。
+	VerifyTimeout time.Duration
+}
+
+// mihomoGroup 是 GET /proxies/{group} 的响应子集。
+type mihomoGroup struct {
+	All       []string                  `json:"all"`
+	Now       string                    `json:"now"`
+	Providers map[string]mihomoProvider `json:"providers"`
+}
+
+type mihomoProvider struct {
+	Nodes []mihomoNode `json:"nodes"`
+}
+
+type mihomoNode struct {
+	Name    string        `json:"name"`
+	History []mihomoDelay `json:"history"`
+}
+
+type mihomoDelay struct {
+	Delay int `json:"delay"`
+}
+
+// MihomoClient 管理一个 Mihomo 代理组的节点切换。
+//
+// 内部状态（配置、黑名单、节点集快照、单飞标志）由 mu 保护；switchCount 与
+// epoch 用 atomic 便于状态 API 无锁读取。切换失败计数保留用于诊断。
+type MihomoClient struct {
+	mu          sync.Mutex
+	logger      *slog.Logger
+	client      *http.Client
+	config      MihomoConfig
+	blacklist   map[string]time.Time // 节点名 -> 封禁截止时间（UTC），超过 TTL 自动解禁
+	lastNodeSet map[string]struct{}
+	lastNow     string // 上次观察到的默认连接节点（订阅更新可能直接改写 now）
+	switching   bool
+	errCount    uint64
+	// switchCount 是成功切换的次数（统计用途，状态 API 展示）。
+	switchCount atomic.Uint64
+	// epoch 是出口代际版本号：任何可能改变出口选择状态的事件（成功切换、
+	// 节点集变化、默认连接节点 now 变化、清空黑名单、配置变化）都 +1。
+	// Manager 用它与出口绑定 clearance 指纹：出口一变旧缓存自动作废。
+	epoch atomic.Uint64
+}
+
+// NewMihomoClient 创建并配置一个 Mihomo 客户端。
+func NewMihomoClient(cfg MihomoConfig) *MihomoClient {
+	client := &MihomoClient{
+		logger:    slog.Default(),
+		client:    &http.Client{Timeout: 5 * time.Second},
+		blacklist: make(map[string]time.Time),
+	}
+	client.UpdateConfig(cfg)
+	return client
+}
+
+// SetLogger 设置日志器；nil 时回落全局默认。
+func (c *MihomoClient) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	c.mu.Lock()
+	c.logger = logger
+	c.mu.Unlock()
+}
+
+func (c *MihomoClient) log() *slog.Logger {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.logger == nil {
+		return slog.Default()
+	}
+	return c.logger
+}
+
+// UpdateConfig 热更新配置，镜像 Manager.UpdateClearanceConfig 的模式。
+// API 地址或分组变化时，旧节点的黑名单与节点集快照随之作废。
+// 出口 IP 校验无持久化状态（探测客户端按次创建），无需额外清理。
+func (c *MihomoClient) UpdateConfig(cfg MihomoConfig) {
+	cfg.APIURL = strings.TrimRight(strings.TrimSpace(cfg.APIURL), "/")
+	cfg.GroupName = strings.TrimSpace(cfg.GroupName)
+	if cfg.IPProbeURL == "" {
+		cfg.IPProbeURL = defaultExitIPProbeURL
+	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = defaultExitRetryCap
+	}
+	if cfg.VerifyTimeout <= 0 {
+		cfg.VerifyTimeout = defaultExitVerifyTimeout
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !cfg.Enabled || cfg.APIURL == "" || cfg.GroupName == "" {
+		c.config = MihomoConfig{}
+		return
+	}
+	previous := c.config
+	changed := previous.APIURL != cfg.APIURL || previous.GroupName != cfg.GroupName
+	c.config = cfg
+	if changed {
+		clear(c.blacklist)
+		c.lastNodeSet = nil
+		c.lastNow = ""
+		c.errCount = 0
+		c.epoch.Add(1)
+	}
+}
+
+// SwitchCount 返回成功切换的次数（未切换过为 0）。
+func (c *MihomoClient) SwitchCount() uint64 {
+	return c.switchCount.Load()
+}
+
+// Epoch 返回出口代际版本号：任何可能改变出口选择状态的事件都会使其 +1，
+// Manager 用它作 clearance 绑定指纹的组成部分，出口一变旧缓存自动作废。
+func (c *MihomoClient) Epoch() uint64 {
+	return c.epoch.Load()
+}
+
+// BannedNodes 返回黑名单节点的排序快照，供状态 API 展示。
+func (c *MihomoClient) BannedNodes() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now().UTC()
+	names := make([]string, 0, len(c.blacklist))
+	for name, until := range c.blacklist {
+		if until.After(now) {
+			names = append(names, name)
+		} else {
+			delete(c.blacklist, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ClearBlacklist 清空黑名单并返回被清空的节点数量。
+// 供管理端"清空黑名单"操作使用：节点集刷新或配置变更也会触发清空，
+// 此处是显式恢复被误封节点的手动入口。
+func (c *MihomoClient) ClearBlacklist() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := len(c.blacklist)
+	if count > 0 {
+		clear(c.blacklist)
+		c.epoch.Add(1)
+	}
+	return count
+}
+
+// GetGroupNodes 获取代理组当前的全部节点列表（GET /proxies/{group} 的 all）。
+// 非 200 或连接失败返回错误。
+func (c *MihomoClient) GetGroupNodes(ctx context.Context) ([]string, error) {
+	group, err := c.fetchGroup(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return group.All, nil
+}
+
+// GetCurrentNode 获取代理组当前生效的节点（GET 响应的 now 字段）。
+func (c *MihomoClient) GetCurrentNode(ctx context.Context) (string, error) {
+	group, err := c.fetchGroup(ctx)
+	if err != nil {
+		return "", err
+	}
+	return group.Now, nil
+}
+
+// SwitchNode 将代理组切换到指定节点（PUT /proxies/{group}，body {"name": node}）。
+// 204 视为成功，其余状态码与连接错误返回错误。
+func (c *MihomoClient) SwitchNode(ctx context.Context, name string) error {
+	cfg, ok := c.configSnapshot()
+	if !ok {
+		return errors.New("Mihomo 未启用或未配置")
+	}
+	if strings.TrimSpace(name) == "" {
+		return errors.New("Mihomo 切换目标节点为空")
+	}
+	endpoint := cfg.APIURL + "/proxies/" + cfg.GroupName
+	payload, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return fmt.Errorf("编码 Mihomo 切换请求: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("创建 Mihomo 切换请求: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("调用 Mihomo 切换 API: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("Mihomo 切换节点 %q 失败: HTTP %d", name, response.StatusCode)
+	}
+	return nil
+}
+
+// SelectOptimal 根据节点延迟历史选择最优节点。
+//
+// 规则（与 Python 版语义一致）：排除黑名单节点，可选排除当前节点；延迟取
+// providers 各节点 history 最后一条，-1/0 视为不可用；没有任何延迟数据时
+// 返回第一个可用节点。全部被黑名单覆盖时不自动清空重试 —— 黑名单由
+// updateBlacklistOnNodeChangeLocked（节点集变化）或 UpdateConfig（配置变化）
+// 清空，避免失败的切换触发源不断重复轮换同一批节点。
+func (c *MihomoClient) SelectOptimal(ctx context.Context, excludeCurrent bool) (string, error) {
+	group, err := c.fetchGroup(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(group.All) == 0 {
+		return "", errors.New("Mihomo 分组没有可用节点")
+	}
+	c.mu.Lock()
+	c.updateBlacklistOnNodeChangeLocked(group.All, group.Now)
+	now := time.Now().UTC()
+	banned := make(map[string]struct{}, len(c.blacklist))
+	for name, until := range c.blacklist {
+		if until.After(now) {
+			banned[name] = struct{}{}
+		} else {
+			delete(c.blacklist, name)
+		}
+	}
+	c.mu.Unlock()
+
+	available := mihomoAvailable(group.All, group.Now, banned, excludeCurrent)
+	if len(available) == 0 {
+		// 全部被黑名单覆盖：保持封禁，等待节点集刷新或配置变更后再重试，
+		// 而不是立即清空黑名单导致切换循环无终止。
+		return "", errors.New("Mihomo 全部节点均已被封禁，等待节点集刷新或配置变更")
+	}
+
+	latencies := make(map[string]int, len(available))
+	for _, provider := range group.Providers {
+		for _, node := range provider.Nodes {
+			if len(node.History) == 0 {
+				continue
+			}
+			delay := node.History[len(node.History)-1].Delay
+			if delay <= 0 {
+				continue // -1/0 表示不可用
+			}
+			if !mihomoContains(available, node.Name) {
+				continue
+			}
+			if current, exists := latencies[node.Name]; !exists || delay < current {
+				latencies[node.Name] = delay
+			}
+		}
+	}
+	if len(latencies) == 0 {
+		// 没有任何延迟数据：直接取第一个可用节点。
+		return available[0], nil
+	}
+	best, bestDelay := "", int(^uint(0)>>1)
+	for name, delay := range latencies {
+		if delay < bestDelay {
+			best, bestDelay = name, delay
+		}
+	}
+	return best, nil
+}
+
+// SwitchAndBlacklistCurrent 将当前节点加入黑名单并切换到最优节点。
+//
+// 单飞：同一时刻只允许一次切换进行，并发调用直接合并（返回 Merged）。
+// 返回 MihomoSwitchDone 表示真实发生了切换（版本号 +1）；MihomoSwitchFailed
+// 表示执行失败（含同出口 IP 重试耗尽），此时调用方应回退 Go 节点冷却；
+// MihomoSwitchMerged 表示未执行任何操作，调用方不得应用冷却。reason 记录在
+// 日志中用于定位切换来源。
+func (c *MihomoClient) SwitchAndBlacklistCurrent(ctx context.Context, reason string) MihomoSwitchResult {
+	_, result := c.doSwitch(ctx, reason, true)
+	return result
+}
+
+// SwitchToOptimal 手动切换到当前最优节点（不封禁当前节点）。
+//
+// 与 SwitchAndBlacklistCurrent 的区别仅在于不动黑名单；单飞语义一致，
+// 并发调用直接合并（返回空串、Merged）。返回 (目标节点, 切换结果)。
+func (c *MihomoClient) SwitchToOptimal(ctx context.Context, reason string) (string, MihomoSwitchResult) {
+	return c.doSwitch(ctx, reason, false)
+}
+
+// Rotate 将组切换到当前节点之外的健康成员（排除黑名单），并验证出口 IP
+// 变化。用于守护进程轮换被判定失效的当前出口：当前节点被永久封禁，成功
+// 后返回新生效的节点名（GetCurrentNode），失败/合并返回 ("", result)。
+// 单飞语义与 SwitchAndBlacklistCurrent 一致。
+func (c *MihomoClient) Rotate(ctx context.Context, reason string) (string, MihomoSwitchResult) {
+	_, result := c.doSwitch(ctx, reason, true)
+	if result != MihomoSwitchDone {
+		return "", result
+	}
+	name, err := c.GetCurrentNode(ctx)
+	if err != nil {
+		// 切换已由 verifySwitch 确认生效，此处拉取失败只影响名称回报。
+		c.log().Warn("mihomo_rotate_get_current", "reason", reason, "error", err)
+		return "", MihomoSwitchDone
+	}
+	return name, MihomoSwitchDone
+}
+
+// doSwitch 是切换的唯一状态机入口：单飞 → 取当前节点 → 选最优 → （可选）
+// 封禁当前 → 切换 → 节点级验证（第一道闸）→ 出口 IP 校验（可选第二道闸：
+// 同 IP 封禁目标节点并重选重试，耗尽返回 Failed；探测失败降级为节点级验证
+// 通过）。
+func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCurrent bool) (string, MihomoSwitchResult) {
+	c.mu.Lock()
+	if c.switching {
+		c.mu.Unlock()
+		c.log().Info("mihomo_switch_merged", "reason", reason)
+		return "", MihomoSwitchMerged
+	}
+	c.switching = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.switching = false
+		c.mu.Unlock()
+	}()
+
+	cfg, ok := c.configSnapshot()
+	if !ok {
+		c.recordError()
+		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "config", "error", "Mihomo 未启用或未配置")
+		return "", MihomoSwitchFailed
+	}
+	current, err := c.GetCurrentNode(ctx)
+	if err != nil {
+		c.recordError()
+		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "get_current", "error", err)
+		return "", MihomoSwitchFailed
+	}
+
+	// 出口 IP 校验：切换前记录旧 IP。探测失败（返回空串）不得判定切换失败，
+	// 降级为仅节点级验证。
+	verifyIP := cfg.ExitProbeProxyURL != ""
+	oldIP := ""
+	if verifyIP {
+		oldIP = c.probeExitIP(ctx, cfg)
+		if oldIP == "" {
+			verifyIP = false
+			c.log().Info("mihomo_switch_exit_probe_skipped", "reason", reason, "error", "exit IP probe unavailable, degrading to node-level verification")
+		}
+	}
+
+	var node string
+	for attempt := 1; ; attempt++ {
+		node, err = c.SelectOptimal(ctx, true)
+		if err != nil {
+			c.recordError()
+			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "select", "current", current, "error", err)
+			return "", MihomoSwitchFailed
+		}
+		if blacklistCurrent && current != "" && current != node {
+			c.mu.Lock()
+			c.blacklist[current] = time.Now().UTC().Add(mihomoBlacklistTTL)
+			c.mu.Unlock()
+		}
+		if err := c.SwitchNode(ctx, node); err != nil {
+			c.recordError()
+			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "switch", "current", current, "target", node, "error", err)
+			return "", MihomoSwitchFailed
+		}
+		if err := c.verifySwitch(ctx, node); err != nil {
+			c.recordError()
+			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "verify", "current", current, "target", node, "error", err)
+			return "", MihomoSwitchFailed
+		}
+		if !verifyIP {
+			break
+		}
+		newIP, sawValid := c.waitExitIPChange(ctx, cfg, oldIP)
+		if ctx.Err() != nil {
+			c.recordError()
+			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "exit_ip", "current", current, "target", node, "error", ctx.Err())
+			return "", MihomoSwitchFailed
+		}
+		if !sawValid || newIP != oldIP {
+			// 探测全程失败（降级为仅节点级验证）或出口 IP 已变化：成功。
+			break
+		}
+		// 出口 IP 未变化：封禁目标节点并重选重试。
+		if attempt > cfg.MaxAttempts {
+			c.recordError()
+			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "exit_ip", "current", current, "target", node, "old_ip", oldIP, "error", "exit IP did not change after retries")
+			return "", MihomoSwitchFailed
+		}
+		c.mu.Lock()
+		c.blacklist[node] = time.Now().UTC().Add(mihomoBlacklistTTL)
+		c.mu.Unlock()
+		c.log().Warn("mihomo_switch_same_ip_retry", "reason", reason, "attempt", attempt, "target", node, "old_ip", oldIP)
+	}
+	c.switchCount.Add(1)
+	c.epoch.Add(1)
+	c.log().Info("mihomo_switch", "reason", reason, "from", current, "to", node, "switch_count", c.switchCount.Load(), "epoch", c.epoch.Load())
+	return node, MihomoSwitchDone
+}
+
+// verifySwitch 切换后拉取一次组状态确认 now 已是目标节点。Mihomo 对 PUT
+// 返回 204 不代表选择器立即生效（URLTest 组可能异步重新选点）；验证失败
+// 时上层按未生效处理（回退 Go 节点冷却）。
+func (c *MihomoClient) verifySwitch(ctx context.Context, target string) error {
+	now, err := c.GetCurrentNode(ctx)
+	if err != nil {
+		return fmt.Errorf("验证 Mihomo 切换结果: %w", err)
+	}
+	if now != target {
+		return fmt.Errorf("Mihomo 切换后当前节点为 %q，期望 %q", now, target)
+	}
+	return nil
+}
+
+// probeExitIP 通过本地 mihomo 代理端口探测当前出口 IP（GET IPProbeURL）。
+// 任何失败（代理不可达、非 200、解析不出 IP）都返回 ""；探测失败不得判定
+// 切换失败，由调用方降级为仅节点级验证。
+func (c *MihomoClient) probeExitIP(ctx context.Context, cfg MihomoConfig) string {
+	proxyURL, err := url.Parse(cfg.ExitProbeProxyURL)
+	if err != nil {
+		return ""
+	}
+	probeClient := &http.Client{
+		Timeout:   mihomoExitProbeTimeout,
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.IPProbeURL, nil)
+	if err != nil {
+		return ""
+	}
+	response, err := probeClient.Do(request)
+	if err != nil {
+		return ""
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 8192))
+	if err != nil || response.StatusCode != http.StatusOK {
+		return ""
+	}
+	return mihomoParseExitIP(string(body))
+}
+
+// waitExitIPChange 以 1s 间隔轮询出口 IP 直到其不同于 oldIP 或截止时间
+// (VerifyTimeout) 到期。返回 (最后观察到的合法 IP, 是否至少观察到一次合法
+// IP)：IP 变化立即返回新 IP；截止时仍为旧 IP 返回 (oldIP, true)；全程探测
+// 失败返回 ("", false)。调用方须先检查 ctx.Err()。
+func (c *MihomoClient) waitExitIPChange(ctx context.Context, cfg MihomoConfig, oldIP string) (string, bool) {
+	deadline := time.Now().Add(cfg.VerifyTimeout)
+	lastIP, sawValid := "", false
+	for {
+		ip := c.probeExitIP(ctx, cfg)
+		if ip != "" {
+			sawValid = true
+			lastIP = ip
+			if ip != oldIP {
+				return ip, true
+			}
+		}
+		if ctx.Err() != nil {
+			return lastIP, sawValid
+		}
+		if time.Now().After(deadline) {
+			return lastIP, sawValid
+		}
+		time.Sleep(mihomoExitProbePollPeriod)
+	}
+}
+
+// mihomoParseExitIP 从探测响应体解析出口 IP：优先逐行匹配 /cdn-cgi/trace
+// 风格的 "ip=..." 行，否则尝试把整个响应体当作纯文本 IP 解析。
+func mihomoParseExitIP(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if value, ok := strings.CutPrefix(line, "ip="); ok {
+			if ip := strings.TrimSpace(value); ip != "" {
+				return ip
+			}
+		}
+	}
+	if ip := net.ParseIP(strings.TrimSpace(body)); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+// fetchGroup 拉取并解析代理组完整响应。
+func (c *MihomoClient) fetchGroup(ctx context.Context) (mihomoGroup, error) {
+	cfg, ok := c.configSnapshot()
+	if !ok {
+		return mihomoGroup{}, errors.New("Mihomo 未启用或未配置")
+	}
+	endpoint := cfg.APIURL + "/proxies/" + cfg.GroupName
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return mihomoGroup{}, fmt.Errorf("创建 Mihomo 请求: %w", err)
+	}
+	response, err := c.client.Do(request)
+	if err != nil {
+		return mihomoGroup{}, fmt.Errorf("调用 Mihomo API: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxMihomoResponseBytes+1))
+	if err != nil {
+		return mihomoGroup{}, fmt.Errorf("读取 Mihomo 响应: %w", err)
+	}
+	if len(body) > maxMihomoResponseBytes {
+		return mihomoGroup{}, errors.New("Mihomo 响应过大")
+	}
+	if response.StatusCode != http.StatusOK {
+		return mihomoGroup{}, fmt.Errorf("Mihomo 返回 HTTP %d", response.StatusCode)
+	}
+	var group mihomoGroup
+	if err := json.Unmarshal(body, &group); err != nil {
+		return mihomoGroup{}, fmt.Errorf("解析 Mihomo 响应: %w", err)
+	}
+	return group, nil
+}
+
+// configSnapshot 返回当前配置；配置未启用或缺失关键字段时 ok 为 false。
+func (c *MihomoClient) configSnapshot() (MihomoConfig, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cfg := c.config
+	return cfg, cfg.Enabled && cfg.APIURL != "" && cfg.GroupName != ""
+}
+
+// updateBlacklistOnNodeChangeLocked 在节点集或默认连接节点变化时清空黑名单
+// 并递增出口代际版本号：节点集变化（如订阅更新）意味着旧封禁失效，且上游
+// 可能直接改写 now（默认连接节点），出口 IP 随之变化，旧 clearance 必然作废。
+// 首次调用只建立快照不递增。调用方须持有 c.mu。
+func (c *MihomoClient) updateBlacklistOnNodeChangeLocked(all []string, now string) {
+	current := make(map[string]struct{}, len(all))
+	for _, name := range all {
+		current[name] = struct{}{}
+	}
+	first := c.lastNodeSet == nil
+	nodeSetChanged := false
+	if first {
+		c.lastNodeSet = current
+	} else if len(c.lastNodeSet) != len(current) {
+		nodeSetChanged = true
+	} else {
+		for name := range current {
+			if _, exists := c.lastNodeSet[name]; !exists {
+				nodeSetChanged = true
+				break
+			}
+		}
+	}
+	nowChanged := c.lastNow != "" && now != "" && now != c.lastNow
+	if nodeSetChanged {
+		clear(c.blacklist)
+		c.lastNodeSet = current
+	}
+	if !first && (nodeSetChanged || nowChanged) {
+		c.epoch.Add(1)
+	}
+	if now != "" {
+		c.lastNow = now
+	}
+}
+
+// recordError 累加切换失败计数（诊断用途）。
+func (c *MihomoClient) recordError() {
+	c.mu.Lock()
+	c.errCount++
+	c.mu.Unlock()
+}
+
+// mihomoAvailable 过滤出未被黑名单覆盖的节点；excludeCurrent 时从候选中
+// 剔除当前节点（仅当存在时）。
+func mihomoAvailable(all []string, now string, banned map[string]struct{}, excludeCurrent bool) []string {
+	available := make([]string, 0, len(all))
+	for _, name := range all {
+		if _, isBanned := banned[name]; !isBanned {
+			available = append(available, name)
+		}
+	}
+	if excludeCurrent && now != "" {
+		available = mihomoWithout(available, now)
+	}
+	return available
+}
+
+// mihomoWithout 返回去除指定节点后的新切片（保持原顺序）。
+func mihomoWithout(nodes []string, name string) []string {
+	filtered := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if node != name {
+			filtered = append(filtered, node)
+		}
+	}
+	return filtered
+}
+
+// mihomoContains 判断切片是否包含指定节点。
+func mihomoContains(nodes []string, name string) bool {
+	for _, node := range nodes {
+		if node == name {
+			return true
+		}
+	}
+	return false
+}

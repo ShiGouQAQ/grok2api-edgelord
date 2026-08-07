@@ -205,6 +205,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressManager.SetLogger(logger)
 	egressManager.SetClearanceLock(refreshLock)
 	egressManager.UpdateClearanceConfig(clearanceConfig(cfg))
+	egressManager.UpdateMihomoConfig(mihomoConfig(cfg))
 	egressManager.UpdateBuildResponseHeaderTimeout(cfg.Provider.Build.ResponseHeaderTimeout.Value())
 	egressManager.UpdateBuildStreamIdleTimeout(cfg.Provider.Build.StreamIdleTimeout.Value())
 	cliAdapter := cliprovider.NewAdapter(cliprovider.Config{
@@ -302,6 +303,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountSyncService.UpdateConcurrency(cfg.Batch.ImportConcurrency)
 	egressService := egressapp.NewService(egressRepo, cipher, infraegress.DefaultUserAgent, accountRepo)
 	egressService.SetClearanceManager(egressManager)
+	egressService.SetMihomoManager(egressMihomoManager{manager: egressManager})
 	egressService.SetNodeProber(egressManager)
 	egressService.SetOperationsConfigInvalidator(egressManager)
 	egressManager.SetFailureProber(egressService.TestNode)
@@ -382,6 +384,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		egressManager.UpdateBuildStreamIdleTimeout(next.Provider.Build.StreamIdleTimeout.Value())
 		webAdapter.UpdateConfig(webProviderConfig(next))
 		egressManager.UpdateClearanceConfig(clearanceConfig(next))
+		egressManager.UpdateMihomoConfig(mihomoConfig(next))
 		consoleAdapter.UpdateConfig(consoleProviderConfig(next))
 		mediaService.UpdateConfig(mediaConfig(next))
 		quotaRecoveryService.UpdateConfig(next.Provider.Web.RecoveryBackoffBase.Value(), next.Provider.Web.RecoveryBackoffMax.Value())
@@ -413,6 +416,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 			MaxOutputTokens: cfg.QualityGuard.MaxOutputTokens,
 		}
 	}
+	// Mihomo 切换成功后的模型质量验证，镜像 transport handler 的
+	// qualityGuardProbe 调用：守护启用时携带真实 probe 身份；未启用时字段为
+	// 零值，验证仅记录日志（见 verifyNodeAfterSwitch），不影响冷却决策。
+	egressManager.SetQualityVerifier(func(ctx context.Context, nodeID uint64) error {
+		_, err := egressService.ProbeQuality(ctx, nodeID, qualityGuardProbe)
+		return err
+	})
 	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, QualityGuardStatePath: qualityGuardPath("state.json"), QualityGuardConfigPath: qualityGuardPath("runtime-config.json"), QualityGuardToken: qualityGuardToken, QualityGuardProbe: qualityGuardProbe, Updates: updateService})
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
@@ -452,6 +462,65 @@ func clearanceConfig(cfg config.Config) infraegress.ClearanceConfig {
 		TargetURL: cfg.Provider.Web.BaseURL, Timeout: cfg.Provider.Web.ClearanceTimeout.Value(),
 		RefreshInterval: cfg.Provider.Web.ClearanceRefresh.Value(),
 	}
+}
+
+func mihomoConfig(cfg config.Config) infraegress.MihomoConfig {
+	apiURL := cfg.Provider.Web.MihomoAPIURL
+	if strings.TrimSpace(apiURL) == "" {
+		apiURL = config.DefaultMihomoAPIURL
+	}
+	groupName := cfg.Provider.Web.MihomoGroupName
+	if strings.TrimSpace(groupName) == "" {
+		groupName = config.DefaultMihomoGroupName
+	}
+	exitProbeProxyURL := cfg.Provider.Web.MihomoExitProbeProxyURL
+	if strings.TrimSpace(exitProbeProxyURL) == "" {
+		exitProbeProxyURL = config.DefaultMihomoExitProbeProxyURL
+	}
+	ipProbeURL := cfg.Provider.Web.MihomoIPProbeURL
+	if strings.TrimSpace(ipProbeURL) == "" {
+		ipProbeURL = config.DefaultMihomoIPProbeURL
+	}
+	maxAttempts := cfg.Provider.Web.MihomoMaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = config.DefaultMihomoMaxAttempts
+	}
+	verifyTimeout := cfg.Provider.Web.MihomoVerifyTimeout.Value()
+	if verifyTimeout <= 0 {
+		verifyTimeout = config.DefaultMihomoVerifyTimeout
+	}
+	return infraegress.MihomoConfig{
+		Enabled: cfg.Provider.Web.MihomoEnabled, APIURL: apiURL, GroupName: groupName,
+		ExitProbeProxyURL: exitProbeProxyURL, IPProbeURL: ipProbeURL, MaxAttempts: maxAttempts,
+		VerifyTimeout: verifyTimeout,
+	}
+}
+
+// egressMihomoManager 桥接 infraegress.MihomoStatus 与应用层状态类型，避免
+// application/egress 反向导入 infra/egress 造成导入环。
+type egressMihomoManager struct {
+	manager *infraegress.Manager
+}
+
+func (value egressMihomoManager) MihomoStatus(ctx context.Context) egressapp.MihomoStatus {
+	status := value.manager.MihomoStatus(ctx)
+	return egressapp.MihomoStatus{
+		Enabled: status.Enabled, APIURL: status.APIURL, GroupName: status.GroupName,
+		CurrentNode: status.CurrentNode, BannedNodes: status.BannedNodes, SwitchCount: status.SwitchCount,
+		Epoch: status.Epoch, Reachable: status.Reachable, LastError: status.LastError,
+	}
+}
+
+func (value egressMihomoManager) MihomoSwitch(ctx context.Context) (string, error) {
+	return value.manager.MihomoSwitch(ctx)
+}
+
+func (value egressMihomoManager) MihomoClearBlacklist() (int, error) {
+	return value.manager.MihomoClearBlacklist()
+}
+
+func (value egressMihomoManager) Rotate(ctx context.Context) (egressapp.MihomoRotation, error) {
+	return value.manager.MihomoRotate(ctx)
 }
 
 func consoleProviderConfig(cfg config.Config) consoleprovider.Config {

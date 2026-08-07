@@ -24,6 +24,7 @@ var (
 	ErrQualityProbeUnavailable = errors.New("出口质量探测不可用")
 	ErrQualityProbeNoAccount   = errors.New("质量检测暂无可调度账号")
 	ErrClearanceUnavailable    = errors.New("Clearance 刷新不可用")
+	ErrMihomoUnavailable       = errors.New("Mihomo 状态不可用")
 )
 
 const (
@@ -106,6 +107,7 @@ type Service struct {
 	mu                sync.RWMutex
 	browserUA         string
 	clearance         ClearanceManager
+	mihomo            MihomoManager
 	prober            NodeProber
 	operationsCache   OperationsConfigInvalidator
 	qualityProber     QualityProber
@@ -199,6 +201,34 @@ type ClearanceManager interface {
 	ForgetClearance(uint64)
 }
 
+// MihomoStatus 镜像 infraegress.MihomoStatus，避免 application → infra →
+// application 的导入环（infra/egress 已导入本包）。
+type MihomoStatus struct {
+	Enabled     bool
+	APIURL      string
+	GroupName   string
+	CurrentNode string
+	BannedNodes []string
+	SwitchCount uint64
+	Epoch       uint64
+	Reachable   bool
+	LastError   string
+}
+
+// MihomoRotation 是质量守护 rotate_node 契约的结果：Changed 为 true 表示
+// 组出口已确认轮换（含单飞合并，镜像 403 分支的静默语义），false 表示失败。
+type MihomoRotation struct {
+	Changed bool
+	NewNode string
+}
+
+type MihomoManager interface {
+	MihomoStatus(context.Context) MihomoStatus
+	MihomoSwitch(context.Context) (string, error)
+	MihomoClearBlacklist() (int, error)
+	Rotate(context.Context) (MihomoRotation, error)
+}
+
 type BatchClearanceManager interface {
 	ForgetClearances([]uint64)
 }
@@ -224,6 +254,57 @@ func (s *Service) SetClearanceManager(value ClearanceManager) {
 	s.mu.Lock()
 	s.clearance = value
 	s.mu.Unlock()
+}
+
+func (s *Service) SetMihomoManager(value MihomoManager) {
+	s.mu.Lock()
+	s.mihomo = value
+	s.mu.Unlock()
+}
+
+// MihomoStatus 转发出口 Manager 的 Mihomo 订阅状态。
+func (s *Service) MihomoStatus(ctx context.Context) (MihomoStatus, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return MihomoStatus{}, ErrMihomoUnavailable
+	}
+	return manager.MihomoStatus(ctx), nil
+}
+
+// MihomoSwitch 手动切换出口节点；Mihomo 未启用时返回 ErrMihomoUnavailable。
+func (s *Service) MihomoSwitch(ctx context.Context) (string, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return "", ErrMihomoUnavailable
+	}
+	return manager.MihomoSwitch(ctx)
+}
+
+// MihomoClearBlacklist 清空出口节点黑名单；Mihomo 未启用时返回 ErrMihomoUnavailable。
+func (s *Service) MihomoClearBlacklist() (int, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return 0, ErrMihomoUnavailable
+	}
+	return manager.MihomoClearBlacklist()
+}
+
+// Rotate 轮换 Mihomo 组出口（质量守护 rotate_node 契约的组模型实现）；
+// Mihomo 未启用时返回 ErrMihomoUnavailable。nodeId 在组模型下不参与选路。
+func (s *Service) Rotate(ctx context.Context) (MihomoRotation, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return MihomoRotation{}, ErrMihomoUnavailable
+	}
+	return manager.Rotate(ctx)
 }
 
 func (s *Service) DefaultUserAgents() map[string]string {
