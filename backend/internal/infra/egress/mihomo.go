@@ -37,9 +37,8 @@ const maxMihomoResponseBytes = 4 << 20
 // 时黑名单永久覆盖全部节点导致"全部节点均已被封禁"死锁。
 const mihomoBlacklistTTL = 10 * time.Minute
 
-// 出口 IP 校验的默认参数（镜像 tools/egress-quality-guard/session_rotator.py
-// 的 ROTATOR_* 默认值语义；MaxAttempts 是重试次数上限，加上首次尝试共
-// MaxAttempts+1 次切换，对齐 Python max_attempts=4 的总尝试次数）。
+// 出口 IP 校验默认参数（重试上限/探测 URL/验证超时），Mihomo 客户端独立取值，
+// 与任意代理提供商无关；节点来源可为任意机场订阅或自建节点。
 const (
 	defaultExitIPProbeURL     = "https://1.1.1.1/cdn-cgi/trace"
 	defaultExitRetryCap       = 3
