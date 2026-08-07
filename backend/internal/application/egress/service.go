@@ -213,6 +213,11 @@ type MihomoStatus struct {
 	Epoch       uint64
 	Reachable   bool
 	LastError   string
+	// TestEnabled/TestGroupName/TestCurrentNode 是测试组（双通道守卫探测）状态；
+	// 未启用测试组时为零值。
+	TestEnabled     bool
+	TestGroupName   string
+	TestCurrentNode string
 }
 
 // MihomoRotation 是质量守护 rotate_node 契约的结果：Changed 为 true 表示
@@ -227,6 +232,9 @@ type MihomoManager interface {
 	MihomoSwitch(context.Context) (string, error)
 	MihomoClearBlacklist() (int, error)
 	Rotate(context.Context) (MihomoRotation, error)
+	MihomoTestSelect(context.Context, string) (string, error)
+	MihomoTestBan(string) (int, error)
+	MihomoTestUnban(string) (int, error)
 }
 
 type BatchClearanceManager interface {
@@ -305,6 +313,40 @@ func (s *Service) Rotate(ctx context.Context) (MihomoRotation, error) {
 		return MihomoRotation{}, ErrMihomoUnavailable
 	}
 	return manager.Rotate(ctx)
+}
+
+// MihomoTestSelect 将测试组切换到指定节点（质量守护 select_node 契约的组模型
+// 实现）；Mihomo 未启用时返回 ErrMihomoUnavailable。
+func (s *Service) MihomoTestSelect(ctx context.Context, nodeName string) (string, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return "", ErrMihomoUnavailable
+	}
+	return manager.MihomoTestSelect(ctx, nodeName)
+}
+
+// MihomoTestBan 封禁测试组内一个节点；Mihomo 未启用时返回 ErrMihomoUnavailable。
+func (s *Service) MihomoTestBan(nodeName string) (int, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return 0, ErrMihomoUnavailable
+	}
+	return manager.MihomoTestBan(nodeName)
+}
+
+// MihomoTestUnban 解禁测试组内一个节点；Mihomo 未启用时返回 ErrMihomoUnavailable。
+func (s *Service) MihomoTestUnban(nodeName string) (int, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return 0, ErrMihomoUnavailable
+	}
+	return manager.MihomoTestUnban(nodeName)
 }
 
 func (s *Service) DefaultUserAgents() map[string]string {

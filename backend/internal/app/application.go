@@ -489,10 +489,19 @@ func mihomoConfig(cfg config.Config) infraegress.MihomoConfig {
 	if verifyTimeout <= 0 {
 		verifyTimeout = config.DefaultMihomoVerifyTimeout
 	}
+	testGroupName := strings.TrimSpace(cfg.Provider.Web.MihomoTestGroupName)
+	if testGroupName == "" {
+		testGroupName = config.DefaultMihomoTestGroupName
+	}
+	testProxyURL := strings.TrimSpace(cfg.Provider.Web.MihomoTestProxyURL)
+	if testProxyURL == "" {
+		testProxyURL = config.DefaultMihomoTestProxyURL
+	}
 	return infraegress.MihomoConfig{
 		Enabled: cfg.Provider.Web.MihomoEnabled, APIURL: apiURL, GroupName: groupName,
 		ExitProbeProxyURL: exitProbeProxyURL, IPProbeURL: ipProbeURL, MaxAttempts: maxAttempts,
 		VerifyTimeout: verifyTimeout,
+		TestGroupName: testGroupName, TestProxyURL: testProxyURL,
 	}
 }
 
@@ -508,6 +517,7 @@ func (value egressMihomoManager) MihomoStatus(ctx context.Context) egressapp.Mih
 		Enabled: status.Enabled, APIURL: status.APIURL, GroupName: status.GroupName,
 		CurrentNode: status.CurrentNode, BannedNodes: status.BannedNodes, SwitchCount: status.SwitchCount,
 		Epoch: status.Epoch, Reachable: status.Reachable, LastError: status.LastError,
+		TestEnabled: status.TestEnabled, TestGroupName: status.TestGroupName, TestCurrentNode: status.TestCurrentNode,
 	}
 }
 
@@ -521,6 +531,18 @@ func (value egressMihomoManager) MihomoClearBlacklist() (int, error) {
 
 func (value egressMihomoManager) Rotate(ctx context.Context) (egressapp.MihomoRotation, error) {
 	return value.manager.MihomoRotate(ctx)
+}
+
+func (value egressMihomoManager) MihomoTestSelect(ctx context.Context, nodeName string) (string, error) {
+	return value.manager.MihomoTestSelect(ctx, nodeName)
+}
+
+func (value egressMihomoManager) MihomoTestBan(nodeName string) (int, error) {
+	return value.manager.MihomoTestBan(nodeName)
+}
+
+func (value egressMihomoManager) MihomoTestUnban(nodeName string) (int, error) {
+	return value.manager.MihomoTestUnban(nodeName)
 }
 
 func consoleProviderConfig(cfg config.Config) consoleprovider.Config {

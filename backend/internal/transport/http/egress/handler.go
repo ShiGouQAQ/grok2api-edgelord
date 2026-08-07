@@ -90,6 +90,9 @@ func (h *Handler) RegisterQualityGuard(router *gin.RouterGroup) {
 	router.GET("/egress-operations", h.operationsConfig)
 	router.GET("/egress-mihomo/status", h.mihomoStatus)
 	router.POST("/egress-mihomo/rotate", h.mihomoRotate)
+	router.POST("/egress-mihomo/select", h.mihomoTestSelect)
+	router.POST("/egress-mihomo/ban", h.mihomoTestBan)
+	router.POST("/egress-mihomo/unban", h.mihomoTestUnban)
 }
 
 // A fully populated 2,000-node guard state is slightly larger than 1 MiB.
@@ -110,6 +113,7 @@ func (h *Handler) mihomoStatus(c *gin.Context) {
 		"enabled": value.Enabled, "apiUrl": value.APIURL, "groupName": value.GroupName,
 		"currentNode": value.CurrentNode, "bannedNodes": bannedNodes, "switchCount": value.SwitchCount,
 		"epoch": value.Epoch, "reachable": value.Reachable, "lastError": value.LastError,
+		"testEnabled": value.TestEnabled, "testGroupName": value.TestGroupName, "testCurrentNode": value.TestCurrentNode,
 	})
 }
 
@@ -156,6 +160,57 @@ func (h *Handler) mihomoRotate(c *gin.Context) {
 		"changed": value.Changed, "nodeId": request.NodeID, "oldExitIp": request.OldExitIP,
 		"newExitIp": "", "newNode": value.NewNode,
 	})
+}
+
+type mihomoTestNodeRequest struct {
+	NodeID string `json:"nodeId"`
+}
+
+// mihomoTestSelect 实现测试组 select_node 契约：显式切换测试组到指定节点
+// （节点名由 Mihomo 组节点提供，body 的 nodeId 即节点名）。测试组与生产出口
+// 隔离，切换零扰动生产。changed 恒为 true（成功或单飞合并）。
+func (h *Handler) mihomoTestSelect(c *gin.Context) {
+	var request mihomoTestNodeRequest
+	if c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.NodeID) == "" {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	current, err := h.service.MihomoTestSelect(c.Request.Context(), strings.TrimSpace(request.NodeID))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"changed": true, "currentNode": current})
+}
+
+// mihomoTestBan 封禁测试组内一个节点，返回当前测试组黑名单节点数。
+func (h *Handler) mihomoTestBan(c *gin.Context) {
+	var request mihomoTestNodeRequest
+	if c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.NodeID) == "" {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	banned, err := h.service.MihomoTestBan(strings.TrimSpace(request.NodeID))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"bannedNodes": banned})
+}
+
+// mihomoTestUnban 解禁测试组内一个节点，返回剩余黑名单节点数。
+func (h *Handler) mihomoTestUnban(c *gin.Context) {
+	var request mihomoTestNodeRequest
+	if c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.NodeID) == "" {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	banned, err := h.service.MihomoTestUnban(strings.TrimSpace(request.NodeID))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"bannedNodes": banned})
 }
 
 type qualityGuardState struct {

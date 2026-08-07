@@ -298,8 +298,12 @@ func TestOperationsConfigResponseReportsSubscriptionProxyWithoutExposingIt(t *te
 }
 
 type stubMihomoManager struct {
-	rotation egressapp.MihomoRotation
-	err      error
+	rotation    egressapp.MihomoRotation
+	err         error
+	selectNode  string
+	selectErr   error
+	bannedCount int
+	banErr      error
 }
 
 func (value stubMihomoManager) MihomoStatus(context.Context) egressapp.MihomoStatus {
@@ -309,6 +313,15 @@ func (value stubMihomoManager) MihomoSwitch(context.Context) (string, error) { r
 func (value stubMihomoManager) MihomoClearBlacklist() (int, error)           { return 0, nil }
 func (value stubMihomoManager) Rotate(context.Context) (egressapp.MihomoRotation, error) {
 	return value.rotation, value.err
+}
+func (value stubMihomoManager) MihomoTestSelect(context.Context, string) (string, error) {
+	return value.selectNode, value.selectErr
+}
+func (value stubMihomoManager) MihomoTestBan(string) (int, error) {
+	return value.bannedCount, value.banErr
+}
+func (value stubMihomoManager) MihomoTestUnban(string) (int, error) {
+	return value.bannedCount, value.banErr
 }
 
 func newQualityGuardRotateRouter(service *egressapp.Service) *gin.Engine {
@@ -353,6 +366,100 @@ func TestQualityGuardRotateRejectsEmptyNodeID(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer guard-secret")
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != 400 || !strings.Contains(recorder.Body.String(), `"code":"invalidRequest"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardSelectReportsChangedAndCurrentNode(t *testing.T) {
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{selectNode: "fast"})
+	router := newQualityGuardRotateRouter(service)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/select", bytes.NewBufferString(`{"nodeId":"fast"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"changed":true`) || !strings.Contains(recorder.Body.String(), `"currentNode":"fast"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardSelectRejectsEmptyNodeID(t *testing.T) {
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{selectNode: "fast"})
+	router := newQualityGuardRotateRouter(service)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/select", bytes.NewBufferString(`{"nodeId":""}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 400 || !strings.Contains(recorder.Body.String(), `"code":"invalidRequest"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardSelectReportsUnavailableWhenNoManager(t *testing.T) {
+	router := newQualityGuardRotateRouter(egressapp.NewService(nil, nil, ""))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/select", bytes.NewBufferString(`{"nodeId":"fast"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 503 || !strings.Contains(recorder.Body.String(), `"code":"egressMihomoUnavailable"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardBanReportsBannedNodes(t *testing.T) {
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{bannedCount: 1})
+	router := newQualityGuardRotateRouter(service)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/ban", bytes.NewBufferString(`{"nodeId":"slow"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"bannedNodes":1`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardUnbanReportsRemainingNodes(t *testing.T) {
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{bannedCount: 0})
+	router := newQualityGuardRotateRouter(service)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/unban", bytes.NewBufferString(`{"nodeId":"slow"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"bannedNodes":0`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardBanRejectsEmptyNodeID(t *testing.T) {
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{})
+	router := newQualityGuardRotateRouter(service)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/ban", bytes.NewBufferString(`{"nodeId":""}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 400 || !strings.Contains(recorder.Body.String(), `"code":"invalidRequest"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardBanReportsUnavailableWhenNoManager(t *testing.T) {
+	router := newQualityGuardRotateRouter(egressapp.NewService(nil, nil, ""))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/ban", bytes.NewBufferString(`{"nodeId":"slow"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 503 || !strings.Contains(recorder.Body.String(), `"code":"egressMihomoUnavailable"`) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
