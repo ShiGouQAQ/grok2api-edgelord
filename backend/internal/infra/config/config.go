@@ -20,15 +20,21 @@ import (
 )
 
 const (
-	DatabaseURLEnv                = "GROK2API_DATABASE_URL"
-	StatsigModeManual             = "manual"
-	StatsigModeURL                = "url"
-	ClearanceModeManual           = "manual"
-	ClearanceModeFlareSolverr     = "flaresolverr"
-	DefaultStatsigSignerURL       = "https://grok.wodf.de/sign"
-	DefaultFlareSolverrURL        = "http://flaresolverr:8191"
-	RecommendedBuildClientVersion = "0.2.119"
-	RecommendedBuildUserAgent     = "grok-shell/" + RecommendedBuildClientVersion + " (linux; x86_64)"
+	DatabaseURLEnv                 = "GROK2API_DATABASE_URL"
+	StatsigModeManual              = "manual"
+	StatsigModeURL                 = "url"
+	ClearanceModeManual            = "manual"
+	ClearanceModeFlareSolverr      = "flaresolverr"
+	DefaultStatsigSignerURL        = "https://grok.wodf.de/sign"
+	DefaultFlareSolverrURL         = "http://flaresolverr:8191"
+	DefaultMihomoAPIURL            = "http://127.0.0.1:9093"
+	DefaultMihomoGroupName         = "XAI-GROUP"
+	DefaultMihomoExitProbeProxyURL = "http://127.0.0.1:7890"
+	DefaultMihomoIPProbeURL        = "https://1.1.1.1/cdn-cgi/trace"
+	DefaultMihomoMaxAttempts       = 3
+	DefaultMihomoVerifyTimeout     = 15 * time.Second
+	RecommendedBuildClientVersion  = "0.2.119"
+	RecommendedBuildUserAgent      = "grok-shell/" + RecommendedBuildClientVersion + " (linux; x86_64)"
 
 	maxServerBodyBytes     = 256 << 20
 	maxRequestTimeout      = 24 * time.Hour
@@ -178,6 +184,14 @@ type WebProviderConfig struct {
 	AllowNSFW           bool     `yaml:"allowNSFW"`
 	RecoveryBackoffBase Duration `yaml:"recoveryBackoffBase"`
 	RecoveryBackoffMax  Duration `yaml:"recoveryBackoffMax"`
+	MihomoEnabled       bool     `yaml:"-"`
+	MihomoAPIURL        string   `yaml:"-"`
+	MihomoGroupName     string   `yaml:"-"`
+	// 下列字段可从 config.yaml（provider.web 段）配置，零值运行时回落到默认常量。
+	MihomoExitProbeProxyURL string   `yaml:"mihomoExitProbeProxyURL"`
+	MihomoIPProbeURL        string   `yaml:"mihomoIPProbeURL"`
+	MihomoMaxAttempts       int      `yaml:"mihomoMaxAttempts"`
+	MihomoVerifyTimeout     Duration `yaml:"mihomoVerifyTimeout"`
 }
 
 type ConsoleProviderConfig struct {
@@ -804,6 +818,9 @@ func defaultConfig() Config {
 				VideoTimeout:     Duration(15 * time.Minute),
 				MediaConcurrency: 4, RecoveryBackoffBase: Duration(30 * time.Second),
 				RecoveryBackoffMax: Duration(30 * time.Minute),
+				MihomoEnabled:      false, MihomoAPIURL: DefaultMihomoAPIURL, MihomoGroupName: DefaultMihomoGroupName,
+				MihomoExitProbeProxyURL: DefaultMihomoExitProbeProxyURL, MihomoIPProbeURL: DefaultMihomoIPProbeURL,
+				MihomoMaxAttempts: DefaultMihomoMaxAttempts, MihomoVerifyTimeout: Duration(DefaultMihomoVerifyTimeout),
 			},
 			Console: ConsoleProviderConfig{BaseURL: "https://console.x.ai", ChatTimeout: Duration(5 * time.Minute), StreamIdleTimeout: Duration(settingsdomain.DefaultConsoleStreamIdleTimeout)},
 		},

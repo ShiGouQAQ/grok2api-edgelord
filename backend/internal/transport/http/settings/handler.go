@@ -86,6 +86,13 @@ type providerWebConfigDTO struct {
 	AllowNSFW               bool    `json:"allowNSFW"`
 	RecoveryBackoffBase     string  `json:"recoveryBackoffBase"`
 	RecoveryBackoffMax      string  `json:"recoveryBackoffMax"`
+	MihomoEnabled           bool    `json:"mihomoEnabled"`
+	MihomoAPIURL            string  `json:"mihomoAPIURL"`
+	MihomoGroupName         string  `json:"mihomoGroupName"`
+	MihomoExitProbeProxyURL string  `json:"mihomoExitProbeProxyURL"`
+	MihomoIPProbeURL        string  `json:"mihomoIPProbeURL"`
+	MihomoMaxAttempts       int     `json:"mihomoMaxAttempts"`
+	MihomoVerifyTimeout     string  `json:"mihomoVerifyTimeout"`
 }
 
 type batchConfigDTO struct {
@@ -203,6 +210,9 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			VideoTimeout:     value.ProviderWeb.VideoTimeout,
 			MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,
 			RecoveryBackoffBase: value.ProviderWeb.RecoveryBackoffBase, RecoveryBackoffMax: value.ProviderWeb.RecoveryBackoffMax,
+			MihomoEnabled: value.ProviderWeb.MihomoEnabled, MihomoAPIURL: value.ProviderWeb.MihomoAPIURL, MihomoGroupName: value.ProviderWeb.MihomoGroupName,
+			MihomoExitProbeProxyURL: value.ProviderWeb.MihomoExitProbeProxyURL, MihomoIPProbeURL: value.ProviderWeb.MihomoIPProbeURL,
+			MihomoMaxAttempts: value.ProviderWeb.MihomoMaxAttempts, MihomoVerifyTimeout: value.ProviderWeb.MihomoVerifyTimeout,
 		},
 		ProviderConsole: settingsapp.ProviderConsoleConfig{
 			BaseURL: value.ProviderConsole.BaseURL, ChatTimeout: value.ProviderConsole.ChatTimeout,
@@ -283,6 +293,9 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				VideoTimeout:     config.ProviderWeb.VideoTimeout,
 				MediaConcurrency: config.ProviderWeb.MediaConcurrency, AllowNSFW: config.ProviderWeb.AllowNSFW,
 				RecoveryBackoffBase: config.ProviderWeb.RecoveryBackoffBase, RecoveryBackoffMax: config.ProviderWeb.RecoveryBackoffMax,
+				MihomoEnabled: config.ProviderWeb.MihomoEnabled, MihomoAPIURL: config.ProviderWeb.MihomoAPIURL, MihomoGroupName: config.ProviderWeb.MihomoGroupName,
+				MihomoExitProbeProxyURL: config.ProviderWeb.MihomoExitProbeProxyURL, MihomoIPProbeURL: config.ProviderWeb.MihomoIPProbeURL,
+				MihomoMaxAttempts: config.ProviderWeb.MihomoMaxAttempts, MihomoVerifyTimeout: config.ProviderWeb.MihomoVerifyTimeout,
 			},
 			ProviderConsole: providerConsoleConfigDTO{
 				BaseURL: config.ProviderConsole.BaseURL, ChatTimeout: config.ProviderConsole.ChatTimeout,

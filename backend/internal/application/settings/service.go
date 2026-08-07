@@ -55,6 +55,13 @@ type ProviderWebConfig struct {
 	AllowNSFW               bool
 	RecoveryBackoffBase     string
 	RecoveryBackoffMax      string
+	MihomoEnabled           bool
+	MihomoAPIURL            string
+	MihomoGroupName         string
+	MihomoExitProbeProxyURL string
+	MihomoIPProbeURL        string
+	MihomoMaxAttempts       int
+	MihomoVerifyTimeout     string
 	// ClearanceProvided distinguishes older admin clients that predate the
 	// managed-clearance fields from an explicit update to those fields.
 	ClearanceProvided bool
@@ -332,6 +339,30 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 	if clearanceRefresh <= 0 {
 		clearanceRefresh = base.Provider.Web.ClearanceRefresh.Value()
 	}
+	mihomoAPIURL := strings.TrimSpace(value.ProviderWeb.MihomoAPIURL)
+	if mihomoAPIURL == "" {
+		mihomoAPIURL = base.Provider.Web.MihomoAPIURL
+	}
+	mihomoGroupName := strings.TrimSpace(value.ProviderWeb.MihomoGroupName)
+	if mihomoGroupName == "" {
+		mihomoGroupName = base.Provider.Web.MihomoGroupName
+	}
+	mihomoExitProbe := strings.TrimSpace(value.ProviderWeb.MihomoExitProbeProxyURL)
+	if mihomoExitProbe == "" {
+		mihomoExitProbe = base.Provider.Web.MihomoExitProbeProxyURL
+	}
+	mihomoIPProbe := strings.TrimSpace(value.ProviderWeb.MihomoIPProbeURL)
+	if mihomoIPProbe == "" {
+		mihomoIPProbe = base.Provider.Web.MihomoIPProbeURL
+	}
+	mihomoMaxAttempts := value.ProviderWeb.MihomoMaxAttempts
+	if mihomoMaxAttempts <= 0 {
+		mihomoMaxAttempts = base.Provider.Web.MihomoMaxAttempts
+	}
+	mihomoVerifyTimeout := value.ProviderWeb.MihomoVerifyTimeout
+	if mihomoVerifyTimeout <= 0 {
+		mihomoVerifyTimeout = base.Provider.Web.MihomoVerifyTimeout.Value()
+	}
 	base.Provider.Web = config.WebProviderConfig{
 		BaseURL: value.ProviderWeb.BaseURL, QuotaTimeout: config.Duration(value.ProviderWeb.QuotaTimeout),
 		StatsigMode: value.ProviderWeb.StatsigMode, StatsigManualValue: value.ProviderWeb.StatsigManualValue, StatsigSignerURL: value.ProviderWeb.StatsigSignerURL,
@@ -342,6 +373,9 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		VideoTimeout:     config.Duration(value.ProviderWeb.VideoTimeout),
 		MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,
 		RecoveryBackoffBase: config.Duration(value.ProviderWeb.RecoveryBackoffBase), RecoveryBackoffMax: config.Duration(value.ProviderWeb.RecoveryBackoffMax),
+		MihomoEnabled: value.ProviderWeb.MihomoEnabled, MihomoAPIURL: mihomoAPIURL, MihomoGroupName: mihomoGroupName,
+		MihomoExitProbeProxyURL: mihomoExitProbe, MihomoIPProbeURL: mihomoIPProbe, MihomoMaxAttempts: mihomoMaxAttempts,
+		MihomoVerifyTimeout: config.Duration(mihomoVerifyTimeout),
 	}
 	if value.ProviderWeb.StreamIdleTimeout <= 0 {
 		base.Provider.Web.StreamIdleTimeout = config.Duration(settingsdomain.DefaultWebStreamIdleTimeout)
@@ -446,6 +480,9 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			VideoTimeout:     value.Provider.Web.VideoTimeout.Value(),
 			MediaConcurrency: value.Provider.Web.MediaConcurrency, AllowNSFW: value.Provider.Web.AllowNSFW,
 			RecoveryBackoffBase: value.Provider.Web.RecoveryBackoffBase.Value(), RecoveryBackoffMax: value.Provider.Web.RecoveryBackoffMax.Value(),
+			MihomoEnabled: value.Provider.Web.MihomoEnabled, MihomoAPIURL: value.Provider.Web.MihomoAPIURL, MihomoGroupName: value.Provider.Web.MihomoGroupName,
+			MihomoExitProbeProxyURL: value.Provider.Web.MihomoExitProbeProxyURL, MihomoIPProbeURL: value.Provider.Web.MihomoIPProbeURL,
+			MihomoMaxAttempts: value.Provider.Web.MihomoMaxAttempts, MihomoVerifyTimeout: value.Provider.Web.MihomoVerifyTimeout.Value(),
 		},
 		ProviderConsole: settingsdomain.ProviderConsoleConfig{
 			BaseURL: value.Provider.Console.BaseURL, ChatTimeout: value.Provider.Console.ChatTimeout.Value(),
@@ -539,6 +576,18 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	}
 	next.Provider.Web.MediaConcurrency = input.ProviderWeb.MediaConcurrency
 	next.Provider.Web.AllowNSFW = input.ProviderWeb.AllowNSFW
+	next.Provider.Web.MihomoEnabled = input.ProviderWeb.MihomoEnabled
+	next.Provider.Web.MihomoAPIURL = strings.TrimSpace(input.ProviderWeb.MihomoAPIURL)
+	next.Provider.Web.MihomoGroupName = strings.TrimSpace(input.ProviderWeb.MihomoGroupName)
+	if value := strings.TrimSpace(input.ProviderWeb.MihomoExitProbeProxyURL); value != "" {
+		next.Provider.Web.MihomoExitProbeProxyURL = value
+	}
+	if value := strings.TrimSpace(input.ProviderWeb.MihomoIPProbeURL); value != "" {
+		next.Provider.Web.MihomoIPProbeURL = value
+	}
+	if input.ProviderWeb.MihomoMaxAttempts > 0 {
+		next.Provider.Web.MihomoMaxAttempts = input.ProviderWeb.MihomoMaxAttempts
+	}
 	next.Provider.Console.BaseURL = strings.TrimSpace(input.ProviderConsole.BaseURL)
 	next.Batch = config.BatchConfig{
 		ImportConcurrency: input.Batch.ImportConcurrency, ConversionConcurrency: input.Batch.ConversionConcurrency,
@@ -618,6 +667,9 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 			durationInput{"providerWeb.clearanceRefresh", input.ProviderWeb.ClearanceRefresh, func(value config.Duration) { next.Provider.Web.ClearanceRefresh = value }},
 		)
 	}
+	if strings.TrimSpace(input.ProviderWeb.MihomoVerifyTimeout) != "" {
+		durations = append(durations, durationInput{"providerWeb.mihomoVerifyTimeout", input.ProviderWeb.MihomoVerifyTimeout, func(value config.Duration) { next.Provider.Web.MihomoVerifyTimeout = value }})
+	}
 	if input.AccountsProvided {
 		durations = append(durations,
 			durationInput{"accounts.autoCleanReauthInterval", input.Accounts.AutoCleanReauthInterval, func(value config.Duration) { next.Accounts.AutoCleanReauthInterval = value }},
@@ -667,6 +719,9 @@ func toEditable(cfg config.Config) EditableConfig {
 			VideoTimeout:     cfg.Provider.Web.VideoTimeout.String(),
 			MediaConcurrency: cfg.Provider.Web.MediaConcurrency, AllowNSFW: cfg.Provider.Web.AllowNSFW,
 			RecoveryBackoffBase: cfg.Provider.Web.RecoveryBackoffBase.String(), RecoveryBackoffMax: cfg.Provider.Web.RecoveryBackoffMax.String(),
+			MihomoEnabled: cfg.Provider.Web.MihomoEnabled, MihomoAPIURL: cfg.Provider.Web.MihomoAPIURL, MihomoGroupName: cfg.Provider.Web.MihomoGroupName,
+			MihomoExitProbeProxyURL: cfg.Provider.Web.MihomoExitProbeProxyURL, MihomoIPProbeURL: cfg.Provider.Web.MihomoIPProbeURL,
+			MihomoMaxAttempts: cfg.Provider.Web.MihomoMaxAttempts, MihomoVerifyTimeout: cfg.Provider.Web.MihomoVerifyTimeout.String(),
 		},
 		ProviderConsole: ProviderConsoleConfig{
 			BaseURL: cfg.Provider.Console.BaseURL, ChatTimeout: cfg.Provider.Console.ChatTimeout.String(),
