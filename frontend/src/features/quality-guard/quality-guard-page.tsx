@@ -22,7 +22,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { getQualityGuardStatus, runQualityTest, updateQualityGuardPolicy, type QualityGuardEvent, type QualityGuardNodeState, type QualityGuardPolicy, type QualityGuardStatistics, type QualityGuardStatus, type QualityTestResult } from "@/features/quality-guard/quality-guard-api";
 import { createEgressNode, deleteEgressNodes, listAllEgressNodes, updateEgressNode, updateEgressNodesEnabled, type EgressNodeDTO, type EgressNodeInput } from "@/features/settings/settings-api";
-import { banMihomoNode, clearMihomoBlacklist, getMihomoStatus, rotateMihomoNode, selectMihomoNode, switchMihomoNode, unbanMihomoNode } from "@/features/settings/settings-api";
+import { banMihomoNode, clearMihomoBlacklist, getMihomoStatus, rotateMihomoNode, selectMihomoNode, switchMihomoNode, unbanMihomoNode, type MihomoMemberDTO } from "@/features/settings/settings-api";
 import { MihomoMemberList } from "@/features/settings/egress-mihomo";
 import { ErrorState, LoadingState } from "@/shared/components/data-state";
 import { PageHeader } from "@/shared/components/page-header";
@@ -174,7 +174,7 @@ export function QualityGuardPage() {
 
           {status.statistics ? <StatisticsPanel statistics={status.statistics} locale={i18n.language} /> : null}
 
-          <MihomoGroupEgressCard />
+          <MihomoGroupEgressCard status={status} nodes={nodes} />
 
           <section className="overflow-hidden rounded-lg bg-card" aria-labelledby="guard-nodes-title">
             <div className="flex flex-col gap-2 border-b px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
@@ -260,7 +260,7 @@ function StatisticsPanel({ statistics, locale }: { statistics: QualityGuardStati
   </section>;
 }
 
-function MihomoGroupEgressCard() {
+function MihomoGroupEgressCard({ status, nodes }: { status?: QualityGuardStatus; nodes: EgressNodeDTO[] }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [selectedMember, setSelectedMember] = useState<string>("");
@@ -307,6 +307,30 @@ function MihomoGroupEgressCard() {
   const data = query.data;
   const busy = selectMutation.isPending || banMutation.isPending || unbanMutation.isPending;
   const effectiveSelected = selectedMember || data?.currentNode || "";
+  const guardNodeByName = new Map(nodes.map((node) => [node.name, { node, guard: node.id in (status?.nodes ?? {}) ? status?.nodes?.[node.id] : undefined }]));
+  const testMemberTrailing = (member: MihomoMemberDTO) => {
+    const linked = guardNodeByName.get(member.name);
+    const guard = linked?.guard;
+    const badge = !linked ? (
+      <Badge variant="outline">{t("qualityGuard.mihomoNotSynced")}</Badge>
+    ) : guard?.disabled_by_guard ? (
+      <Badge variant="destructive">{t("qualityGuard.quarantined")}</Badge>
+    ) : !linked.node.enabled ? (
+      <Badge variant="secondary">{t("common.disabled")}</Badge>
+    ) : guard?.last_classification === "healthy" ? (
+      <Badge variant="outline" className="border-emerald-500/40 text-emerald-700 dark:text-emerald-400">{t("qualityGuard.healthy")}</Badge>
+    ) : guard ? (
+      <Badge variant="outline" className="border-amber-500/40 text-amber-700 dark:text-amber-400">{t("qualityGuard.suspect")}</Badge>
+    ) : (
+      <Badge variant="secondary">{t("qualityGuard.pending")}</Badge>
+    );
+    return (
+      <div className="flex items-center justify-end gap-1.5">
+        <Tooltip><TooltipTrigger asChild><span>{badge}</span></TooltipTrigger><TooltipContent>{t("qualityGuard.mihomoGuardLinkHelp")}</TooltipContent></Tooltip>
+        <Button type="button" size="sm" variant="secondary" disabled={member.current || busy} onClick={() => selectMutation.mutate(member.name)}>{t("qualityGuard.mihomoUseAsExit")}</Button>
+      </div>
+    );
+  };
 
   return (
     <section className="overflow-hidden rounded-lg bg-card" aria-labelledby="guard-mihomo-title">
@@ -354,7 +378,7 @@ function MihomoGroupEgressCard() {
             ) : (
               <p className="text-xs text-muted-foreground">{t("qualityGuard.mihomoNoMembers")}</p>
             )}
-            <MihomoMemberList members={data.members} testEnabled={data.testEnabled} testMembers={data.testMembers} />
+            <MihomoMemberList members={data.members} testEnabled={data.testEnabled} testMembers={data.testMembers} testTrailingTitle={t("qualityGuard.mihomoGuardLink")} testMemberTrailing={testMemberTrailing} />
           </div>
         )
       ) : null}

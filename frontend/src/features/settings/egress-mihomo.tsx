@@ -98,7 +98,7 @@ function StatusValue({ label, className, children }: { label: string; className?
   );
 }
 
-function MihomoMemberRow({ member }: { member: MihomoMemberDTO }) {
+export function MihomoMemberRow({ member, trailing }: { member: MihomoMemberDTO; trailing?: React.ReactNode }) {
   const { t } = useTranslation();
   return (
     <TableRow className={cn(member.current && "bg-emerald-500/10", member.banned && "opacity-70")}>
@@ -110,11 +110,12 @@ function MihomoMemberRow({ member }: { member: MihomoMemberDTO }) {
       <TableCell className="text-xs">
         {member.current ? <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{t("settings.egress.mihomoCurrent")}</Badge> : member.banned ? <Badge variant="destructive">{t("settings.egress.mihomoBanned")}</Badge> : null}
       </TableCell>
+      {trailing ? <TableCell className="text-right">{trailing}</TableCell> : null}
     </TableRow>
   );
 }
 
-function MihomoMemberTable({ title, members }: { title?: string; members: MihomoMemberDTO[] }) {
+export function MihomoMemberTable({ title, members, trailingTitle, trailing }: { title?: string; members: MihomoMemberDTO[]; trailingTitle?: string; trailing?: (member: MihomoMemberDTO) => React.ReactNode }) {
   const { t } = useTranslation();
   return (
     <div className="space-y-1.5">
@@ -127,9 +128,10 @@ function MihomoMemberTable({ title, members }: { title?: string; members: Mihomo
               <TableHead>{t("qualityGuard.source")}</TableHead>
               <TableHead className="text-right">{t("settings.egress.mihomoLatency")}</TableHead>
               <TableHead>{t("qualityGuard.state")}</TableHead>
+              {trailingTitle ? <TableHead className="text-right">{trailingTitle}</TableHead> : null}
             </TableRow></TableHeader>
             <TableBody>
-              {members.map((member) => <MihomoMemberRow key={member.name} member={member} />)}
+              {members.map((member) => <MihomoMemberRow key={member.name} member={member} trailing={trailing?.(member)} />)}
             </TableBody>
           </Table>
         </div>
@@ -140,13 +142,13 @@ function MihomoMemberTable({ title, members }: { title?: string; members: Mihomo
   );
 }
 
-export function MihomoMemberList({ members, testEnabled, testMembers }: { members: MihomoMemberDTO[]; testEnabled: boolean; testMembers: MihomoMemberDTO[] }) {
+export function MihomoMemberList({ members, testEnabled, testMembers, testTrailingTitle, testMemberTrailing }: { members: MihomoMemberDTO[]; testEnabled: boolean; testMembers: MihomoMemberDTO[]; testTrailingTitle?: string; testMemberTrailing?: (member: MihomoMemberDTO) => React.ReactNode }) {
   const { t } = useTranslation();
   return (
     <div className="space-y-1.5">
       <div className="text-[10px] font-medium text-muted-foreground">{t("settings.egress.mihomoMembers")}</div>
       <MihomoMemberTable members={members} />
-      {testEnabled && testMembers.length > 0 ? <MihomoMemberTable title={t("settings.egress.mihomoTestGroup")} members={testMembers} /> : null}
+      {testEnabled && testMembers.length > 0 ? <MihomoMemberTable title={t("settings.egress.mihomoTestGroup")} members={testMembers} trailingTitle={testTrailingTitle} trailing={testMemberTrailing} /> : null}
     </div>
   );
 }
