@@ -151,6 +151,84 @@ func TestUpdateQualityGuardConfigRejectsInvalidAndUnknownFields(t *testing.T) {
 	}
 }
 
+func TestUpdateQualityGuardConfigPersistsRotationToBootstrap(t *testing.T) {
+	directory := t.TempDir()
+	statePath := directory + "/state.json"
+	configPath := directory + "/runtime-config.json"
+	bootstrapPath := directory + "/bootstrap.json"
+	state := `{"version":1,"guard":{"mode":"hybrid","node_ids":["8","9"]},"nodes":{}}`
+	if err := os.WriteFile(statePath, []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := `{"version":1,"enabled":true,"internal_token":"secret-token","config":{"model":"grok-4.5","node_ids":["8","9"],"rotation_url":"https://rotator.example/rotate","rotation_token":"rot-secret","rotatable_node_ids":["8"]}}`
+	if err := os.WriteFile(bootstrapPath, []byte(bootstrap), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest("PUT", "/egress-quality-guard/config", bytes.NewBufferString(`{"mode":"hybrid","activeIntervalSeconds":60,"passivePollSeconds":5,"softTPS":500,"hardTPS":1000,"consecutiveSoft":2,"consecutiveErrors":2,"quarantineSeconds":300,"minHealthyNodes":1,"rotationUrl":"http://127.0.0.1:9090/rotate","rotatableNodeIds":["8","9"," 10 "]}`))
+	context.Request.Header.Set("Content-Type", "application/json")
+	NewHandler(nil, statePath, configPath, bootstrapPath).updateQualityGuardConfig(context)
+	if recorder.Code != 200 {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	data, err := os.ReadFile(bootstrapPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	if !strings.Contains(body, `"rotation_url":"http://127.0.0.1:9090/rotate"`) || !strings.Contains(body, `"rotatable_node_ids":["8","9","10"]`) {
+		t.Fatalf("bootstrap = %s", body)
+	}
+	if !strings.Contains(body, `"internal_token":"secret-token"`) || !strings.Contains(body, `"rotation_token":"rot-secret"`) {
+		t.Fatalf("tokens must survive rotation update: %s", body)
+	}
+}
+
+func TestUpdateQualityGuardConfigRejectsRotationWithoutURL(t *testing.T) {
+	directory := t.TempDir()
+	statePath := directory + "/state.json"
+	state := `{"version":1,"guard":{"mode":"hybrid","node_ids":["8","9"]},"nodes":{}}`
+	if err := os.WriteFile(statePath, []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest("PUT", "/egress-quality-guard/config", bytes.NewBufferString(`{"mode":"hybrid","activeIntervalSeconds":60,"passivePollSeconds":5,"softTPS":500,"hardTPS":1000,"consecutiveSoft":2,"consecutiveErrors":2,"quarantineSeconds":300,"minHealthyNodes":1,"rotatableNodeIds":["8"]}`))
+	NewHandler(nil, statePath, directory+"/runtime-config.json", directory+"/bootstrap.json").updateQualityGuardConfig(context)
+	if recorder.Code != 400 {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardStatusExposesRotationFromBootstrap(t *testing.T) {
+	directory := t.TempDir()
+	statePath := directory + "/state.json"
+	bootstrapPath := directory + "/bootstrap.json"
+	state := `{"version":1,"started_at":10,"guard":{"mode":"hybrid","model":"grok-4.5","node_ids":["8","9"],"active_interval_seconds":1800,"passive_poll_seconds":5,"soft_tps":500,"hard_tps":1000,"consecutive_soft":2,"consecutive_errors":2,"quarantine_seconds":300,"min_healthy_nodes":1,"max_output_tokens":384},"nodes":{}}`
+	if err := os.WriteFile(statePath, []byte(state), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := `{"version":1,"enabled":true,"internal_token":"secret-token","config":{"model":"grok-4.5","node_ids":["8","9"],"rotation_url":"https://rotator.example/rotate","rotation_token":"rot-secret","rotatable_node_ids":["8","9"]}}`
+	if err := os.WriteFile(bootstrapPath, []byte(bootstrap), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest("GET", "/egress-quality-guard", nil)
+	NewHandler(nil, statePath, "", bootstrapPath).qualityGuardStatus(context)
+	if recorder.Code != 200 {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"rotation_url":"https://rotator.example/rotate"`) || !strings.Contains(body, `"rotatable_node_ids":["8","9"]`) {
+		t.Fatalf("status = %s", body)
+	}
+	if strings.Contains(body, "rot-secret") || strings.Contains(body, "secret-token") {
+		t.Fatalf("status must not leak tokens: %s", body)
+	}
+}
+
 func TestBatchNodeUpdateRequestRequiresEnabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, test := range []struct {
