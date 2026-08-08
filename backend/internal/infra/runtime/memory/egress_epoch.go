@@ -25,9 +25,14 @@ func NewEgressEpochStore() *EgressEpochStore {
 	return store
 }
 
-func (s *EgressEpochStore) BumpEpoch(_ context.Context, groupKey string) (uint64, error) {
+// BumpEpoch 原子递增指定组的出口代际号并返回新值。内存实现本无需同步，
+// 但尊重 ctx 语义：ctx 已取消时返回 ctx.Err()，与 Redis 实现行为对称。
+func (s *EgressEpochStore) BumpEpoch(ctx context.Context, groupKey string) (uint64, error) {
 	if groupKey == "" {
 		return 0, fmt.Errorf("egress epoch group key is empty")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
 	shard := &s.shards[shardIndex(groupKey)]
 	shard.mu.Lock()
@@ -36,9 +41,14 @@ func (s *EgressEpochStore) BumpEpoch(_ context.Context, groupKey string) (uint64
 	return shard.values[groupKey], nil
 }
 
-func (s *EgressEpochStore) GetEpoch(_ context.Context, groupKey string) (uint64, error) {
+// GetEpoch 返回指定组的当前出口代际号，缺键返回 0。内存实现本无需同步，
+// 但尊重 ctx 语义：ctx 已取消时返回 ctx.Err()，与 Redis 实现行为对称。
+func (s *EgressEpochStore) GetEpoch(ctx context.Context, groupKey string) (uint64, error) {
 	if groupKey == "" {
 		return 0, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
 	shard := &s.shards[shardIndex(groupKey)]
 	shard.mu.Lock()

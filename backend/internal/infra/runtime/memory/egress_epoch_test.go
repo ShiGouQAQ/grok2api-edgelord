@@ -42,6 +42,21 @@ func TestEgressEpochStoreGroupIsolation(t *testing.T) {
 	}
 }
 
+func TestEgressEpochStoreHonorsCancelledContext(t *testing.T) {
+	store := NewEgressEpochStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.BumpEpoch(ctx, "group"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled ctx bump = %v, want context.Canceled", err)
+	}
+	if _, err := store.GetEpoch(ctx, "group"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled ctx get = %v, want context.Canceled", err)
+	}
+	if epoch, err := store.GetEpoch(context.Background(), "group"); err != nil || epoch != 0 {
+		t.Fatalf("canceled ctx 不得写入：epoch = %d, err = %v", epoch, err)
+	}
+}
+
 func TestEgressEpochStoreConcurrentBumpsAreMonotonic(t *testing.T) {
 	ctx := context.Background()
 	store := NewEgressEpochStore()
