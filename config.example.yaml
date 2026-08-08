@@ -122,8 +122,8 @@ provider:
     # [通常不要修改] 每次尝试内出口 IP 轮询的截止时长。
     mihomoVerifyTimeout: 15s
     # [按需启用] 双通道测试组（质量守卫探测专用，见 tools/mihomo/mihomo-dual-channel.yaml）。
-    # 两者皆留空 = legacy 单组行为；配置其一则另一项使用下列默认值。
-    # 测试组经独立 listener（默认 7891）直连，守卫自由切换探测成员，生产出口零扰动。
+    # mihomoTestProxyURL 留空 = 禁用测试通道（legacy 单组行为）；配置后测试组
+    # 经独立 listener（默认 7891）直连，守卫自由切换探测成员，生产出口零扰动。
     mihomoTestGroupName: "XAI-TEST-GROUP"
     mihomoTestProxyURL: "http://127.0.0.1:7891"
     # [按需启用] 主动延迟探测端点（走 mihomo 代理）：配置后 select 组切换优先

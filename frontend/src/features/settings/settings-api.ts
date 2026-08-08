@@ -328,6 +328,7 @@ export type MihomoStatusDTO = {
   testEnabled: boolean;
   testGroupName: string;
   testCurrentNode: string;
+  testEpoch: number;
   members: MihomoMemberDTO[];
   testMembers: MihomoMemberDTO[];
 };
@@ -346,6 +347,7 @@ const mihomoStatusValidator = createObjectDecoder<MihomoStatusDTO>("mihomo statu
   testEnabled: isBoolean,
   testGroupName: isString,
   testCurrentNode: isString,
+  testEpoch: isNumber,
   members: isArrayOf(mihomoMemberValidator),
   testMembers: isArrayOf(mihomoMemberValidator),
 });

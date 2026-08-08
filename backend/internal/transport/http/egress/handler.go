@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
@@ -28,6 +29,46 @@ type Handler struct {
 	guardConfigPath    string
 	guardBootstrapPath string
 	guardProbe         egressapp.QualityProbeInput
+	// mihomoOps 是 Mihomo 写操作（rotate/switch/blacklist-clear）的 HTTP 层
+	// 限流闸，admin JWT 与 internal token 两条路径共用（同一 Handler 实例）。
+	mihomoOps *mihomoOpLimiter
+}
+
+// mihomoOpRateLimitWindow 是 Mihomo 写操作的调用面限流窗口。与后端切换
+// 节流闸配合：本闸只限调用频率，出口切换的耗散/冷却仍由 Manager 自身
+// 保证（单飞合并），不会因限流产生双重切换语义。
+const mihomoOpRateLimitWindow = 30 * time.Second
+
+// mihomoOpLimiter 是每 key（操作+客户端 IP）的轻量内存限流闸（1 次/窗口，
+// map+mutex，不引新依赖）。多实例部署下各实例独立计数，仅作滥用防护，
+// 非精确配额。
+type mihomoOpLimiter struct {
+	mu     sync.Mutex
+	window time.Duration
+	last   map[string]time.Time
+}
+
+func newMihomoOpLimiter(window time.Duration) *mihomoOpLimiter {
+	return &mihomoOpLimiter{window: window, last: make(map[string]time.Time)}
+}
+
+func (l *mihomoOpLimiter) Allow(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if last, ok := l.last[key]; ok && now.Sub(last) < l.window {
+		return false
+	}
+	l.last[key] = now
+	// 有界：key 数超限时清理过期条目，防止恶意 IP 轮换撑爆内存。
+	if len(l.last) > 1024 {
+		cutoff := now.Add(-2 * l.window)
+		for k, v := range l.last {
+			if v.Before(cutoff) {
+				delete(l.last, k)
+			}
+		}
+	}
+	return true
 }
 
 func NewHandler(service *egressapp.Service, guardStatePath ...string) *Handler {
@@ -43,7 +84,10 @@ func NewHandler(service *egressapp.Service, guardStatePath ...string) *Handler {
 	if len(guardStatePath) > 2 {
 		bootstrapPath = strings.TrimSpace(guardStatePath[2])
 	}
-	return &Handler{service: service, guardStatePath: path, guardConfigPath: configPath, guardBootstrapPath: bootstrapPath}
+	return &Handler{
+		service: service, guardStatePath: path, guardConfigPath: configPath, guardBootstrapPath: bootstrapPath,
+		mihomoOps: newMihomoOpLimiter(mihomoOpRateLimitWindow),
+	}
 }
 
 // WithQualityGuardProbe pins the sidecar probe to server-owned credentials and
@@ -132,11 +176,25 @@ func (h *Handler) mihomoStatus(c *gin.Context) {
 		"currentNode": value.CurrentNode, "bannedNodes": bannedNodes, "switchCount": value.SwitchCount,
 		"epoch": value.Epoch, "reachable": value.Reachable, "lastError": value.LastError,
 		"testEnabled": value.TestEnabled, "testGroupName": value.TestGroupName, "testCurrentNode": value.TestCurrentNode,
-		"members": members, "testMembers": testMembers,
+		"testEpoch": value.TestEpoch,
+		"members":   members, "testMembers": testMembers,
 	})
 }
 
+// mihomoOpAllowed 对写操作做调用面限流（key = 操作+客户端 IP，1 次/30s）。
+// 被限流时直接写 429 并返回 false。
+func (h *Handler) mihomoOpAllowed(c *gin.Context, op string) bool {
+	if !h.mihomoOps.Allow("mihomo:"+op+":"+c.ClientIP(), time.Now()) {
+		response.Error(c, http.StatusTooManyRequests, "rateLimited", "Mihomo 操作过于频繁，请 30 秒后重试")
+		return false
+	}
+	return true
+}
+
 func (h *Handler) mihomoSwitch(c *gin.Context) {
+	if !h.mihomoOpAllowed(c, "switch") {
+		return
+	}
 	node, err := h.service.MihomoSwitch(c.Request.Context())
 	if err != nil {
 		h.writeError(c, err)
@@ -146,6 +204,9 @@ func (h *Handler) mihomoSwitch(c *gin.Context) {
 }
 
 func (h *Handler) mihomoClearBlacklist(c *gin.Context) {
+	if !h.mihomoOpAllowed(c, "blacklist-clear") {
+		return
+	}
 	cleared, err := h.service.MihomoClearBlacklist()
 	if err != nil {
 		h.writeError(c, err)
@@ -170,7 +231,12 @@ type mihomoRotateRequest struct {
 // bootstrap rotatable_node_ids 白名单：白名单为空 → 一律 403（未配置可轮换
 // 节点即不允许轮换，fail-closed）；白名单非空且 nodeId 不在其中 → 403。
 // 白名单只限制谁能触发组级 rotate，不参与选路。空 nodeId 保持 400。
+// 与 switch 一样经 mihomoOpAllowed 限频（1 次/30s/IP），与后端 doSwitch
+// 节流闸配合：guard 的轮换失败会按 quarantine_seconds 退避重试。
 func (h *Handler) mihomoRotate(c *gin.Context) {
+	if !h.mihomoOpAllowed(c, "rotate") {
+		return
+	}
 	var request mihomoRotateRequest
 	if c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.NodeID) == "" {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")

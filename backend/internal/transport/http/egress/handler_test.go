@@ -382,10 +382,11 @@ type stubMihomoManager struct {
 	selectErr   error
 	bannedCount int
 	banErr      error
+	status      egressapp.MihomoStatus
 }
 
 func (value stubMihomoManager) MihomoStatus(context.Context) egressapp.MihomoStatus {
-	return egressapp.MihomoStatus{}
+	return value.status
 }
 func (value stubMihomoManager) MihomoSwitch(context.Context) (string, error) { return "", nil }
 func (value stubMihomoManager) MihomoClearBlacklist() (int, error)           { return 0, nil }
@@ -426,12 +427,52 @@ func writeQualityGuardBootstrapFixture(t *testing.T, directory, bootstrap string
 	return path
 }
 
+func TestQualityGuardStatusExposesTestEpoch(t *testing.T) {
+	// P1-7：状态接口必须透出 testEpoch（测试客户端独立出口代际号），守卫
+	// 据此归因测试组探测而非退化为生产 epoch。
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{status: egressapp.MihomoStatus{
+		Enabled: true, Epoch: 3, TestEnabled: true, TestEpoch: 7, TestCurrentNode: "t1",
+	}})
+	router := newQualityGuardRotateRouter(service)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("GET", "/api/internal/v1/quality-guard/egress-mihomo/status", nil)
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"testEpoch":7`) || !strings.Contains(recorder.Body.String(), `"epoch":3`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestQualityGuardRotateRequiresToken(t *testing.T) {
 	router := newQualityGuardRotateRouter(nil)
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/rotate", bytes.NewBufferString(`{"nodeId":"8"}`)))
 	if recorder.Code != 401 || !strings.Contains(recorder.Body.String(), `"code":"qualityGuardUnauthorized"`) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardRotateRateLimitedPerIP(t *testing.T) {
+	// P2-2：rotate 端点 1 次/30s/IP 限流。同路由器第二次调用必须 429，
+	// 与后端 doSwitch 节流闸配合（guard 按 quarantine_seconds 退避重试）。
+	bootstrapPath := writeQualityGuardBootstrapFixture(t, t.TempDir(), `{"version":1,"enabled":true,"config":{"rotatable_node_ids":["8"]}}`)
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{rotation: egressapp.MihomoRotation{Changed: true, NewNode: "fast"}})
+	router := newQualityGuardRotateRouterWithPaths(service, "", "", bootstrapPath)
+	request := func() *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/rotate", bytes.NewBufferString(`{"nodeId":"8"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer guard-secret")
+		router.ServeHTTP(recorder, req)
+		return recorder
+	}
+	if recorder := request(); recorder.Code != 200 {
+		t.Fatalf("first rotate status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := request(); recorder.Code != 429 {
+		t.Fatalf("second rotate within window must be rate limited, got status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
