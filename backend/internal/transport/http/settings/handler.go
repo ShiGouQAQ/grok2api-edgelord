@@ -95,6 +95,8 @@ type providerWebConfigDTO struct {
 	MihomoVerifyTimeout     string  `json:"mihomoVerifyTimeout"`
 	MihomoTestGroupName     string  `json:"mihomoTestGroupName"`
 	MihomoTestProxyURL      string  `json:"mihomoTestProxyURL"`
+	// 留空 = 禁用主动延迟探测（保持回退首可用节点现状）。
+	MihomoDelayProbeURL string `json:"mihomoDelayProbeURL"`
 }
 
 type batchConfigDTO struct {
@@ -216,6 +218,7 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			MihomoExitProbeProxyURL: value.ProviderWeb.MihomoExitProbeProxyURL, MihomoIPProbeURL: value.ProviderWeb.MihomoIPProbeURL,
 			MihomoMaxAttempts: value.ProviderWeb.MihomoMaxAttempts, MihomoVerifyTimeout: value.ProviderWeb.MihomoVerifyTimeout,
 			MihomoTestGroupName: value.ProviderWeb.MihomoTestGroupName, MihomoTestProxyURL: value.ProviderWeb.MihomoTestProxyURL,
+			MihomoDelayProbeURL: value.ProviderWeb.MihomoDelayProbeURL,
 		},
 		ProviderConsole: settingsapp.ProviderConsoleConfig{
 			BaseURL: value.ProviderConsole.BaseURL, ChatTimeout: value.ProviderConsole.ChatTimeout,
@@ -300,6 +303,7 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				MihomoExitProbeProxyURL: config.ProviderWeb.MihomoExitProbeProxyURL, MihomoIPProbeURL: config.ProviderWeb.MihomoIPProbeURL,
 				MihomoMaxAttempts: config.ProviderWeb.MihomoMaxAttempts, MihomoVerifyTimeout: config.ProviderWeb.MihomoVerifyTimeout,
 				MihomoTestGroupName: config.ProviderWeb.MihomoTestGroupName, MihomoTestProxyURL: config.ProviderWeb.MihomoTestProxyURL,
+				MihomoDelayProbeURL: config.ProviderWeb.MihomoDelayProbeURL,
 			},
 			ProviderConsole: providerConsoleConfigDTO{
 				BaseURL: config.ProviderConsole.BaseURL, ChatTimeout: config.ProviderConsole.ChatTimeout,

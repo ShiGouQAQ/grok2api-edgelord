@@ -497,11 +497,17 @@ func mihomoConfig(cfg config.Config) infraegress.MihomoConfig {
 	if testProxyURL == "" {
 		testProxyURL = config.DefaultMihomoTestProxyURL
 	}
+	// DelayProbeURL 为空 = 禁用主动延迟探测（回退首可用节点，保持现状安全）。
+	delayProbeURL := strings.TrimSpace(cfg.Provider.Web.MihomoDelayProbeURL)
+	if delayProbeURL == "" {
+		delayProbeURL = config.DefaultMihomoDelayProbeURL
+	}
 	return infraegress.MihomoConfig{
 		Enabled: cfg.Provider.Web.MihomoEnabled, APIURL: apiURL, GroupName: groupName,
 		ExitProbeProxyURL: exitProbeProxyURL, IPProbeURL: ipProbeURL, MaxAttempts: maxAttempts,
 		VerifyTimeout: verifyTimeout,
 		TestGroupName: testGroupName, TestProxyURL: testProxyURL,
+		DelayProbeURL: delayProbeURL,
 	}
 }
 

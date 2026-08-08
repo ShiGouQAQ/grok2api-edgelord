@@ -126,6 +126,9 @@ provider:
     # 测试组经独立 listener（默认 7891）直连，守卫自由切换探测成员，生产出口零扰动。
     mihomoTestGroupName: "XAI-TEST-GROUP"
     mihomoTestProxyURL: "http://127.0.0.1:7891"
+    # [按需启用] 主动延迟探测端点（走 mihomo 代理）：配置后 select 组切换优先
+    # 选择历史延迟最低的节点；留空 = 禁用主动探测（保持回退首可用节点现状）。
+    mihomoDelayProbeURL: ""
 
 # [按需启用] Grok Build 出口质量守护。守护程序内置于主容器（s6-overlay 服务
 # egress-quality-guard），随主容器自动启动，仅 enabled 时产生探测流量。

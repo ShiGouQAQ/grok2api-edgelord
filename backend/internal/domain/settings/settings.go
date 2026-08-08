@@ -82,6 +82,8 @@ type ProviderWebConfig struct {
 	MihomoVerifyTimeout     time.Duration
 	MihomoTestGroupName     string
 	MihomoTestProxyURL      string
+	// MihomoDelayProbeURL 留空 = 禁用主动延迟探测（保持回退首可用节点现状）。
+	MihomoDelayProbeURL string
 }
 
 // BatchConfig 定义账号导入、转换、同步和凭据刷新的并发上限。

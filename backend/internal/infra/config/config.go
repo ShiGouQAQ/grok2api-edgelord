@@ -35,8 +35,11 @@ const (
 	DefaultMihomoVerifyTimeout     = 15 * time.Second
 	DefaultMihomoTestGroupName     = "XAI-TEST-GROUP"
 	DefaultMihomoTestProxyURL      = "http://127.0.0.1:7891"
-	RecommendedBuildClientVersion  = "0.2.119"
-	RecommendedBuildUserAgent      = "grok-shell/" + RecommendedBuildClientVersion + " (linux; x86_64)"
+	// DefaultMihomoDelayProbeURL 为空 = 禁用主动延迟探测（保持现状安全）；
+	// 配置后可让 select 组切换优先选历史延迟最低的节点。
+	DefaultMihomoDelayProbeURL    = ""
+	RecommendedBuildClientVersion = "0.2.119"
+	RecommendedBuildUserAgent     = "grok-shell/" + RecommendedBuildClientVersion + " (linux; x86_64)"
 
 	maxServerBodyBytes     = 256 << 20
 	maxRequestTimeout      = 24 * time.Hour
@@ -197,6 +200,8 @@ type WebProviderConfig struct {
 	// 双通道测试组（守卫探测专用）：两者皆空 = legacy 单组行为（零回归）。
 	MihomoTestGroupName string `yaml:"mihomoTestGroupName"`
 	MihomoTestProxyURL  string `yaml:"mihomoTestProxyURL"`
+	// 主动延迟探测端点：留空 = 禁用（生产路径保持"回退首可用节点"现状）。
+	MihomoDelayProbeURL string `yaml:"mihomoDelayProbeURL"`
 }
 
 type ConsoleProviderConfig struct {
@@ -827,6 +832,7 @@ func defaultConfig() Config {
 				MihomoExitProbeProxyURL: DefaultMihomoExitProbeProxyURL, MihomoIPProbeURL: DefaultMihomoIPProbeURL,
 				MihomoMaxAttempts: DefaultMihomoMaxAttempts, MihomoVerifyTimeout: Duration(DefaultMihomoVerifyTimeout),
 				MihomoTestGroupName: DefaultMihomoTestGroupName, MihomoTestProxyURL: DefaultMihomoTestProxyURL,
+				MihomoDelayProbeURL: DefaultMihomoDelayProbeURL,
 			},
 			Console: ConsoleProviderConfig{BaseURL: "https://console.x.ai", ChatTimeout: Duration(5 * time.Minute), StreamIdleTimeout: Duration(settingsdomain.DefaultConsoleStreamIdleTimeout)},
 		},

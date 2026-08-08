@@ -517,6 +517,35 @@ func TestApplyDomainConfigPreservesExplicitCapacitySettings(t *testing.T) {
 	}
 }
 
+// TestMihomoDelayProbeURLRoundTrip 验证 DelayProbeURL 配置全链路往返：默认空
+// （禁用主动探测）→ applyDomainConfig 落库 → toEditable 暴露 → mergeEditable 保留。
+func TestMihomoDelayProbeURLRoundTrip(t *testing.T) {
+	base := testConfig(t)
+	if base.Provider.Web.MihomoDelayProbeURL != "" {
+		t.Fatalf("default mihomoDelayProbeURL = %q, want empty (disabled)", base.Provider.Web.MihomoDelayProbeURL)
+	}
+
+	value := toDomainConfig(base)
+	value.ProviderWeb.MihomoDelayProbeURL = "http://127.0.0.1:9093/delay"
+	applied := applyDomainConfig(base, value)
+	if applied.Provider.Web.MihomoDelayProbeURL != "http://127.0.0.1:9093/delay" {
+		t.Fatalf("applied mihomoDelayProbeURL = %q", applied.Provider.Web.MihomoDelayProbeURL)
+	}
+
+	editable := toEditable(applied)
+	if editable.ProviderWeb.MihomoDelayProbeURL != "http://127.0.0.1:9093/delay" {
+		t.Fatalf("editable mihomoDelayProbeURL = %q", editable.ProviderWeb.MihomoDelayProbeURL)
+	}
+
+	merged, err := mergeEditable(applied, editable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Provider.Web.MihomoDelayProbeURL != "http://127.0.0.1:9093/delay" {
+		t.Fatalf("merged mihomoDelayProbeURL = %q", merged.Provider.Web.MihomoDelayProbeURL)
+	}
+}
+
 func TestLoadPersistedBackfillsMissingConsoleSection(t *testing.T) {
 	cfg := testConfig(t)
 	value := toDomainConfig(cfg)

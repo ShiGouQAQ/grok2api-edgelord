@@ -189,6 +189,29 @@ bootstrapAdmin:
 	}
 }
 
+// TestLoadMihomoDelayProbeURLFromYAML 验证 mihomoDelayProbeURL 可从 YAML 加载，
+// 未配置时回落为空字符串（禁用主动延迟探测）。
+func TestLoadMihomoDelayProbeURLFromYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(`secrets:
+  jwtSecret: "12345678901234567890123456789012"
+  credentialEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+provider:
+  web:
+    mihomoDelayProbeURL: "http://127.0.0.1:9093/delay"
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider.Web.MihomoDelayProbeURL != "http://127.0.0.1:9093/delay" {
+		t.Fatalf("mihomoDelayProbeURL = %q", cfg.Provider.Web.MihomoDelayProbeURL)
+	}
+}
+
 func TestLoadQualityGuardFromYAML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := []byte(`secrets:
