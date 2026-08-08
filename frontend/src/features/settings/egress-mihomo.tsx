@@ -52,7 +52,7 @@ export function MihomoStatusPanel() {
                 <StatusValue label={t("settings.egress.mihomoCurrentNode")}>
                   <Badge variant="secondary" className="text-[10px]">{query.data.currentNode || "—"}</Badge>
                 </StatusValue>
-                <StatusValue label={t("settings.egress.mihomoVersion")}>
+                <StatusValue label={t("settings.egress.mihomoSwitchCount")}>
                   <span className="text-xs tabular-nums text-foreground">{query.data.switchCount}</span>
                 </StatusValue>
                 <StatusValue label={t("settings.egress.mihomoReachable")}>
