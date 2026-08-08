@@ -582,7 +582,8 @@ func TestExitIPSameIPRetriesToNextNode(t *testing.T) {
 }
 
 func TestExitIPSameIPAllRetriesFailed(t *testing.T) {
-	// 出口 IP 永不变化：首次尝试 + 重试全部同 IP → Failed，版本号不增加。
+	// 出口 IP 永不变化：首次尝试 + 重试全部同 IP → Failed。节点级验证通过的
+	// 切换已发生（出口选择确实变更），代际号在重试耗尽路径上也已提交。
 	group, groupMu := mihomoTestGroup()
 	var switches []string
 	var switchMu sync.Mutex
@@ -604,13 +605,14 @@ func TestExitIPSameIPAllRetriesFailed(t *testing.T) {
 	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchFailed {
 		t.Fatalf("result: got %v, want Failed", result)
 	}
-	if client.SwitchCount() != 0 {
-		t.Fatalf("switchCount: got %d, want 0", client.SwitchCount())
+	// G7 新语义：首次 verifySwitch 通过即提交切换（switchCount +1、epoch +1），
+	// 重试耗尽返回 Failed 不影响已提交的计数；额外的 epoch +1 来自第二次
+	// SelectOptimal 观察到 now 变化（slow→fast）。
+	if client.SwitchCount() != 1 {
+		t.Fatalf("switchCount: got %d, want 1 (switch committed at node-level verification)", client.SwitchCount())
 	}
-	// 失败的切换自身不增加版本号；唯一的 +1 来自第二次 SelectOptimal 观察到
-	// now 变化（slow→fast，既有语义），切换完成路径的 +1 不应当发生。
-	if client.Epoch() != epoch+1 {
-		t.Fatalf("epoch: got %d, want %d (only the now-change bump)", client.Epoch(), epoch+1)
+	if client.Epoch() != epoch+2 {
+		t.Fatalf("epoch: got %d, want %d (commit + now-change bump)", client.Epoch(), epoch+2)
 	}
 	switchMu.Lock()
 	defer switchMu.Unlock()

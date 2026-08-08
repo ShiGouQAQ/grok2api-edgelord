@@ -89,6 +89,16 @@ type FailureProber func(context.Context, uint64) (domain.ProbeResult, error)
 // QualityVerifier 模型质量探测；失败返回 error。镜像 SetFailureProber 模式。
 type QualityVerifier func(context.Context, uint64) error
 
+// ExitCoordinator 出口变更协调契约：切换/轮换耗散后统一执行池失效
+// 与 clearance 重绑定，Mihomo 组级路径与 Resin 账号级路径共用。
+// 目前唯一实现是 Manager 自身；保留窄接口以镜像 QualityProber/
+// NodeProber/FailureProber 既有模式。
+type ExitCoordinator interface {
+	// OnExitChanged 出口已变更：失效依赖旧出口的 client 池，
+	// 使后续请求建立新隧道。scope 非零时仅失效该作用域。
+	OnExitChanged(scope domain.Scope)
+}
+
 type failureProbeState struct {
 	running       bool
 	lastCompleted time.Time
@@ -696,6 +706,8 @@ func (m *Manager) MihomoRotate(ctx context.Context) (application.MihomoRotation,
 	name, result := mihomo.Rotate(ctx, "quality_guard")
 	switch result {
 	case MihomoSwitchDone:
+		// G2：组出口轮换耗散，共享出口影响全部作用域，失效所有 client 池。
+		m.OnExitChanged("")
 		return application.MihomoRotation{Changed: true, NewNode: name}, nil
 	case MihomoSwitchMerged:
 		return application.MihomoRotation{Changed: true}, nil
@@ -1969,6 +1981,41 @@ func (m *Manager) invalidateAllClientVersionsLocked() {
 	clear(m.clientVersions)
 }
 
+// OnExitChanged 实现 ExitCoordinator 契约：Mihomo 组出口切换/轮换耗散后，
+// 失效依赖旧出口的 client 池——keep-alive 隧道 pin 旧出口直到空闲超时，
+// 不失效则后续请求继续走旧出口，与 Resin 账号级路径的池失效行为一致。
+// scope 为零值时失效全部作用域（Mihomo 组出口为所有 DB 节点共享），非零
+// 时仅失效该作用域（ScopeWebAsset 归一为 ScopeWeb，与 client 缓存键一致）。
+// 版本号统一走全局代际提升：出口切换影响作用域下全部节点，逐节点 bump 无法
+// 覆盖尚无缓存 client 的在途构建，提升全局代际后 acquire 遇到
+// errClientCacheInvalidated 会重试重建新隧道。
+func (m *Manager) OnExitChanged(scope domain.Scope) {
+	m.clientMu.Lock()
+	var stale []requestClient
+	if scope == "" {
+		m.invalidateAllClientVersionsLocked()
+		stale = make([]requestClient, 0, len(m.clients))
+		for key, cached := range m.clients {
+			delete(m.clients, key)
+			stale = append(stale, cached.client)
+		}
+	} else {
+		if scope == domain.ScopeWebAsset {
+			scope = domain.ScopeWeb
+		}
+		m.invalidateAllClientVersionsLocked()
+		for key, cached := range m.clients {
+			if key.scope != scope {
+				continue
+			}
+			delete(m.clients, key)
+			stale = append(stale, cached.client)
+		}
+	}
+	m.clientMu.Unlock()
+	closeRequestClients(stale)
+}
+
 // Feedback reports transport/status feedback for a Web-scope node. A 403 sent
 // through this path is unclassified (JS challenge, account-level block, quota
 // rejection, or any other hard block) and therefore never rotates the shared
@@ -2080,6 +2127,10 @@ func (m *Manager) feedbackForScope(ctx context.Context, scope domain.Scope, node
 				switch mihomo.SwitchAndBlacklistCurrent(ctx, "request_403") {
 				case MihomoSwitchDone:
 					m.verifyNodeAfterSwitch(ctx, value)
+					// G2：出口已切换，失效依赖旧出口的 client 池——keep-alive 隧道
+					// 会 pin 旧出口直到空闲超时，池不失效则后续请求继续走旧出口；
+					// 与 Resin 账号级路径（InvalidateClearance 关闭租约池）一致。
+					m.OnExitChanged(value.Scope)
 				case MihomoSwitchFailed:
 					m.applyForbiddenCooldown(ctx, value, scope)
 				case MihomoSwitchMerged:
@@ -2129,6 +2180,23 @@ func (m *Manager) feedbackForScope(ctx context.Context, scope domain.Scope, node
 // applyForbiddenCooldown marks a node as anti-bot rejected and persists the
 // health change. Proxy-pool nodes and Mihomo-managed exits do not reach it.
 func (m *Manager) applyForbiddenCooldown(ctx context.Context, value domain.Node, scope domain.Scope) {
+	// 乐观版本校验：异步分支（403 goroutine / clearance_solve_failed）持有的是
+	// 触发时刻的节点快照，落库前可能已过 30s。落库前重读最新状态做 CAS：
+	// 若节点健康态已变化（成功请求恢复健康，或另一失败已落库），说明快照已
+	// 陈旧，放弃覆盖——任何更新的写入都应胜过旧快照，避免回滚已恢复的健康值
+	// 或叠加双重惩罚。状态未变化（首次 403 冷却、切换失败回退）时照常落库。
+	// 只比较 UpdateEgressNodeHealth 的四个健康字段中的三个（排除 LastError：
+	// recordClearanceError 会独立写 LastError，不应阻止冷却落库）。
+	if latest, err := m.repository.GetEgressNode(ctx, value.ID); err == nil {
+		unchanged := latest.Health == value.Health && latest.FailureCount == value.FailureCount &&
+			(latest.CooldownUntil == nil) == (value.CooldownUntil == nil)
+		if !unchanged {
+			m.log().Warn("egress_cooldown_skip_stale_write",
+				"node_id", value.ID, "node", value.Name, "scope", scope,
+				"snapshot_health", value.Health, "latest_health", latest.Health)
+			return
+		}
+	}
 	value.FailureCount++
 	value.Health = max(0.05, value.Health*0.7)
 	value.CooldownUntil = nil
@@ -2315,11 +2383,13 @@ func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, k
 				// 节点持续在失效出口上重试。切换成功则依赖新出口重新解 CF；
 				// 合并（Merged）说明在途切换负责出口轮换，同样不加冷却。
 				go func() {
-					switch mihomo.SwitchAndBlacklistCurrent(context.Background(), "clearance_solve_failed") {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					switch mihomo.SwitchAndBlacklistCurrent(ctx, "clearance_solve_failed") {
 					case MihomoSwitchDone, MihomoSwitchMerged:
 						// 切换成功或已在途：新出口负责后续重新解 CF，静默。
 					case MihomoSwitchFailed:
-						m.applyForbiddenCooldown(context.Background(), node, node.Scope)
+						m.applyForbiddenCooldown(ctx, node, node.Scope)
 					}
 				}()
 			}

@@ -16,6 +16,12 @@ func (l *Lease) do(request *http.Request) (*http.Response, error) {
 		return nil, errors.New("出口客户端未初始化")
 	}
 	if !l.proxyPool {
+		// 非代理池出口（含指向本地 Mihomo 端口的固定节点）不做连接重试：目标是
+		// 本地进程，连接失败意味着进程不可达，重试同一出口必然再次失败；Mihomo
+		// 组级切换由 Manager 三态（Failed→applyForbiddenCooldown）负责，与 Resin
+		// 的 X-Resin-Error 标记属于不同层级。此差异是有意设计。若节点显式配置
+		// ProxyPool=true，会自动进入下方通用连接阶段重试（≤2 次、同一出口、err
+		// 标记型，见 safeProxyConnectionFailure）。
 		return l.client.Do(request)
 	}
 	current := request

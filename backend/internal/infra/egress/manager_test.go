@@ -2936,6 +2936,49 @@ func TestMihomoSwitchFailureFallsBackToCooldown(t *testing.T) {
 	}
 }
 
+// TestStaleCooldownWriteSkippedWhenNodeRecovered 覆盖异步冷却的陈旧写窗口：
+// goroutine 持有触发时刻的降级快照，落库前节点已被成功请求恢复（健康度回满、
+// 错误清空），applyForbiddenCooldown 必须放弃覆盖，保留已恢复的健康值。
+func TestStaleCooldownWriteSkippedWhenNodeRecovered(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-time.Minute)
+	repository := &synchronizedEgressRepository{node: domain.Node{
+		ID: 1, Name: "node", Scope: domain.ScopeWeb, Enabled: true,
+		Health: 0.7, FailureCount: 1, CooldownUntil: &past, LastError: "transport",
+	}}
+	manager := NewManager(repository, cipher)
+
+	// goroutine 持有的降级快照（触发 403 时读取）。
+	staleSnapshot := repository.snapshot()
+	// 30s 窗口内节点被成功请求：健康度回满、错误清空（成功路径的写形态）。
+	repository.recoverTransportFailure()
+
+	manager.applyForbiddenCooldown(context.Background(), staleSnapshot, domain.ScopeWeb)
+	node := repository.snapshot()
+	if node.Health != 1 || node.LastError != "" || node.FailureCount != 0 {
+		t.Fatalf("stale cooldown write must be skipped after recovery: %#v", node)
+	}
+	if repository.updateCount() != 0 {
+		t.Fatalf("stale cooldown must not persist: updates=%d", repository.updateCount())
+	}
+
+	// 负向对照：节点仍处降级状态（未被恢复）时，冷却照常落库。
+	repository.recoverTransportFailure()
+	repository.mu.Lock()
+	repository.node.Health = 0.7
+	repository.node.FailureCount = 2
+	repository.node.LastError = "transport"
+	repository.mu.Unlock()
+	manager.applyForbiddenCooldown(context.Background(), repository.snapshot(), domain.ScopeWeb)
+	node = repository.snapshot()
+	if node.LastError != "anti-bot rejection" || node.FailureCount != 3 {
+		t.Fatalf("cooldown must still apply when node remains degraded: %#v", node)
+	}
+}
+
 func TestAcquireFallbackTriggersMihomoSwitch(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
@@ -3247,6 +3290,107 @@ func TestMihomoNodeBannedNilMihomoCoolsNode(t *testing.T) {
 	node := repository.snapshot()
 	if node.Health >= 1 || node.LastError != "anti-bot rejection" {
 		t.Fatalf("node must be cooled: %#v", node)
+	}
+}
+
+// atomicRequestClient 记录 CloseIdleConnections 次数；供跨 goroutine 的池失效
+// 断言使用（Mihomo 切换在后台 goroutine 完成，普通 int 计数器存在数据竞争）。
+type atomicRequestClient struct {
+	closed atomic.Int64
+}
+
+func (c *atomicRequestClient) Do(*http.Request) (*http.Response, error) { return nil, nil }
+func (c *atomicRequestClient) CloseIdleConnections()                    { c.closed.Add(1) }
+
+func TestMihomoSwitchDoneInvalidatesClientPool(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// G2：Mihomo 组出口切换耗散后，失效依赖旧出口的 client 池（keep-alive
+	// 隧道 pin 旧出口直到空闲超时）。403 按节点作用域失效：Web 池被清空并
+	// 关闭空闲连接，Build 池不受影响。
+	repository := &synchronizedEgressRepository{node: domain.Node{ID: 100, Name: "node100", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
+	manager := NewManager(repository, cipher)
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+	mihomo := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	manager.mihomoMu.Lock()
+	manager.mihomo = mihomo
+	manager.mihomoMu.Unlock()
+
+	webClient := &atomicRequestClient{}
+	buildClient := &atomicRequestClient{}
+	webKey := clientCacheKey{nodeID: 100, scope: domain.ScopeWeb, fingerprint: "web"}
+	buildKey := clientCacheKey{nodeID: 100, scope: domain.ScopeBuild, fingerprint: "build"}
+	manager.clientMu.Lock()
+	manager.clients[webKey] = cachedClient{client: webClient}
+	manager.clients[buildKey] = cachedClient{client: buildClient}
+	manager.clientMu.Unlock()
+
+	manager.FeedbackNodeBanned(context.Background(), 100)
+	waitForTrue(t, 3*time.Second, func() bool {
+		return webClient.closed.Load() == 1
+	}, "web-scope client pool closed after mihomo switch")
+	manager.clientMu.RLock()
+	_, webPresent := manager.clients[webKey]
+	_, buildPresent := manager.clients[buildKey]
+	manager.clientMu.RUnlock()
+	if webPresent {
+		t.Fatal("web-scope client must be evicted after group exit switch")
+	}
+	if !buildPresent || buildClient.closed.Load() != 0 {
+		t.Fatalf("build-scope client must survive a web-scope exit switch: kept=%v closed=%d", buildPresent, buildClient.closed.Load())
+	}
+	if repository.updateCount() != 0 {
+		t.Fatalf("403 with mihomo enabled must not cool the Go node: updates=%d", repository.updateCount())
+	}
+}
+
+func TestMihomoRotateInvalidatesClientPool(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// G2：质量守护 rotate_node 轮换耗散后，组出口变更影响全部作用域，
+	// 所有 client 池一并失效。
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+	mihomo := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	manager.mihomoMu.Lock()
+	manager.mihomo = mihomo
+	manager.mihomoMu.Unlock()
+
+	keys := []clientCacheKey{
+		{nodeID: 1, scope: domain.ScopeBuild, fingerprint: "build"},
+		{nodeID: 2, scope: domain.ScopeWeb, fingerprint: "web"},
+		{nodeID: 3, scope: domain.ScopeConsole, fingerprint: "console"},
+	}
+	for _, key := range keys {
+		manager.clientMu.Lock()
+		manager.clients[key] = cachedClient{client: &atomicRequestClient{}}
+		manager.clientMu.Unlock()
+	}
+
+	rotation, err := manager.MihomoRotate(context.Background())
+	if err != nil {
+		t.Fatalf("MihomoRotate: %v", err)
+	}
+	if !rotation.Changed || rotation.NewNode != "fast" {
+		t.Fatalf("rotation: %+v, want Changed with new node fast", rotation)
+	}
+	manager.clientMu.RLock()
+	remaining := len(manager.clients)
+	manager.clientMu.RUnlock()
+	if remaining != 0 {
+		t.Fatalf("all client pools must be invalidated after group rotation, %d remain", remaining)
 	}
 }
 

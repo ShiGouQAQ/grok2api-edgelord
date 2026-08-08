@@ -134,7 +134,6 @@ type MihomoClient struct {
 	lastNodeSet map[string]struct{}
 	lastNow     string // 上次观察到的默认连接节点（订阅更新可能直接改写 now）
 	switching   bool
-	errCount    uint64
 	// switchCount 是成功切换的次数（统计用途，状态 API 展示）。
 	switchCount atomic.Uint64
 	// epoch 是出口代际版本号：任何可能改变出口选择状态的事件（成功切换、
@@ -203,7 +202,6 @@ func (c *MihomoClient) UpdateConfig(cfg MihomoConfig) {
 		clear(c.blacklist)
 		c.lastNodeSet = nil
 		c.lastNow = ""
-		c.errCount = 0
 		c.epoch.Add(1)
 	}
 }
@@ -476,22 +474,18 @@ func (c *MihomoClient) SwitchTestGroup(ctx context.Context, name, reason string)
 	}()
 
 	if _, ok := c.configSnapshot(); !ok {
-		c.recordError()
 		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "config", "error", "Mihomo 未启用或未配置")
 		return "", MihomoSwitchFailed
 	}
 	if strings.TrimSpace(name) == "" {
-		c.recordError()
 		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "target", "error", "切换目标节点为空")
 		return "", MihomoSwitchFailed
 	}
 	if err := c.SwitchNode(ctx, name); err != nil {
-		c.recordError()
 		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "switch", "target", name, "error", err)
 		return "", MihomoSwitchFailed
 	}
 	if err := c.verifySwitch(ctx, name); err != nil {
-		c.recordError()
 		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "verify", "target", name, "error", err)
 		return "", MihomoSwitchFailed
 	}
@@ -504,7 +498,9 @@ func (c *MihomoClient) SwitchTestGroup(ctx context.Context, name, reason string)
 // doSwitch 是切换的唯一状态机入口：单飞 → 取当前节点 → 选最优 → （可选）
 // 封禁当前 → 切换 → 节点级验证（第一道闸）→ 出口 IP 校验（可选第二道闸：
 // 同 IP 封禁目标节点并重选重试，耗尽返回 Failed；探测失败降级为节点级验证
-// 通过）。
+// 通过）。节点级验证通过后立即提交代际号（缩短"出口已变但 epoch 未提交"
+// 窗口），同 IP 重试循环中只提交一次；重试耗尽返回 Failed 时代际号已提交
+// （出口选择确实变更），与"Failed 不 bump"的旧语义不同。
 func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCurrent bool) (string, MihomoSwitchResult) {
 	c.mu.Lock()
 	if c.switching {
@@ -522,13 +518,11 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 
 	cfg, ok := c.configSnapshot()
 	if !ok {
-		c.recordError()
 		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "config", "error", "Mihomo 未启用或未配置")
 		return "", MihomoSwitchFailed
 	}
 	current, err := c.GetCurrentNode(ctx)
 	if err != nil {
-		c.recordError()
 		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "get_current", "error", err)
 		return "", MihomoSwitchFailed
 	}
@@ -546,10 +540,10 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 	}
 
 	var node string
+	epochCommitted := false
 	for attempt := 1; ; attempt++ {
 		node, err = c.SelectOptimal(ctx, true)
 		if err != nil {
-			c.recordError()
 			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "select", "current", current, "error", err)
 			return "", MihomoSwitchFailed
 		}
@@ -559,21 +553,27 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 			c.mu.Unlock()
 		}
 		if err := c.SwitchNode(ctx, node); err != nil {
-			c.recordError()
 			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "switch", "current", current, "target", node, "error", err)
 			return "", MihomoSwitchFailed
 		}
 		if err := c.verifySwitch(ctx, node); err != nil {
-			c.recordError()
 			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "verify", "current", current, "target", node, "error", err)
 			return "", MihomoSwitchFailed
+		}
+		if !epochCommitted {
+			// G7：SwitchNode PUT 已生效且节点级验证通过，出口选择即已变更，
+			// 立即提交代际号，缩短"出口已变但 epoch 未提交"窗口——窗口内
+			// ensureClearance 仍用旧 epoch 计算指纹，提交后被判定不新鲜而
+			// 浪费一次求解。同 IP 重试循环中仅提交一次。
+			c.switchCount.Add(1)
+			c.epoch.Add(1)
+			epochCommitted = true
 		}
 		if !verifyIP {
 			break
 		}
 		newIP, sawValid := c.waitExitIPChange(ctx, cfg, oldIP)
 		if ctx.Err() != nil {
-			c.recordError()
 			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "exit_ip", "current", current, "target", node, "error", ctx.Err())
 			return "", MihomoSwitchFailed
 		}
@@ -583,7 +583,6 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 		}
 		// 出口 IP 未变化：封禁目标节点并重选重试。
 		if attempt > cfg.MaxAttempts {
-			c.recordError()
 			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "exit_ip", "current", current, "target", node, "old_ip", oldIP, "error", "exit IP did not change after retries")
 			return "", MihomoSwitchFailed
 		}
@@ -592,8 +591,6 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 		c.mu.Unlock()
 		c.log().Warn("mihomo_switch_same_ip_retry", "reason", reason, "attempt", attempt, "target", node, "old_ip", oldIP)
 	}
-	c.switchCount.Add(1)
-	c.epoch.Add(1)
 	c.log().Info("mihomo_switch", "reason", reason, "from", current, "to", node, "switch_count", c.switchCount.Load(), "epoch", c.epoch.Load())
 	return node, MihomoSwitchDone
 }
@@ -838,13 +835,6 @@ func (c *MihomoClient) updateBlacklistOnNodeChangeLocked(all []string, now strin
 	if now != "" {
 		c.lastNow = now
 	}
-}
-
-// recordError 累加切换失败计数（诊断用途）。
-func (c *MihomoClient) recordError() {
-	c.mu.Lock()
-	c.errCount++
-	c.mu.Unlock()
 }
 
 // mihomoAvailable 过滤出未被黑名单覆盖的节点；excludeCurrent 时从候选中
