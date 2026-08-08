@@ -89,15 +89,11 @@ type FailureProber func(context.Context, uint64) (domain.ProbeResult, error)
 // QualityVerifier 模型质量探测；失败返回 error。镜像 SetFailureProber 模式。
 type QualityVerifier func(context.Context, uint64) error
 
-// ExitCoordinator 出口变更协调契约：切换/轮换耗散后统一执行池失效
-// 与 clearance 重绑定，Mihomo 组级路径与 Resin 账号级路径共用。
-// 目前唯一实现是 Manager 自身；保留窄接口以镜像 QualityProber/
-// NodeProber/FailureProber 既有模式。
-type ExitCoordinator interface {
-	// OnExitChanged 出口已变更：失效依赖旧出口的 client 池，
-	// 使后续请求建立新隧道。scope 非零时仅失效该作用域。
-	OnExitChanged(scope domain.Scope)
-}
+// ExitChangeCoordinator 出口变更协调回调：切换/轮换耗散后统一执行池失效
+// 与 clearance 重绑定，Mihomo 组级路径与 Resin 账号级路径共用。镜像
+// FailureProber/QualityVerifier 的函数类型注入模式；nil 时调用点降级为
+// 直接调用 Manager.OnExitChanged（现状语义不变）。
+type ExitChangeCoordinator func(scope domain.Scope)
 
 type failureProbeState struct {
 	running       bool
@@ -179,6 +175,8 @@ type Manager struct {
 	qualityVerifierMu      sync.Mutex
 	qualityVerifier        QualityVerifier
 	qualityVerifyFailures  atomic.Uint64
+	exitCoordinatorMu      sync.Mutex
+	exitCoordinator        ExitChangeCoordinator
 	lastClientCleanup      time.Time
 	clearanceLoads         singleflight.Group
 	mihomoMu               sync.RWMutex
@@ -339,6 +337,27 @@ func (m *Manager) SetQualityVerifier(value QualityVerifier) {
 	m.qualityVerifierMu.Unlock()
 }
 
+// SetExitChangeCoordinator 注入出口变更协调回调（镜像 SetFailureProber/
+// SetQualityVerifier 模式）；nil 清除，调用点回退为直接调用 OnExitChanged。
+func (m *Manager) SetExitChangeCoordinator(value ExitChangeCoordinator) {
+	m.exitCoordinatorMu.Lock()
+	m.exitCoordinator = value
+	m.exitCoordinatorMu.Unlock()
+}
+
+// notifyExitChanged 经注入的 ExitChangeCoordinator 广播出口变更；未注入
+// （nil）时返回 false，调用方回退为直接调用 OnExitChanged（语义不变）。
+func (m *Manager) notifyExitChanged(scope domain.Scope) bool {
+	m.exitCoordinatorMu.Lock()
+	coordinator := m.exitCoordinator
+	m.exitCoordinatorMu.Unlock()
+	if coordinator == nil {
+		return false
+	}
+	coordinator(scope)
+	return true
+}
+
 // verifyNodeAfterSwitch 在 Mihomo 切换成功后对节点做一次模型质量验证。
 // 验证失败只记录日志并累加诊断计数 qualityVerifyFailures，绝不施加冷却：
 // 403 已表明 Go 节点本身健康，失败更多反映新出口的瞬时状态。
@@ -470,8 +489,10 @@ func (m *Manager) SetClearanceLock(value repository.DistributedLock) {
 }
 
 // SetEpochStore 注入跨实例共享的 Mihomo 出口代际版本号存储（多实例部署为
-// Redis 实现，单实例可传 nil 或本地实现）；UpdateMihomoConfig 时透传给生产
-// 客户端，测试组客户端保持本地行为。
+// Redis 实现，单实例可传 nil 或本地实现）。惰性透传：仅在下一次
+// UpdateMihomoConfig 时透传给 MihomoClient（客户端在重建时继承），已运行的
+// 客户端不受影响。调用方应在 UpdateMihomoConfig 之前调用。测试组客户端
+// 保持本地行为（不注入）。
 func (m *Manager) SetEpochStore(value repository.EgressEpochStore) {
 	m.mihomoMu.Lock()
 	m.epochStore = value
@@ -479,7 +500,9 @@ func (m *Manager) SetEpochStore(value repository.EgressEpochStore) {
 }
 
 // SetSwitchLock 注入出口切换的跨实例互斥锁，与 SetClearanceLock 共用同一
-// refreshLock 实例；nil 时回退本地无锁切换（单实例零回归）。
+// refreshLock 实例；nil 时回退本地无锁切换（单实例零回归）。惰性透传：仅在
+// 下一次 UpdateMihomoConfig 时透传给 MihomoClient（客户端在重建时继承），
+// 已运行的客户端不受影响。调用方应在 UpdateMihomoConfig 之前调用。
 func (m *Manager) SetSwitchLock(value repository.DistributedLock) {
 	m.mihomoMu.Lock()
 	m.switchLock = value
@@ -748,7 +771,9 @@ func (m *Manager) MihomoRotate(ctx context.Context) (application.MihomoRotation,
 	switch result {
 	case MihomoSwitchDone:
 		// G2：组出口轮换耗散，共享出口影响全部作用域，失效所有 client 池。
-		m.OnExitChanged("")
+		if !m.notifyExitChanged("") {
+			m.OnExitChanged("")
+		}
 		return application.MihomoRotation{Changed: true, NewNode: name}, nil
 	case MihomoSwitchMerged:
 		return application.MihomoRotation{Changed: true}, nil
@@ -2022,11 +2047,10 @@ func (m *Manager) invalidateAllClientVersionsLocked() {
 	clear(m.clientVersions)
 }
 
-// OnExitChanged 实现 ExitCoordinator 契约：Mihomo 组出口切换/轮换耗散后，
-// 失效依赖旧出口的 client 池——keep-alive 隧道 pin 旧出口直到空闲超时，
-// 不失效则后续请求继续走旧出口，与 Resin 账号级路径的池失效行为一致。
-// scope 为零值时失效全部作用域（Mihomo 组出口为所有 DB 节点共享），非零
-// 时仅失效该作用域（ScopeWebAsset 归一为 ScopeWeb，与 client 缓存键一致）。
+// OnExitChanged 出口变更后失效依赖旧出口的 client 池——keep-alive 隧道 pin 旧
+// 出口直到空闲超时，不失效则后续请求继续走旧出口，与 Resin 账号级路径的池失效
+// 行为一致。scope 为零值时失效全部作用域（Mihomo 组出口为所有 DB 节点共享），
+// 非零时仅失效该作用域（ScopeWebAsset 归一为 ScopeWeb，与 client 缓存键一致）。
 // 版本号统一走全局代际提升：出口切换影响作用域下全部节点，逐节点 bump 无法
 // 覆盖尚无缓存 client 的在途构建，提升全局代际后 acquire 遇到
 // errClientCacheInvalidated 会重试重建新隧道。
@@ -2171,7 +2195,9 @@ func (m *Manager) feedbackForScope(ctx context.Context, scope domain.Scope, node
 					// G2：出口已切换，失效依赖旧出口的 client 池——keep-alive 隧道
 					// 会 pin 旧出口直到空闲超时，池不失效则后续请求继续走旧出口；
 					// 与 Resin 账号级路径（InvalidateClearance 关闭租约池）一致。
-					m.OnExitChanged(value.Scope)
+					if !m.notifyExitChanged(value.Scope) {
+						m.OnExitChanged(value.Scope)
+					}
 				case MihomoSwitchFailed:
 					m.applyForbiddenCooldown(ctx, value, scope)
 				case MihomoSwitchMerged:
@@ -2221,11 +2247,16 @@ func (m *Manager) feedbackForScope(ctx context.Context, scope domain.Scope, node
 // applyForbiddenCooldown marks a node as anti-bot rejected and persists the
 // health change. Proxy-pool nodes and Mihomo-managed exits do not reach it.
 func (m *Manager) applyForbiddenCooldown(ctx context.Context, value domain.Node, scope domain.Scope) {
-	// 乐观版本校验：异步分支（403 goroutine / clearance_solve_failed）持有的是
-	// 触发时刻的节点快照，落库前可能已过 30s。落库前重读最新状态做 CAS：
-	// 若节点健康态已变化（成功请求恢复健康，或另一失败已落库），说明快照已
-	// 陈旧，放弃覆盖——任何更新的写入都应胜过旧快照，避免回滚已恢复的健康值
-	// 或叠加双重惩罚。状态未变化（首次 403 冷却、切换失败回退）时照常落库。
+	// 乐观版本校验（check-then-act）：异步分支（403 goroutine / clearance_
+	// solve_failed）持有的是触发时刻的节点快照，落库前可能已过 30s。落库前重读
+	// 最新状态做 CAS：若节点健康态已变化（成功请求恢复健康，或另一失败已落库），
+	// 说明快照已陈旧，放弃覆盖——任何更新的写入都应胜过旧快照，避免回滚已恢复的
+	// 健康值或叠加双重惩罚。状态未变化（首次 403 冷却、切换失败回退）时照常落库。
+	// 能力边界：本 CAS 只防"中间有变更"的陈旧写，不防两个并发分支基于同一快照
+	// 的双重惩罚（读-改-写窗口内两分支都读到 unchanged，各落一次惩罚）。如需严格
+	// 串行化需 DB 原子条件更新（UPDATE ... WHERE health=? AND failure_count=?），
+	// 当前不采用以避免过度（双重惩罚只是更深的冷却，无数据损坏，且单飞合并与
+	// 30s 超时窗口已大幅压缩该竞态）。
 	// 只比较 UpdateEgressNodeHealth 的四个健康字段中的三个（排除 LastError：
 	// recordClearanceError 会独立写 LastError，不应阻止冷却落库）。
 	if latest, err := m.repository.GetEgressNode(ctx, value.ID); err == nil {
@@ -2401,6 +2432,13 @@ func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, k
 			return clearanceSolution{}, errors.New("另一个实例正在刷新 Cloudflare Clearance")
 		}
 		defer release()
+		// 已持有分布式锁（本实例是求解者）：追平共享 epoch 后重算指纹。若其他
+		// 实例刚切换过出口（共享 epoch 已 bump），本实例的指纹随之变化，绑定旧
+		// 出口的持久化 clearance 判定为不新鲜而重新求解；本实例自身切换时
+		// 本地 epoch 已是最新，重算为等价操作（幂等）。
+		m.refreshMihomoEpochFromStore(ctx)
+		bindingFingerprint = m.clearanceBindingFingerprint(cfg, proxyURL)
+		fingerprint = m.clearanceFingerprint(cfg, proxyURL)
 		if !force {
 			if solution, refreshedAt, ok := m.loadPersistedClearance(ctx, node.ID, fingerprint, bindingFingerprint, interval); ok {
 				m.cacheClearance(key, solution, refreshedAt, solveVersion, fingerprint, bindingFingerprint, interval)
@@ -2599,6 +2637,21 @@ func (m *Manager) mihomoEpoch() uint64 {
 		return 0
 	}
 	return m.mihomo.Epoch()
+}
+
+// refreshMihomoEpochFromStore best-effort 追平共享 epoch：多实例部署下出口切换
+// 可能由其他实例完成（共享 epoch 已 bump 而本地镜像未跟上），求解 clearance 前
+// 先同步本地镜像，使指纹反映最新出口代际，旧 clearance 自动失效。共享存储读取
+// 失败仅降级为本地镜像（错误由客户端内部处理），绝不阻塞求解路径。测试组
+// 客户端不参与（测试组 epoch 本地化是有意设计）。
+func (m *Manager) refreshMihomoEpochFromStore(ctx context.Context) {
+	m.mihomoMu.RLock()
+	mihomo := m.mihomo
+	m.mihomoMu.RUnlock()
+	if mihomo == nil {
+		return
+	}
+	mihomo.RefreshEpochFromStore(ctx)
 }
 
 func (m *Manager) recordClearanceError(ctx context.Context, node domain.Node, persist bool) {

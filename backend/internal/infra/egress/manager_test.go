@@ -2934,6 +2934,51 @@ func TestMihomoEpochStoreAndSwitchLockInjection(t *testing.T) {
 	}
 }
 
+// TestClearanceBindingFingerprintTracksSharedEpoch 验证 FIX-1 读方接线：多实例
+// 部署下出口切换可能由其他实例完成（共享 epoch 已 bump 而本地镜像未跟上），
+// Manager 求解 clearance 前先追平共享 epoch，使绑定指纹反映最新出口代际，
+// 旧 clearance 自动失效（指纹变化）。依赖 mihomo.go 的
+// RefreshEpochFromStore（Agent 1 实现）；该方法未完成前本测试无法编译。
+func TestClearanceBindingFingerprintTracksSharedEpoch(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &synchronizedEgressRepository{node: domain.Node{ID: 1, Name: "node", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
+	manager := NewManager(repository, cipher)
+	epochStore := &epochStoreStub{}
+	manager.SetEpochStore(epochStore)
+	manager.SetSwitchLock(alwaysAcquiredDistributedLock{})
+	manager.UpdateMihomoConfig(MihomoConfig{Enabled: true, APIURL: "http://mihomo.invalid", GroupName: "XAI-GROUP"})
+	cfg := ClearanceConfig{Mode: "flaresolverr", TargetURL: "https://grok.com", FlareSolverrURL: "http://flaresolverr:8191"}
+	proxyURL := "socks5://127.0.0.1:1"
+
+	// 新客户端创建时 UpdateConfig 触发一次本地 bump（epochStore 此时尚未注入，
+	// 共享存储保持 0），本地镜像从 0 起；此后共享 epoch 的递增只来自他实例。
+	localBefore := manager.mihomoEpoch()
+	before := manager.clearanceBindingFingerprint(cfg, proxyURL)
+
+	// 模拟实例 A 切换出口：共享 epoch 递增到超过本地镜像（bump 两次）。
+	for range 2 {
+		if _, err := epochStore.BumpEpoch(context.Background(), "XAI-GROUP"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if shared, _ := epochStore.GetEpoch(context.Background(), "XAI-GROUP"); shared <= localBefore {
+		t.Fatalf("共享 epoch = %d, 必须超过本地镜像 %d", shared, localBefore)
+	}
+
+	// 求解前追平：RefreshEpochFromStore 使本地镜像前向追平共享 epoch。
+	manager.refreshMihomoEpochFromStore(context.Background())
+	if got := manager.mihomoEpoch(); got <= localBefore {
+		t.Fatalf("本地镜像未前向追平共享 epoch: got=%d, want > %d", got, localBefore)
+	}
+	after := manager.clearanceBindingFingerprint(cfg, proxyURL)
+	if after == before {
+		t.Fatal("epoch 追平后 clearance 绑定指纹必须变化，绑定旧出口的 clearance 应判定失效")
+	}
+}
+
 func TestMihomoSwitchSuccessSkipsGoCooldown(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {
