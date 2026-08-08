@@ -887,6 +887,15 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 		if err != nil {
 			return domain.Node{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 		}
+		// TODO(mihomo): Mihomo 组通道节点禁止开启 ProxyPool——开启后 isProxyPoolNode 在
+		// feedbackForScope 403 处理链中提前 return（manager.go isProxyPoolNode 早退），
+		// NODE_BANNED 组切换分支永远到达不了，被封出口永不轮换。
+		// 识别依据：①同步节点 SourceKey 前缀 mihomo:（同步器建行恒 false，此处兜底拒绝）
+		// ②ProxyURL host 为 loopback（127.0.0.1/localhost——本地端口不可能是独立出口池，
+		//   freshTunnel 每请求新 CONNECT 到同一端口零出口多样性）。
+		if proxyPool && proxyURLForbiddenWithPool(normalized, value.SourceKey) {
+			return domain.Node{}, fmt.Errorf("%w: Mihomo 组通道节点禁止启用代理池模式", ErrInvalidInput)
+		}
 		if normalized != "" {
 			value.EncryptedProxyURL, err = s.cipher.Encrypt(normalized)
 			if err != nil {
@@ -896,6 +905,15 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 	}
 	if value.ProxyPool && strings.TrimSpace(value.EncryptedProxyURL) == "" {
 		return domain.Node{}, fmt.Errorf("%w: 代理池模式需要配置代理地址", ErrInvalidInput)
+	}
+	// TODO(mihomo): 编辑既有节点且未改 ProxyURL 时，若旧 URL 已是 Mihomo 本地通道
+	// （127.0.0.1/localhost），同样拒绝开启 ProxyPool。
+	if value.ProxyPool && input.ProxyURL == nil {
+		if decrypted, err := s.cipher.Decrypt(value.EncryptedProxyURL); err == nil {
+			if proxyURLForbiddenWithPool(decrypted, value.SourceKey) {
+				return domain.Node{}, fmt.Errorf("%w: Mihomo 组通道节点禁止启用代理池模式", ErrInvalidInput)
+			}
+		}
 	}
 	if input.Scope == domain.ScopeBuild || input.Scope == domain.ScopeConsoleAsset {
 		value.EncryptedCloudflareCookie = ""
@@ -969,6 +987,35 @@ func (s *Service) accountBoundProxy(value domain.Node) bool {
 	}
 	proxyURL, err := s.cipher.Decrypt(value.EncryptedProxyURL)
 	return err == nil && strings.Contains(proxyURL, ProxyAccountPlaceholder)
+}
+
+// proxyURLForbiddenWithPool 判定 ProxyPool=true 是否与节点出口机制冲突：
+// Mihomo 组通道节点（同步节点 SourceKey 前缀 mihomo:，或明文 ProxyURL host 为
+// loopback）开启代理池会让 isProxyPoolNode 在 403 处理链提前 return，
+// NODE_BANNED 组切换永不触发。见 TODO(mihomo) 于 applyInput。
+func proxyURLForbiddenWithPool(plainProxyURL, sourceKey string) bool {
+	if strings.HasPrefix(sourceKey, "mihomo:") {
+		return true
+	}
+	return isLoopbackProxyURL(plainProxyURL)
+}
+
+// isLoopbackProxyURL 判定明文代理 URL 的 host 是否为本地回环（127.0.0.1、
+// localhost、::1）——本地端口不可能是独立出口池，配 ProxyPool 无意义且有害。
+func isLoopbackProxyURL(plainProxyURL string) bool {
+	if strings.TrimSpace(plainProxyURL) == "" {
+		return false
+	}
+	parsed, err := url.Parse(plainProxyURL)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func NormalizeProxyURL(value string) (string, error) {

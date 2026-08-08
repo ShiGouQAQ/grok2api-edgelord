@@ -212,3 +212,59 @@ func TestProxyPoolRequiresConfiguredProxy(t *testing.T) {
 		t.Fatalf("proxy pool without a proxy error = %v", err)
 	}
 }
+
+func TestProxyPoolRejectedForMihomoLoopbackChannel(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(nil, cipher, "browser-agent")
+	proxyPool := true
+	loopbackURL := "socks5://127.0.0.1:7891"
+	_, err = service.applyInput(domain.Node{}, Input{
+		Name: "mihomo-test", Scope: domain.ScopeBuild, Enabled: false,
+		ProxyPool: &proxyPool, ProxyURL: &loopbackURL,
+	}, true)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("loopback channel with proxy pool error = %v", err)
+	}
+}
+
+func TestProxyPoolRejectedForMihomoSyncedNode(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(nil, cipher, "browser-agent")
+	proxyPool := true
+	remoteURL := "socks5://203.0.113.10:1080"
+	_, err = service.applyInput(domain.Node{
+		SourceKey: "mihomo:XAI-TEST-GROUP",
+	}, Input{
+		Name: "member-01", Scope: domain.ScopeBuild, Enabled: false,
+		ProxyPool: &proxyPool, ProxyURL: &remoteURL,
+	}, true)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("mihomo synced node with proxy pool error = %v", err)
+	}
+}
+
+func TestProxyPoolAllowedForRemoteChannel(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(nil, cipher, "browser-agent")
+	proxyPool := true
+	remoteURL := "socks5://203.0.113.20:1080"
+	node, err := service.applyInput(domain.Node{}, Input{
+		Name: "remote-pool", Scope: domain.ScopeBuild, Enabled: true,
+		ProxyPool: &proxyPool, ProxyURL: &remoteURL,
+	}, true)
+	if err != nil {
+		t.Fatalf("remote proxy pool should be allowed: %v", err)
+	}
+	if !node.ProxyPool {
+		t.Fatal("proxy pool flag not preserved")
+	}
+}
