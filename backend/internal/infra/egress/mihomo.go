@@ -31,12 +31,15 @@ import (
 	"time"
 
 	"github.com/chenyme/grok2api/backend/internal/repository"
+	"golang.org/x/sync/singleflight"
 )
 
 const maxMihomoResponseBytes = 4 << 20
 
 // mihomoSwitchLockKeyPrefix 是跨实例切换互斥锁的键前缀；键名统一为
-// 前缀 + 组键名（epochStoreKey，默认配置组名），与共享 epoch 存储同键域。
+// 前缀 + 组键名（默认配置组名）。切换锁键与共享 epoch 存储键共享组键后缀，
+// 但分属不同命名空间（锁：egress-mihomo-switch:{group}，epoch：
+// egress-epoch:{group}），互不冲突。
 const mihomoSwitchLockKeyPrefix = "egress-mihomo-switch:"
 
 // mihomoEpochStoreBumpTimeout 是共享 epoch 存储单次 bump 的截止时长。
@@ -169,14 +172,15 @@ type MihomoClient struct {
 	// 时机与 epoch 语义一致：bumpEpochLocked（切换/节点集变化/黑名单变动/
 	// 配置变化）即清空；TTL 兜底防止长时间无事件时展示过期延迟。
 	delayCache map[string]mihomoDelayCache
+	// delayProbes 合并同一组缓存的并发主动探测（DelaySnapshot miss 后按
+	// groupName 单飞），避免状态 API 每 2s 轮询/多标签页/多实例同时打爆
+	// 探测端点。
+	delayProbes singleflight.Group
 	// epochStore 与 switchLock 是可选注入的跨实例协调组件（多实例部署由
 	// Manager 注入 Redis 共享实现）；均为 nil 时保持进程本地行为，单实例
 	// 部署零回归。
 	epochStore repository.EgressEpochStore
-	// epochStoreKey 是共享 epoch 存储与切换锁的组键名；为空时默认取当前
-	// 配置的 GroupName（配置热更新自动跟随）。
-	epochStoreKey string
-	switchLock    repository.DistributedLock
+	switchLock repository.DistributedLock
 }
 
 // NewMihomoClient 创建并配置一个 Mihomo 客户端。
@@ -273,30 +277,61 @@ func (c *MihomoClient) Epoch() uint64 {
 	return c.epoch.Load()
 }
 
-// bumpEpochLocked 递增出口代际版本号：本地 epoch +1，并 best-effort 同步到
-// 跨实例共享存储（注入了 epochStore 时）。共享存储失败只降级为本地计数
-// （记 Warn，绝不失败）：代际号语义允许短暂不一致，下一次成功 bump 会追平。
+// bumpEpochLocked 递增出口代际版本号并清空延迟探测缓存（两者同生命周期：
+// 任何出口选择状态变化都使旧探测结果失效）。注入了 epochStore 时以共享
+// 存储为权威：BumpEpoch 成功用返回值覆盖本地 atomic（成功后本地=共享值，
+// 保证跨实例单调一致）；失败时保留本地 +1 降级（记 Warn，绝不失败）——
+// 代际号语义允许短暂不一致，下一次成功 bump 或 RefreshEpochFromStore 追平。
 // 调用方须持有 c.mu（保证各事件的本地代际号与共享存储同序）。
 func (c *MihomoClient) bumpEpochLocked() {
-	c.epoch.Add(1)
-	// 延迟探测缓存与 epoch 同生命周期：任何出口选择状态变化（切换/节点集
-	// 变化/黑名单变动）都清空，避免展示过期探测结果。
 	clear(c.delayCache)
 	if c.epochStore == nil {
+		c.epoch.Add(1)
 		return
 	}
-	groupKey := c.epochStoreKey
-	if groupKey == "" {
-		groupKey = c.config.GroupName
-	}
+	groupKey := c.config.GroupName
 	ctx, cancel := context.WithTimeout(context.Background(), mihomoEpochStoreBumpTimeout)
 	defer cancel()
-	if _, err := c.epochStore.BumpEpoch(ctx, groupKey); err != nil {
+	shared, err := c.epochStore.BumpEpoch(ctx, groupKey)
+	if err != nil {
 		logger := c.logger
 		if logger == nil {
 			logger = slog.Default()
 		}
 		logger.Warn("mihomo_epoch_store_bump_failed", "group", groupKey, "error", err)
+		c.epoch.Add(1)
+		return
+	}
+	c.epoch.Store(shared)
+}
+
+// RefreshEpochFromStore 从共享 epoch 存储拉取当前代际号并追平本地 atomic
+// 镜像（只前向，不倒退）：降级 bump 或他实例 bump 后本地镜像可能落后于
+// 共享值，定期刷新使各实例 clearance 指纹收敛一致。best-effort：未注入
+// epochStore 直接返回；读取失败记 Debug 并返回，下次成功 bump 或刷新追平。
+func (c *MihomoClient) RefreshEpochFromStore(ctx context.Context) {
+	c.mu.Lock()
+	store := c.epochStore
+	groupKey := c.config.GroupName
+	c.mu.Unlock()
+	if store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, mihomoEpochStoreBumpTimeout)
+	defer cancel()
+	shared, err := store.GetEpoch(ctx, groupKey)
+	if err != nil {
+		c.log().Debug("mihomo_epoch_store_refresh_failed", "group", groupKey, "error", err)
+		return
+	}
+	for {
+		local := c.epoch.Load()
+		if shared <= local {
+			return
+		}
+		if c.epoch.CompareAndSwap(local, shared) {
+			return
+		}
 	}
 }
 
@@ -600,10 +635,7 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 		return "", MihomoSwitchMerged
 	}
 	c.switching = true
-	groupKey := c.epochStoreKey
-	if groupKey == "" {
-		groupKey = c.config.GroupName
-	}
+	groupKey := c.config.GroupName
 	distLock := c.switchLock
 	c.mu.Unlock()
 	defer func() {
@@ -619,9 +651,12 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 	}
 
 	if distLock != nil {
-		// 跨实例互斥：ttl 取 VerifyTimeout（默认 15s）加 clearanceLockGrace
-		// 余量，覆盖一次完整切换的时长。
-		ttl := cfg.VerifyTimeout + clearanceLockGrace
+		// 跨实例互斥：ttl 必须覆盖最坏切换窗口 = (MaxAttempts+1) 次尝试 ×
+		// 每次 VerifyTimeout（默认 4×15s=60s+，同 IP 重试路径每轮
+		// waitExitIPChange 都轮询至 VerifyTimeout 截止），再加
+		// clearanceLockGrace 余量；ttl 不足会在切换完成前提前过期，锁被
+		// 第二实例抢走导致并发切换。
+		ttl := time.Duration(max(1, cfg.MaxAttempts)+1)*cfg.VerifyTimeout + clearanceLockGrace
 		release, acquired, err := distLock.Acquire(ctx, mihomoSwitchLockKeyPrefix+groupKey, ttl)
 		if err != nil {
 			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "switch_lock", "group", groupKey, "error", err)
@@ -782,9 +817,12 @@ func (c *MihomoClient) delayProbe(ctx context.Context, groupName string, availab
 
 // DelaySnapshot 返回组内可用成员（available 限定候选集）的延迟快照，供
 // 状态 API 展示：优先复用缓存（TTL mihomoDelayCacheTTL，节流状态轮询），
-// 缓存过期或缺失时调用一次主动探测（需配置 DelayProbeURL）。探测失败或
-// 全部节点不可用时 ok 为 false；失败也会短时缓存，避免每轮轮询重试打爆
-// 探测端点。groupName 为空时使用客户端当前配置组。
+// 缓存过期或缺失时调用一次主动探测（需配置 DelayProbeURL）。并发探测按
+// groupName 单飞合并（delayProbes），同一窗口只发起一次真实探测；探测
+// 发起后 epoch 变化（切换/黑名单变动已清缓存）则丢弃结果不写回缓存，
+// 避免陈旧数据重新填充。探测失败或全部节点不可用时 ok 为 false；失败也
+// 会短时缓存，避免每轮轮询重试打爆探测端点。groupName 为空时使用客户端
+// 当前配置组。
 func (c *MihomoClient) DelaySnapshot(ctx context.Context, groupName string, available []string) (map[string]int, bool) {
 	if len(available) == 0 {
 		return nil, false
@@ -802,10 +840,38 @@ func (c *MihomoClient) DelaySnapshot(ctx context.Context, groupName string, avai
 	if hit && time.Since(entry.at) < mihomoDelayCacheTTL {
 		return entry.delays, entry.ok
 	}
-	fresh, ok := c.delayProbe(ctx, groupName, available)
-	c.mu.Lock()
-	c.delayCache[groupName] = mihomoDelayCache{delays: fresh, ok: ok, at: time.Now()}
-	c.mu.Unlock()
+	if strings.TrimSpace(cfg.DelayProbeURL) == "" {
+		return nil, false
+	}
+	// 缓存 miss：探测段按组单飞，合并并发调用（状态 API 每 2s 轮询、
+	// 多标签页/多实例）的同窗口真实探测；过滤 available 留在单飞之外，
+	// 各调用方按自己的候选集取子集。
+	probeEpoch := c.epoch.Load()
+	raw, err, _ := c.delayProbes.Do(groupName, func() (any, error) {
+		return c.ProbeGroupDelays(ctx, groupName, cfg.DelayProbeURL, mihomoDelayProbeTimeout)
+	})
+	var fresh map[string]int
+	if err != nil {
+		c.log().Warn("mihomo_delay_probe_failed", "group", groupName, "error", err)
+	} else {
+		fresh = make(map[string]int, len(available))
+		for name, delay := range raw.(map[string]int) {
+			if delay <= 0 || !mihomoContains(available, name) {
+				continue
+			}
+			if current, exists := fresh[name]; !exists || delay < current {
+				fresh[name] = delay
+			}
+		}
+	}
+	ok = len(fresh) > 0
+	// 探测期间 epoch 变化：结果对应的出口状态已过期（bumpEpochLocked 已
+	// 清空缓存），丢弃不写缓存，避免陈旧数据重新填充。
+	if c.epoch.Load() == probeEpoch {
+		c.mu.Lock()
+		c.delayCache[groupName] = mihomoDelayCache{delays: fresh, ok: ok, at: time.Now()}
+		c.mu.Unlock()
+	}
 	return fresh, ok
 }
 

@@ -1157,11 +1157,12 @@ func TestUnbanNode(t *testing.T) {
 }
 
 // fakeEpochStore 是 EgressEpochStore 的测试替身：记录按组键的 bump 次数，
-// bumpErr 非 nil 时模拟共享存储故障。
+// bumpErr 非 nil 时模拟共享存储 bump 故障，getErr 非 nil 时模拟读取故障。
 type fakeEpochStore struct {
 	mu        sync.Mutex
 	bumps     map[string]uint64
 	bumpErr   error
+	getErr    error
 	bumpCount int
 }
 
@@ -1183,23 +1184,28 @@ func (f *fakeEpochStore) BumpEpoch(_ context.Context, groupKey string) (uint64, 
 func (f *fakeEpochStore) GetEpoch(_ context.Context, groupKey string) (uint64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.getErr != nil {
+		return 0, f.getErr
+	}
 	return f.bumps[groupKey], nil
 }
 
 // fakeSwitchLock 是 DistributedLock 的测试替身：acquired/err 可配置，
-// 记录获取的键名与是否释放。
+// 记录获取的键名、TTL 与是否释放。
 type fakeSwitchLock struct {
 	mu          sync.Mutex
 	acquired    bool
 	err         error
 	acquireKeys []string
+	lastTTL     time.Duration
 	released    bool
 }
 
-func (f *fakeSwitchLock) Acquire(_ context.Context, key string, _ time.Duration) (func(), bool, error) {
+func (f *fakeSwitchLock) Acquire(_ context.Context, key string, ttl time.Duration) (func(), bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.acquireKeys = append(f.acquireKeys, key)
+	f.lastTTL = ttl
 	if f.err != nil {
 		return nil, false, f.err
 	}
@@ -1367,5 +1373,197 @@ func TestSwitchLockAcquiredReleasesAfterSwitch(t *testing.T) {
 	// 本地单飞已复位：锁再次可用时同一实例可发起下一次切换。
 	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
 		t.Fatalf("second switch: got %v, want Done", result)
+	}
+}
+
+// TestBumpEpochMirrorsSharedStore 验证注入了 epochStore 时本地 atomic 以
+// BumpEpoch 返回值为准（共享权威），而非本地盲目 +1——共享值已领先时本地
+// 直接对齐到共享值，保证跨实例 clearance 指纹单调一致。
+func TestBumpEpochMirrorsSharedStore(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	store := newFakeEpochStore()
+	store.mu.Lock()
+	store.bumps["XAI-GROUP"] = 5 // 共享值已领先（另一实例已 bump 5 次）
+	store.mu.Unlock()
+	client.SetEpochStore(store)
+	epoch := client.Epoch()
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("switch: got %v, want Done", result)
+	}
+	store.mu.Lock()
+	shared := store.bumps["XAI-GROUP"]
+	store.mu.Unlock()
+	if shared != 6 {
+		t.Fatalf("shared store must have bumped once: got %d, want 6", shared)
+	}
+	if client.Epoch() != shared {
+		t.Fatalf("local epoch must mirror shared value: got %d, want %d", client.Epoch(), shared)
+	}
+	if client.Epoch() == epoch+1 {
+		t.Fatalf("local must take shared value, not blindly +1: got %d (was %d)", client.Epoch(), epoch)
+	}
+}
+
+// TestRefreshEpochFromStoreCatchesUpLocal 验证共享值领先时
+// RefreshEpochFromStore 把本地 atomic 追平到共享值（另一实例 bump 后本
+// 实例收敛）。
+func TestRefreshEpochFromStoreCatchesUpLocal(t *testing.T) {
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: "http://127.0.0.1:1", GroupName: "XAI-GROUP"})
+	store := newFakeEpochStore()
+	client.SetEpochStore(store)
+	store.mu.Lock()
+	store.bumps["XAI-GROUP"] = 7 // 模拟另一实例已 bump 7 次
+	store.mu.Unlock()
+	client.RefreshEpochFromStore(context.Background())
+	if client.Epoch() != 7 {
+		t.Fatalf("local epoch must catch up to shared: got %d, want 7", client.Epoch())
+	}
+}
+
+// TestRefreshEpochFromStoreDoesNotRegress 验证本地领先（降级 bump 累积）
+// 时刷新不得把本地倒退到共享值。
+func TestRefreshEpochFromStoreDoesNotRegress(t *testing.T) {
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: "http://127.0.0.1:1", GroupName: "XAI-GROUP"})
+	store := newFakeEpochStore()
+	client.SetEpochStore(store)
+	client.epoch.Store(9)
+	store.mu.Lock()
+	store.bumps["XAI-GROUP"] = 4
+	store.mu.Unlock()
+	client.RefreshEpochFromStore(context.Background())
+	if client.Epoch() != 9 {
+		t.Fatalf("refresh must not regress local epoch: got %d, want 9", client.Epoch())
+	}
+}
+
+// TestRefreshEpochFromStoreNilAndErrorGraceful 验证刷新是 best-effort：
+// 未注入 store 直接返回；读取失败记 Debug 返回，本地保持不动。
+func TestRefreshEpochFromStoreNilAndErrorGraceful(t *testing.T) {
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: "http://127.0.0.1:1", GroupName: "XAI-GROUP"})
+	client.RefreshEpochFromStore(context.Background()) // nil store：no-op
+
+	store := newFakeEpochStore()
+	store.getErr = errors.New("redis down")
+	client.SetEpochStore(store)
+	client.epoch.Store(3)
+	client.RefreshEpochFromStore(context.Background())
+	if client.Epoch() != 3 {
+		t.Fatalf("refresh error must leave local epoch unchanged: got %d, want 3", client.Epoch())
+	}
+}
+
+// TestSwitchLockTTLCoversFullRetryWindow 验证锁 TTL = (MaxAttempts+1)×
+// VerifyTimeout + clearanceLockGrace，覆盖最坏同 IP 重试窗口；ttl 不足会
+// 在切换完成前提前过期，第二实例可并发进入切换。
+func TestSwitchLockTTLCoversFullRetryWindow(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP", MaxAttempts: 2, VerifyTimeout: 10 * time.Second})
+	lock := &fakeSwitchLock{acquired: true}
+	client.SetSwitchLock(lock)
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("switch: got %v, want Done", result)
+	}
+	want := time.Duration(3)*10*time.Second + clearanceLockGrace
+	if lock.lastTTL != want {
+		t.Fatalf("lock TTL: got %v, want %v", lock.lastTTL, want)
+	}
+}
+
+// TestDelaySnapshotConcurrentProbeMerged 验证缓存 miss 后的并发探测按组
+// 单飞合并：N 个 goroutine 同时调用，探测端点只被真实打一次。
+func TestDelaySnapshotConcurrentProbeMerged(t *testing.T) {
+	group := mihomoGroup{
+		All: []string{"slow", "fast"}, Now: "slow",
+		Providers: map[string]mihomoProvider{"p1": {Nodes: []mihomoNode{{Name: "slow"}, {Name: "fast"}}}},
+	}
+	mu := &sync.Mutex{}
+	var delayCalls atomic.Int64
+	server := mihomoGroupAndDelayServer(t, &group, mu, func() map[string]int {
+		delayCalls.Add(1)
+		time.Sleep(50 * time.Millisecond) // 拉长探测窗口，确保并发调用能合并
+		return map[string]int{"slow": 300, "fast": 50}
+	})
+	defer server.Close()
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP", DelayProbeURL: "http://www.gstatic.com/generate_204"})
+	available := mihomoAvailable(group.All, group.Now, nil, false)
+
+	const n = 8
+	results := make([]map[string]int, n)
+	oks := make([]bool, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i], oks[i] = client.DelaySnapshot(context.Background(), "", available)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i := 0; i < n; i++ {
+		if !oks[i] || results[i]["slow"] != 300 || results[i]["fast"] != 50 {
+			t.Fatalf("call %d: delays=%v ok=%v", i, results[i], oks[i])
+		}
+	}
+	if delayCalls.Load() != 1 {
+		t.Fatalf("concurrent probes must be merged, delay endpoint hit %d times", delayCalls.Load())
+	}
+}
+
+// TestDelaySnapshotEpochChangeDiscardsWriteBack 验证探测进行中 epoch 变化
+// （黑名单变动已清缓存）时，探测结果不写回缓存，避免陈旧数据重新填充；
+// 发起探测的调用方仍收到本次探测结果。
+func TestDelaySnapshotEpochChangeDiscardsWriteBack(t *testing.T) {
+	group := mihomoGroup{
+		All: []string{"slow", "fast"}, Now: "slow",
+		Providers: map[string]mihomoProvider{"p1": {Nodes: []mihomoNode{{Name: "slow"}, {Name: "fast"}}}},
+	}
+	mu := &sync.Mutex{}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var probeOnce sync.Once
+	server := mihomoGroupAndDelayServer(t, &group, mu, func() map[string]int {
+		probeOnce.Do(func() { close(started) })
+		<-release // 阻塞探测直到测试放行
+		return map[string]int{"slow": 300, "fast": 50}
+	})
+	defer server.Close()
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP", DelayProbeURL: "http://www.gstatic.com/generate_204"})
+	available := mihomoAvailable(group.All, group.Now, nil, false)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var got map[string]int
+	var ok bool
+	go func() {
+		defer wg.Done()
+		got, ok = client.DelaySnapshot(context.Background(), "", available)
+	}()
+	<-started              // 探测已发起
+	client.BanNode("fast") // epoch bump 清空缓存
+	close(release)         // 放行探测返回
+	wg.Wait()
+
+	if !ok || got["slow"] != 300 {
+		t.Fatalf("caller must still receive probe result: %v ok=%v", got, ok)
+	}
+	client.mu.Lock()
+	_, cached := client.delayCache["XAI-GROUP"]
+	client.mu.Unlock()
+	if cached {
+		t.Fatal("stale probe result must not be written back to cache after epoch change")
 	}
 }
