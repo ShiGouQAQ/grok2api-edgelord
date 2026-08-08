@@ -9,7 +9,7 @@ export type SettingsConfigDTO = {
     baseURL: string; quotaTimeout: string; chatTimeout: string; streamIdleTimeout: string; imageTimeout: string; videoTimeout: string;
     statsigMode: "manual" | "url"; statsigManualValue?: string; statsigManualConfigured: boolean; statsigSignerURL: string;
     clearanceMode: "manual" | "flaresolverr"; flareSolverrURL: string; clearanceTimeout: string; clearanceRefresh: string;
-    mihomoEnabled: boolean; mihomoAPIURL: string; mihomoGroupName: string;
+    mihomoEnabled: boolean; mihomoAPIURL: string; mihomoGroupName: string; mihomoTestGroupName: string; mihomoTestProxyURL: string; mihomoDelayProbeURL: string;
     mediaConcurrency: number; allowNSFW: boolean;
     recoveryBackoffBase: string; recoveryBackoffMax: string;
   };
@@ -110,7 +110,7 @@ const settingsConfigValidator = hasShape({
     statsigMode: isOneOf("manual", "url"), statsigManualValue: isOptional(isString), statsigManualConfigured: isBoolean,
     statsigSignerURL: isString, clearanceMode: isOneOf("manual", "flaresolverr"), flareSolverrURL: isString,
     clearanceTimeout: isString, clearanceRefresh: isString, mediaConcurrency: isNumber, allowNSFW: isBoolean, recoveryBackoffBase: isString, recoveryBackoffMax: isString,
-    mihomoEnabled: isOptional(isBoolean), mihomoAPIURL: isOptional(isString), mihomoGroupName: isOptional(isString),
+    mihomoEnabled: isOptional(isBoolean), mihomoAPIURL: isOptional(isString), mihomoGroupName: isOptional(isString), mihomoTestGroupName: isOptional(isString), mihomoTestProxyURL: isOptional(isString), mihomoDelayProbeURL: isOptional(isString),
   }),
   providerConsole: hasShape({ baseURL: isString, chatTimeout: isString, streamIdleTimeout: isOptional(isString) }),
   batch: hasShape({ importConcurrency: isNumber, conversionConcurrency: isNumber, syncConcurrency: isNumber, refreshConcurrency: isNumber, randomDelay: isString }),
@@ -153,6 +153,9 @@ function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDT
         mihomoEnabled: snapshot.config.providerWeb.mihomoEnabled ?? false,
         mihomoAPIURL: snapshot.config.providerWeb.mihomoAPIURL ?? "",
         mihomoGroupName: snapshot.config.providerWeb.mihomoGroupName ?? "",
+        mihomoTestGroupName: snapshot.config.providerWeb.mihomoTestGroupName ?? "",
+        mihomoTestProxyURL: snapshot.config.providerWeb.mihomoTestProxyURL ?? "",
+        mihomoDelayProbeURL: snapshot.config.providerWeb.mihomoDelayProbeURL ?? "",
         streamIdleTimeout: snapshot.config.providerWeb.streamIdleTimeout || "1m30s",
       },
       providerConsole: {
