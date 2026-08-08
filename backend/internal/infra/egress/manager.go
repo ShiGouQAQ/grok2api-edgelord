@@ -662,17 +662,36 @@ func (m *Manager) mihomoMembers(client *MihomoClient, ctx context.Context) []Mih
 		}
 	}
 	members := make([]MihomoMemberStatus, 0, len(group.All))
+	hasDelay := false
 	for _, name := range group.All {
 		entry := info[name]
 		delay := entry.delay
 		if delay <= 0 {
 			delay = -1 // 无延迟数据（history 空或最后一条 -1/0）
+		} else {
+			hasDelay = true
 		}
 		_, isBanned := banned[name]
 		members = append(members, MihomoMemberStatus{
 			Name: name, DelayMS: delay, Banned: isBanned,
 			Current: name == group.Now, Provider: entry.provider,
 		})
+	}
+	if !hasDelay {
+		// select 组不产生 history：全部成员无延迟数据时，若配置了
+		// DelayProbeURL，用客户端缓存的主动探测结果补齐（TTL
+		// mihomoDelayCacheTTL，节流状态轮询）。探测只对可用成员发起；
+		// 失败静默降级为 -1，绝不因成员延迟缺失使状态 API 失败。
+		available := mihomoAvailable(group.All, group.Now, banned, false)
+		if probe, ok := client.DelaySnapshot(ctx, "", available); ok {
+			for i := range members {
+				if members[i].DelayMS < 0 {
+					if delay, exists := probe[members[i].Name]; exists && delay > 0 {
+						members[i].DelayMS = delay
+					}
+				}
+			}
+		}
 	}
 	sort.SliceStable(members, func(i, j int) bool {
 		if members[i].Current != members[j].Current {

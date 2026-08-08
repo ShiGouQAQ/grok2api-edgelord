@@ -803,6 +803,104 @@ func TestProbeGroupDelaysDisabled(t *testing.T) {
 	}
 }
 
+// TestDelaySnapshotCache 覆盖 DelaySnapshot 的节流语义：TTL 内缓存命中不
+// 重复探测；epoch bump（黑名单变动）后缓存失效重新探测；探测失败同样被
+// 缓存（负缓存），避免状态轮询每 2s 重试失败的端点。
+func TestDelaySnapshotCache(t *testing.T) {
+	group := mihomoGroup{
+		All: []string{"slow", "fast", "dead"}, Now: "slow",
+		Providers: map[string]mihomoProvider{"p1": {Nodes: []mihomoNode{
+			{Name: "slow"}, {Name: "fast"}, {Name: "dead"}, // select 组：无 history
+		}}},
+	}
+	mu := &sync.Mutex{}
+	var delayCalls atomic.Int64
+	server := mihomoGroupAndDelayServer(t, &group, mu, func() map[string]int {
+		delayCalls.Add(1)
+		return map[string]int{"slow": 300, "fast": 50, "dead": 0}
+	})
+	defer server.Close()
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP", DelayProbeURL: "http://www.gstatic.com/generate_204"})
+
+	available := mihomoAvailable(group.All, group.Now, nil, false)
+	for i := 0; i < 3; i++ {
+		delays, ok := client.DelaySnapshot(context.Background(), "", available)
+		if !ok || delays["slow"] != 300 || delays["fast"] != 50 {
+			t.Fatalf("call %d: delays=%v ok=%v", i, delays, ok)
+		}
+		if _, exists := delays["dead"]; exists {
+			t.Fatalf("call %d: dead (0) must be filtered out: %v", i, delays)
+		}
+	}
+	if delayCalls.Load() != 1 {
+		t.Fatalf("delay endpoint must be hit once within TTL, got %d", delayCalls.Load())
+	}
+	// epoch bump（封禁节点）后缓存失效，重新探测；封禁成员被过滤。
+	client.BanNode("fast")
+	available = mihomoAvailable(group.All, group.Now, map[string]struct{}{"fast": {}}, false)
+	delays, ok := client.DelaySnapshot(context.Background(), "", available)
+	if !ok || delays["slow"] != 300 {
+		t.Fatalf("snapshot after cache invalidation: delays=%v ok=%v", delays, ok)
+	}
+	if _, exists := delays["fast"]; exists {
+		t.Fatalf("banned member must be filtered from snapshot: %v", delays)
+	}
+	if delayCalls.Load() != 2 {
+		t.Fatalf("delay endpoint must be hit again after epoch bump, got %d", delayCalls.Load())
+	}
+	// TTL 过期后重新探测。
+	client.mu.Lock()
+	client.delayCache["XAI-GROUP"] = mihomoDelayCache{delays: map[string]int{"slow": 1}, ok: true, at: time.Now().Add(-mihomoDelayCacheTTL)}
+	client.mu.Unlock()
+	if _, ok := client.DelaySnapshot(context.Background(), "", available); !ok {
+		t.Fatal("snapshot after TTL expiry must succeed")
+	}
+	if delayCalls.Load() != 3 {
+		t.Fatalf("delay endpoint must be hit again after TTL expiry, got %d", delayCalls.Load())
+	}
+}
+
+// TestDelaySnapshotFailureCached 验证探测失败同样走负缓存：一次失败后，
+// TTL 内的后续调用不再重试探测端点。
+func TestDelaySnapshotFailureCached(t *testing.T) {
+	var delayCalls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/group/"):
+			delayCalls.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+		case strings.HasPrefix(r.URL.Path, "/proxies/"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(mihomoGroup{All: []string{"a"}, Now: "a"})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP", DelayProbeURL: "http://x"})
+	if _, ok := client.DelaySnapshot(context.Background(), "", []string{"a"}); ok {
+		t.Fatal("expected ok=false on probe failure")
+	}
+	if _, ok := client.DelaySnapshot(context.Background(), "", []string{"a"}); ok {
+		t.Fatal("expected cached ok=false on second call")
+	}
+	if delayCalls.Load() != 1 {
+		t.Fatalf("failed probe must be throttled, got %d delay calls", delayCalls.Load())
+	}
+}
+
+// TestDelaySnapshotUnconfigured 验证未配置 DelayProbeURL 时返回 ok=false
+// 且不发起任何探测请求（行为不变，零回归）。
+func TestDelaySnapshotUnconfigured(t *testing.T) {
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: "http://127.0.0.1:1", GroupName: "XAI-GROUP"})
+	if _, ok := client.DelaySnapshot(context.Background(), "", []string{"a"}); ok {
+		t.Fatal("expected ok=false without DelayProbeURL")
+	}
+	if _, ok := client.DelaySnapshot(context.Background(), "", nil); ok {
+		t.Fatal("expected ok=false on empty available")
+	}
+}
+
 func TestSwitchTestGroup(t *testing.T) {
 	group, groupMu := mihomoTestGroup()
 	var switches []string

@@ -48,6 +48,20 @@ const mihomoEpochStoreBumpTimeout = 3 * time.Second
 // ProbeGroupDelays 的默认 timeout 参数。
 const mihomoDelayProbeTimeout = 5 * time.Second
 
+// mihomoDelayCacheTTL 是主动延迟探测结果的缓存有效期。状态 API 每 2s 轮询
+// 一次成员延迟，若每轮都调用 Mihomo /group/{group}/delay 会打爆探测端点；
+// TTL 内复用缓存，到期后下一次轮询重新探测。
+const mihomoDelayCacheTTL = 45 * time.Second
+
+// mihomoDelayCache 是单个组的延迟探测缓存条目。ok 表示最近一次探测是否
+// 成功返回了可用延迟；失败也会缓存（ok=false），避免状态轮询每 2s 重试
+// 一个正在失败的探测端点。
+type mihomoDelayCache struct {
+	delays map[string]int
+	ok     bool
+	at     time.Time
+}
+
 // mihomoBlacklistTTL 是黑名单条目的存活时长，对齐 Go 节点指数冷却的上限
 // (min(10*time.Minute, ...))：封禁超过 TTL 后节点自动解禁，避免节点集稳定
 // 时黑名单永久覆盖全部节点导致"全部节点均已被封禁"死锁。
@@ -151,6 +165,10 @@ type MihomoClient struct {
 	// 节点集变化、默认连接节点 now 变化、清空黑名单、配置变化）都 +1。
 	// Manager 用它与出口绑定 clearance 指纹：出口一变旧缓存自动作废。
 	epoch atomic.Uint64
+	// delayCache 是主动延迟探测结果缓存（组名 -> 条目），由 mu 保护。失效
+	// 时机与 epoch 语义一致：bumpEpochLocked（切换/节点集变化/黑名单变动/
+	// 配置变化）即清空；TTL 兜底防止长时间无事件时展示过期延迟。
+	delayCache map[string]mihomoDelayCache
 	// epochStore 与 switchLock 是可选注入的跨实例协调组件（多实例部署由
 	// Manager 注入 Redis 共享实现）；均为 nil 时保持进程本地行为，单实例
 	// 部署零回归。
@@ -164,9 +182,10 @@ type MihomoClient struct {
 // NewMihomoClient 创建并配置一个 Mihomo 客户端。
 func NewMihomoClient(cfg MihomoConfig) *MihomoClient {
 	client := &MihomoClient{
-		logger:    slog.Default(),
-		client:    &http.Client{Timeout: 5 * time.Second},
-		blacklist: make(map[string]time.Time),
+		logger:     slog.Default(),
+		client:     &http.Client{Timeout: 5 * time.Second},
+		blacklist:  make(map[string]time.Time),
+		delayCache: make(map[string]mihomoDelayCache),
 	}
 	client.UpdateConfig(cfg)
 	return client
@@ -227,11 +246,14 @@ func (c *MihomoClient) UpdateConfig(cfg MihomoConfig) {
 	defer c.mu.Unlock()
 	if !cfg.Enabled || cfg.APIURL == "" || cfg.GroupName == "" {
 		c.config = MihomoConfig{}
+		clear(c.delayCache)
 		return
 	}
 	previous := c.config
 	changed := previous.APIURL != cfg.APIURL || previous.GroupName != cfg.GroupName
 	c.config = cfg
+	// 探测结果随配置变化作废：探测 URL 或组变更后旧延迟无意义。
+	clear(c.delayCache)
 	if changed {
 		clear(c.blacklist)
 		c.lastNodeSet = nil
@@ -257,6 +279,9 @@ func (c *MihomoClient) Epoch() uint64 {
 // 调用方须持有 c.mu（保证各事件的本地代际号与共享存储同序）。
 func (c *MihomoClient) bumpEpochLocked() {
 	c.epoch.Add(1)
+	// 延迟探测缓存与 epoch 同生命周期：任何出口选择状态变化（切换/节点集
+	// 变化/黑名单变动）都清空，避免展示过期探测结果。
+	clear(c.delayCache)
 	if c.epochStore == nil {
 		return
 	}
@@ -753,6 +778,35 @@ func (c *MihomoClient) delayProbe(ctx context.Context, groupName string, availab
 		return nil, false
 	}
 	return fresh, true
+}
+
+// DelaySnapshot 返回组内可用成员（available 限定候选集）的延迟快照，供
+// 状态 API 展示：优先复用缓存（TTL mihomoDelayCacheTTL，节流状态轮询），
+// 缓存过期或缺失时调用一次主动探测（需配置 DelayProbeURL）。探测失败或
+// 全部节点不可用时 ok 为 false；失败也会短时缓存，避免每轮轮询重试打爆
+// 探测端点。groupName 为空时使用客户端当前配置组。
+func (c *MihomoClient) DelaySnapshot(ctx context.Context, groupName string, available []string) (map[string]int, bool) {
+	if len(available) == 0 {
+		return nil, false
+	}
+	cfg, ok := c.configSnapshot()
+	if !ok {
+		return nil, false
+	}
+	if strings.TrimSpace(groupName) == "" {
+		groupName = cfg.GroupName
+	}
+	c.mu.Lock()
+	entry, hit := c.delayCache[groupName]
+	c.mu.Unlock()
+	if hit && time.Since(entry.at) < mihomoDelayCacheTTL {
+		return entry.delays, entry.ok
+	}
+	fresh, ok := c.delayProbe(ctx, groupName, available)
+	c.mu.Lock()
+	c.delayCache[groupName] = mihomoDelayCache{delays: fresh, ok: ok, at: time.Now()}
+	c.mu.Unlock()
+	return fresh, ok
 }
 
 // verifySwitch 切换后拉取一次组状态确认 now 已是目标节点。Mihomo 对 PUT

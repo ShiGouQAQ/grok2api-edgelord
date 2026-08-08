@@ -3737,6 +3737,131 @@ func TestMihomoStatusMembersDegradeOnFetchError(t *testing.T) {
 	}
 }
 
+// mihomoSelectGroup 返回无 history 的 select 组（不产生延迟历史）。
+func mihomoSelectGroup() mihomoGroup {
+	return mihomoGroup{
+		All: []string{"slow", "fast", "dead"}, Now: "slow",
+		Providers: map[string]mihomoProvider{"p1": {Nodes: []mihomoNode{
+			{Name: "slow"}, {Name: "fast"}, {Name: "dead"},
+		}}},
+	}
+}
+
+// TestMihomoStatusMembersProbeFillsSelectGroup 验证 select 组（无 history）
+// 配置 DelayProbeURL 时，成员延迟来自主动探测；状态轮询在 TTL 内复用缓存
+// 不重复探测；current 优先 + DelayMS 升序 + -1 垫底的排序保持不变。
+func TestMihomoStatusMembersProbeFillsSelectGroup(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+	group := mihomoSelectGroup()
+	groupMu := &sync.Mutex{}
+	var delayCalls atomic.Int64
+	server := mihomoGroupAndDelayServer(t, &group, groupMu, func() map[string]int {
+		delayCalls.Add(1)
+		return map[string]int{"slow": 300, "fast": 50, "dead": 0}
+	})
+	defer server.Close()
+	manager.UpdateMihomoConfig(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP", DelayProbeURL: "http://www.gstatic.com/generate_204"})
+
+	status := manager.MihomoStatus(context.Background())
+	if len(status.Members) != 3 {
+		t.Fatalf("members: got %v, want 3 entries", status.Members)
+	}
+	slow, fast, dead := status.Members[0], status.Members[1], status.Members[2]
+	if slow.Name != "slow" || !slow.Current || slow.DelayMS != 300 || slow.Provider != "p1" {
+		t.Fatalf("slow must be current with probe delay 300ms: %+v", slow)
+	}
+	if fast.Name != "fast" || fast.Current || fast.DelayMS != 50 || fast.Provider != "p1" {
+		t.Fatalf("fast must sort second with probe delay 50ms: %+v", fast)
+	}
+	if dead.Name != "dead" || dead.Current || dead.DelayMS != -1 || dead.Provider != "p1" {
+		t.Fatalf("dead (probe 0) must sort last with -1: %+v", dead)
+	}
+	// 第二次轮询：缓存命中，不重复探测。
+	status = manager.MihomoStatus(context.Background())
+	if status.Members[1].DelayMS != 50 || status.Members[2].DelayMS != -1 {
+		t.Fatalf("second poll must reuse cached probe: %+v", status.Members)
+	}
+	if delayCalls.Load() != 1 {
+		t.Fatalf("status polling must reuse cached probe, delay endpoint hit %d times", delayCalls.Load())
+	}
+}
+
+// TestMihomoStatusMembersProbeFailureDegrades 验证探测失败时成员延迟保持
+// -1，状态 API 不降级（Reachable/CurrentNode 仍有效，LastError 不被覆盖）。
+func TestMihomoStatusMembersProbeFailureDegrades(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+	group := mihomoSelectGroup()
+	groupMu := &sync.Mutex{}
+	server := mihomoGroupAndDelayServer(t, &group, groupMu, func() map[string]int {
+		return map[string]int{}
+	})
+	defer server.Close()
+	// delayProbe 需要真正失败的探测端点：改为 500 响应的自定义服务。
+	server.Close()
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/group/") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		groupMu.Lock()
+		_ = json.NewEncoder(w).Encode(group)
+		groupMu.Unlock()
+	}))
+	defer server.Close()
+	manager.UpdateMihomoConfig(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP", DelayProbeURL: "http://www.gstatic.com/generate_204"})
+
+	status := manager.MihomoStatus(context.Background())
+	if !status.Reachable || status.CurrentNode != "slow" || status.LastError != "" {
+		t.Fatalf("probe failure must not degrade status: %+v", status)
+	}
+	for _, member := range status.Members {
+		if member.DelayMS != -1 {
+			t.Fatalf("probe failure must keep delay -1: %+v", member)
+		}
+	}
+}
+
+// TestMihomoStatusMembersNoProbeURLStaysMinusOne 验证未配置 DelayProbeURL
+// 时 select 组成员延迟保持 -1 且不发起探测请求（行为不变，零回归）。
+func TestMihomoStatusMembersNoProbeURLStaysMinusOne(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+	group := mihomoSelectGroup()
+	groupMu := &sync.Mutex{}
+	var delayCalls atomic.Int64
+	server := mihomoGroupAndDelayServer(t, &group, groupMu, func() map[string]int {
+		delayCalls.Add(1)
+		return map[string]int{"slow": 300}
+	})
+	defer server.Close()
+	manager.UpdateMihomoConfig(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+
+	status := manager.MihomoStatus(context.Background())
+	if len(status.Members) != 3 {
+		t.Fatalf("members: got %v, want 3 entries", status.Members)
+	}
+	for _, member := range status.Members {
+		if member.DelayMS != -1 {
+			t.Fatalf("without DelayProbeURL delays must stay -1: %+v", member)
+		}
+	}
+	if delayCalls.Load() != 0 {
+		t.Fatalf("without DelayProbeURL no delay endpoint calls expected, got %d", delayCalls.Load())
+	}
+}
+
 // newDualChannelTestManager 组装启用测试组（t1/t2）的双通道 Manager 与测试
 // 服务，镜像 TestUpdateMihomoConfigDualChannelEpochIsolation 的服务器布局。
 func newDualChannelTestManager(t *testing.T) (*Manager, *httptest.Server) {
