@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { clearMihomoBlacklist, getMihomoStatus, switchMihomoNode, type MihomoMemberDTO } from "@/features/settings/settings-api";
 import { ErrorState, LoadingState } from "@/shared/components/data-state";
@@ -99,39 +100,43 @@ function StatusValue({ label, className, children }: { label: string; className?
 
 function MihomoMemberRow({ member }: { member: MihomoMemberDTO }) {
   const { t } = useTranslation();
-  const hasDelay = member.delayMs >= 0;
   return (
-    <li
-      className={cn(
-        "flex items-center gap-1.5 rounded px-1.5 py-1",
-        member.current && "bg-emerald-500/10",
-        member.banned && "opacity-70",
+    <TableRow className={cn(member.current && "bg-emerald-500/10", member.banned && "opacity-70")}>
+      <TableCell className="text-xs">
+        <span className={cn("font-medium", member.current && "text-emerald-700 dark:text-emerald-300", member.banned && "text-muted-foreground line-through")}>{member.name}</span>
+      </TableCell>
+      <TableCell className="text-xs text-muted-foreground">{member.provider || "—"}</TableCell>
+      <TableCell className={cn("text-right text-xs tabular-nums", member.delayMs < 0 && "text-muted-foreground")}>{member.delayMs >= 0 ? `${member.delayMs}ms` : "—"}</TableCell>
+      <TableCell className="text-xs">
+        {member.current ? <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{t("settings.egress.mihomoCurrent")}</Badge> : member.banned ? <Badge variant="destructive">{t("settings.egress.mihomoBanned")}</Badge> : null}
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function MihomoMemberTable({ title, members }: { title?: string; members: MihomoMemberDTO[] }) {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-1.5">
+      {title ? <div className="text-[10px] font-medium text-muted-foreground">{title}</div> : null}
+      {members.length > 0 ? (
+        <div className="max-h-40 overflow-auto">
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>{t("qualityGuard.node")}</TableHead>
+              <TableHead>{t("qualityGuard.source")}</TableHead>
+              <TableHead className="text-right">{t("settings.egress.mihomoLatency")}</TableHead>
+              <TableHead>{t("qualityGuard.state")}</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {members.map((member) => <MihomoMemberRow key={member.name} member={member} />)}
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">{t("settings.egress.mihomoNoData")}</p>
       )}
-    >
-      <span
-        className={cn(
-          "min-w-0 flex-1 truncate font-mono text-[10px]",
-          member.current && "text-emerald-700 dark:text-emerald-300",
-          member.banned && "text-muted-foreground line-through",
-        )}
-      >
-        {member.name}
-      </span>
-      {member.provider ? (
-        <span className="max-w-24 shrink-0 truncate rounded bg-muted px-1 py-px text-[9px] text-muted-foreground">{member.provider}</span>
-      ) : null}
-      {member.current ? (
-        <Badge variant="outline" className="shrink-0 border-emerald-500/40 bg-emerald-500/10 px-1 text-[9px] text-emerald-700 dark:text-emerald-300">
-          {t("settings.egress.mihomoCurrent")}
-        </Badge>
-      ) : null}
-      {member.banned ? (
-        <Badge variant="destructive" className="shrink-0 px-1 text-[9px]">{t("settings.egress.mihomoBanned")}</Badge>
-      ) : null}
-      <span className={cn("shrink-0 tabular-nums text-[10px]", hasDelay ? "text-foreground" : "text-muted-foreground")}>
-        {hasDelay ? `${member.delayMs}ms` : "—"}
-      </span>
-    </li>
+    </div>
   );
 }
 
@@ -140,21 +145,8 @@ export function MihomoMemberList({ members, testEnabled, testMembers }: { member
   return (
     <div className="space-y-1.5">
       <div className="text-[10px] font-medium text-muted-foreground">{t("settings.egress.mihomoMembers")}</div>
-      {members.length > 0 ? (
-        <ul className="max-h-28 space-y-px overflow-y-auto pr-1">
-          {members.map((member) => <MihomoMemberRow key={member.name} member={member} />)}
-        </ul>
-      ) : (
-        <p className="text-[10px] text-muted-foreground">{t("settings.egress.mihomoNoData")}</p>
-      )}
-      {testEnabled && testMembers.length > 0 ? (
-        <div className="space-y-1.5 pt-1">
-          <div className="text-[10px] font-medium text-muted-foreground/70">{t("settings.egress.mihomoTestGroup")}</div>
-          <ul className="max-h-24 space-y-px overflow-y-auto pr-1">
-            {testMembers.map((member) => <MihomoMemberRow key={member.name} member={member} />)}
-          </ul>
-        </div>
-      ) : null}
+      <MihomoMemberTable members={members} />
+      {testEnabled && testMembers.length > 0 ? <MihomoMemberTable title={t("settings.egress.mihomoTestGroup")} members={testMembers} /> : null}
     </div>
   );
 }
