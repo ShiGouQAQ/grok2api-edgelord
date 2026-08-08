@@ -29,9 +29,20 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
 const maxMihomoResponseBytes = 4 << 20
+
+// mihomoSwitchLockKeyPrefix 是跨实例切换互斥锁的键前缀；键名统一为
+// 前缀 + 组键名（epochStoreKey，默认配置组名），与共享 epoch 存储同键域。
+const mihomoSwitchLockKeyPrefix = "egress-mihomo-switch:"
+
+// mihomoEpochStoreBumpTimeout 是共享 epoch 存储单次 bump 的截止时长。
+// bump 在 c.mu 持锁路径上执行（保证各事件与本地代际号同序），超时兜底防止
+// 共享存储故障时卡死本地切换互斥。
+const mihomoEpochStoreBumpTimeout = 3 * time.Second
 
 // mihomoDelayProbeTimeout 是主动延迟探测的单节点探测截止时长，同时作为
 // ProbeGroupDelays 的默认 timeout 参数。
@@ -140,6 +151,14 @@ type MihomoClient struct {
 	// 节点集变化、默认连接节点 now 变化、清空黑名单、配置变化）都 +1。
 	// Manager 用它与出口绑定 clearance 指纹：出口一变旧缓存自动作废。
 	epoch atomic.Uint64
+	// epochStore 与 switchLock 是可选注入的跨实例协调组件（多实例部署由
+	// Manager 注入 Redis 共享实现）；均为 nil 时保持进程本地行为，单实例
+	// 部署零回归。
+	epochStore repository.EgressEpochStore
+	// epochStoreKey 是共享 epoch 存储与切换锁的组键名；为空时默认取当前
+	// 配置的 GroupName（配置热更新自动跟随）。
+	epochStoreKey string
+	switchLock    repository.DistributedLock
 }
 
 // NewMihomoClient 创建并配置一个 Mihomo 客户端。
@@ -160,6 +179,21 @@ func (c *MihomoClient) SetLogger(logger *slog.Logger) {
 	}
 	c.mu.Lock()
 	c.logger = logger
+	c.mu.Unlock()
+}
+
+// SetEpochStore 注入跨实例共享的出口代际版本号存储；nil 时回退本地 atomic
+// epoch（单实例部署零回归）。
+func (c *MihomoClient) SetEpochStore(store repository.EgressEpochStore) {
+	c.mu.Lock()
+	c.epochStore = store
+	c.mu.Unlock()
+}
+
+// SetSwitchLock 注入跨实例出口切换互斥锁；nil 时回退本地无锁切换。
+func (c *MihomoClient) SetSwitchLock(lock repository.DistributedLock) {
+	c.mu.Lock()
+	c.switchLock = lock
 	c.mu.Unlock()
 }
 
@@ -202,7 +236,7 @@ func (c *MihomoClient) UpdateConfig(cfg MihomoConfig) {
 		clear(c.blacklist)
 		c.lastNodeSet = nil
 		c.lastNow = ""
-		c.epoch.Add(1)
+		c.bumpEpochLocked()
 	}
 }
 
@@ -215,6 +249,30 @@ func (c *MihomoClient) SwitchCount() uint64 {
 // Manager 用它作 clearance 绑定指纹的组成部分，出口一变旧缓存自动作废。
 func (c *MihomoClient) Epoch() uint64 {
 	return c.epoch.Load()
+}
+
+// bumpEpochLocked 递增出口代际版本号：本地 epoch +1，并 best-effort 同步到
+// 跨实例共享存储（注入了 epochStore 时）。共享存储失败只降级为本地计数
+// （记 Warn，绝不失败）：代际号语义允许短暂不一致，下一次成功 bump 会追平。
+// 调用方须持有 c.mu（保证各事件的本地代际号与共享存储同序）。
+func (c *MihomoClient) bumpEpochLocked() {
+	c.epoch.Add(1)
+	if c.epochStore == nil {
+		return
+	}
+	groupKey := c.epochStoreKey
+	if groupKey == "" {
+		groupKey = c.config.GroupName
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), mihomoEpochStoreBumpTimeout)
+	defer cancel()
+	if _, err := c.epochStore.BumpEpoch(ctx, groupKey); err != nil {
+		logger := c.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("mihomo_epoch_store_bump_failed", "group", groupKey, "error", err)
+	}
 }
 
 // BannedNodes 返回黑名单节点的排序快照，供状态 API 展示。
@@ -243,7 +301,7 @@ func (c *MihomoClient) ClearBlacklist() int {
 	count := len(c.blacklist)
 	if count > 0 {
 		clear(c.blacklist)
-		c.epoch.Add(1)
+		c.bumpEpochLocked()
 	}
 	return count
 }
@@ -260,7 +318,7 @@ func (c *MihomoClient) BanNode(name string) int {
 		return len(c.blacklist)
 	}
 	if _, exists := c.blacklist[name]; !exists {
-		c.epoch.Add(1)
+		c.bumpEpochLocked()
 	}
 	c.blacklist[name] = time.Now().UTC().Add(mihomoBlacklistTTL)
 	return len(c.blacklist)
@@ -273,7 +331,7 @@ func (c *MihomoClient) UnbanNode(name string) int {
 	name = strings.TrimSpace(name)
 	if _, exists := c.blacklist[name]; exists {
 		delete(c.blacklist, name)
-		c.epoch.Add(1)
+		c.bumpEpochLocked()
 	}
 	return len(c.blacklist)
 }
@@ -490,7 +548,9 @@ func (c *MihomoClient) SwitchTestGroup(ctx context.Context, name, reason string)
 		return "", MihomoSwitchFailed
 	}
 	c.switchCount.Add(1)
-	c.epoch.Add(1)
+	c.mu.Lock()
+	c.bumpEpochLocked()
+	c.mu.Unlock()
 	c.log().Info("mihomo_test_switch", "reason", reason, "to", name, "switch_count", c.switchCount.Load(), "epoch", c.epoch.Load())
 	return name, MihomoSwitchDone
 }
@@ -501,6 +561,12 @@ func (c *MihomoClient) SwitchTestGroup(ctx context.Context, name, reason string)
 // 通过）。节点级验证通过后立即提交代际号（缩短"出口已变但 epoch 未提交"
 // 窗口），同 IP 重试循环中只提交一次；重试耗尽返回 Failed 时代际号已提交
 // （出口选择确实变更），与"Failed 不 bump"的旧语义不同。
+//
+// 单飞顺序：先本地 switching 标志（防同实例并发切换），后分布式锁（防跨
+// 实例并发切换，注入了 switchLock 时）。释放顺序逆序：defer 后注册先执行，
+// 即先释放分布式锁，再清除本地单飞标志。未抢到锁（另一实例在切）按 Merged
+// 语义处理（不执行、不冷却）；锁获取失败 fail-closed 返回 Failed，绝不双
+// 实例并发切换。
 func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCurrent bool) (string, MihomoSwitchResult) {
 	c.mu.Lock()
 	if c.switching {
@@ -509,6 +575,11 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 		return "", MihomoSwitchMerged
 	}
 	c.switching = true
+	groupKey := c.epochStoreKey
+	if groupKey == "" {
+		groupKey = c.config.GroupName
+	}
+	distLock := c.switchLock
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
@@ -520,6 +591,22 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 	if !ok {
 		c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "config", "error", "Mihomo 未启用或未配置")
 		return "", MihomoSwitchFailed
+	}
+
+	if distLock != nil {
+		// 跨实例互斥：ttl 取 VerifyTimeout（默认 15s）加 clearanceLockGrace
+		// 余量，覆盖一次完整切换的时长。
+		ttl := cfg.VerifyTimeout + clearanceLockGrace
+		release, acquired, err := distLock.Acquire(ctx, mihomoSwitchLockKeyPrefix+groupKey, ttl)
+		if err != nil {
+			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "switch_lock", "group", groupKey, "error", err)
+			return "", MihomoSwitchFailed
+		}
+		if !acquired {
+			c.log().Info("mihomo_switch_merged", "reason", reason, "stage", "switch_lock", "group", groupKey)
+			return "", MihomoSwitchMerged
+		}
+		defer release() // 后注册：先于本地单飞清除执行
 	}
 	current, err := c.GetCurrentNode(ctx)
 	if err != nil {
@@ -566,7 +653,9 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 			// ensureClearance 仍用旧 epoch 计算指纹，提交后被判定不新鲜而
 			// 浪费一次求解。同 IP 重试循环中仅提交一次。
 			c.switchCount.Add(1)
-			c.epoch.Add(1)
+			c.mu.Lock()
+			c.bumpEpochLocked()
+			c.mu.Unlock()
 			epochCommitted = true
 		}
 		if !verifyIP {
@@ -830,7 +919,7 @@ func (c *MihomoClient) updateBlacklistOnNodeChangeLocked(all []string, now strin
 		c.lastNodeSet = current
 	}
 	if !first && (nodeSetChanged || nowChanged) {
-		c.epoch.Add(1)
+		c.bumpEpochLocked()
 	}
 	if now != "" {
 		c.lastNow = now

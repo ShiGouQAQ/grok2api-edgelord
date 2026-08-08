@@ -3,6 +3,7 @@ package egress
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1054,5 +1055,219 @@ func TestUnbanNode(t *testing.T) {
 	}
 	if client.Epoch() != epoch+1 {
 		t.Fatalf("unban of non-banned node must not bump epoch: %d", client.Epoch())
+	}
+}
+
+// fakeEpochStore 是 EgressEpochStore 的测试替身：记录按组键的 bump 次数，
+// bumpErr 非 nil 时模拟共享存储故障。
+type fakeEpochStore struct {
+	mu        sync.Mutex
+	bumps     map[string]uint64
+	bumpErr   error
+	bumpCount int
+}
+
+func newFakeEpochStore() *fakeEpochStore {
+	return &fakeEpochStore{bumps: make(map[string]uint64)}
+}
+
+func (f *fakeEpochStore) BumpEpoch(_ context.Context, groupKey string) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bumpCount++
+	if f.bumpErr != nil {
+		return 0, f.bumpErr
+	}
+	f.bumps[groupKey]++
+	return f.bumps[groupKey], nil
+}
+
+func (f *fakeEpochStore) GetEpoch(_ context.Context, groupKey string) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.bumps[groupKey], nil
+}
+
+// fakeSwitchLock 是 DistributedLock 的测试替身：acquired/err 可配置，
+// 记录获取的键名与是否释放。
+type fakeSwitchLock struct {
+	mu          sync.Mutex
+	acquired    bool
+	err         error
+	acquireKeys []string
+	released    bool
+}
+
+func (f *fakeSwitchLock) Acquire(_ context.Context, key string, _ time.Duration) (func(), bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.acquireKeys = append(f.acquireKeys, key)
+	if f.err != nil {
+		return nil, false, f.err
+	}
+	if !f.acquired {
+		return nil, false, nil
+	}
+	return func() { f.released = true }, true, nil
+}
+
+func (f *fakeSwitchLock) keyCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.acquireKeys)
+}
+
+func (f *fakeSwitchLock) lastKey() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.acquireKeys) == 0 {
+		return ""
+	}
+	return f.acquireKeys[len(f.acquireKeys)-1]
+}
+
+// TestSetEpochStoreNilFallsBackToLocal 验证 SetEpochStore(nil) 清空共享存储
+// 后回落纯本地计数：本地 epoch 仍递增，共享存储不再收到 bump。
+func TestSetEpochStoreNilFallsBackToLocal(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	store := newFakeEpochStore()
+	client.SetEpochStore(store)
+
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("switch with store: got %v, want Done", result)
+	}
+	store.mu.Lock()
+	bumpedGroup := store.bumps["XAI-GROUP"] > 0
+	storeBumps := store.bumpCount
+	store.mu.Unlock()
+	if !bumpedGroup {
+		t.Fatal("switch must bump shared store under default group key XAI-GROUP")
+	}
+
+	localEpoch := client.Epoch()
+	client.SetEpochStore(nil) // 清空 → 纯本地回退
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("switch after clearing store: got %v, want Done", result)
+	}
+	if client.Epoch() <= localEpoch {
+		t.Fatalf("local epoch must still increment after nil store: %d -> %d", localEpoch, client.Epoch())
+	}
+	store.mu.Lock()
+	after := store.bumpCount
+	store.mu.Unlock()
+	if after != storeBumps {
+		t.Fatalf("store bumped after nil fallback: %d -> %d", storeBumps, after)
+	}
+}
+
+// TestEpochStoreBumpFailureDegradesToLocal 验证共享存储 bump 失败只降级为
+// 本地计数：切换仍成功（Done），本地 epoch 照常递增，绝不 fatal。
+func TestEpochStoreBumpFailureDegradesToLocal(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	store := newFakeEpochStore()
+	store.bumpErr = errors.New("redis down")
+	client.SetEpochStore(store)
+
+	localEpoch := client.Epoch()
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("bump failure must degrade, got %v, want Done", result)
+	}
+	if client.Epoch() <= localEpoch {
+		t.Fatalf("local epoch must still increment on bump failure: %d -> %d", localEpoch, client.Epoch())
+	}
+}
+
+// TestSwitchLockNotAcquiredMergesWithoutPut 验证分布式锁未抢到（另一实例
+// 正在切换）时按 Merged 语义处理：不执行切换（无 PUT）、不 bump。
+func TestSwitchLockNotAcquiredMergesWithoutPut(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	lock := &fakeSwitchLock{}
+	client.SetSwitchLock(lock)
+
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchMerged {
+		t.Fatalf("lock not acquired: got %v, want Merged", result)
+	}
+	if key := lock.lastKey(); key != "egress-mihomo-switch:XAI-GROUP" {
+		t.Fatalf("lock key: got %q, want egress-mihomo-switch:XAI-GROUP", key)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 0 {
+		t.Fatalf("PUT executed despite lock not acquired: %v", switches)
+	}
+}
+
+// TestSwitchLockAcquireErrorFailsClosed 验证分布式锁获取失败 fail-closed：
+// 返回 Failed（绝不双实例并发切换），不执行 PUT。
+func TestSwitchLockAcquireErrorFailsClosed(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	lock := &fakeSwitchLock{err: errors.New("redis down")}
+	client.SetSwitchLock(lock)
+
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchFailed {
+		t.Fatalf("lock acquire error: got %v, want Failed", result)
+	}
+	switchMu.Lock()
+	defer switchMu.Unlock()
+	if len(switches) != 0 {
+		t.Fatalf("PUT executed despite lock acquire error: %v", switches)
+	}
+}
+
+// TestSwitchLockAcquiredReleasesAfterSwitch 验证分布式锁正常路径：抢到锁后
+// 执行切换（Done），切换结束释放锁，且本地单飞标志已复位（可再次切换）。
+func TestSwitchLockAcquiredReleasesAfterSwitch(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	lock := &fakeSwitchLock{acquired: true}
+	client.SetSwitchLock(lock)
+
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("lock acquired: got %v, want Done", result)
+	}
+	switchMu.Lock()
+	puts := len(switches)
+	switchMu.Unlock()
+	if puts != 1 {
+		t.Fatalf("PUT count: got %d, want 1", puts)
+	}
+	if lock.keyCount() != 1 {
+		t.Fatalf("lock acquired count: got %d, want 1", lock.keyCount())
+	}
+	if !lock.released {
+		t.Fatal("distributed lock must be released after switch")
+	}
+	// 本地单飞已复位：锁再次可用时同一实例可发起下一次切换。
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("second switch: got %v, want Done", result)
 	}
 }
