@@ -314,6 +314,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressService.SetMihomoManager(egressMihomoManager{manager: egressManager})
 	egressService.SetNodeProber(egressManager)
 	egressService.SetOperationsConfigInvalidator(egressManager)
+	// Mihomo 测试组成员同步器：guardStatePath 与 HTTP handler 的
+	// QualityGuardStatePath 同源（qualityGuardPath("state.json")），使同步器
+	// 能识别被守护隔离的节点并跳过定向 enable。
+	egressService.SetMihomoSyncer(egressapp.NewMihomoSyncer(egressRepo, cipher, qualityGuardPath("state.json")))
 	egressManager.SetFailureProber(egressService.TestNode)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
 	qualityGuardIdentity, err := clientKeyService.EnsureQualityGuardIdentity(ctx, cfg.QualityGuard.Enabled)

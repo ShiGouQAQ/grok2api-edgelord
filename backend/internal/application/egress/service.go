@@ -111,6 +111,7 @@ type Service struct {
 	prober            NodeProber
 	operationsCache   OperationsConfigInvalidator
 	qualityProber     QualityProber
+	mihomoSyncer      *MihomoSyncer
 	assignmentMu      sync.Mutex
 	lastAssignmentRun time.Time
 	assignmentRunning bool
@@ -281,6 +282,13 @@ func (s *Service) SetClearanceManager(value ClearanceManager) {
 func (s *Service) SetMihomoManager(value MihomoManager) {
 	s.mu.Lock()
 	s.mihomo = value
+	s.mu.Unlock()
+}
+
+// SetMihomoSyncer 注入 Mihomo 测试组成员同步器；nil 时维护循环跳过同步。
+func (s *Service) SetMihomoSyncer(value *MihomoSyncer) {
+	s.mu.Lock()
+	s.mihomoSyncer = value
 	s.mu.Unlock()
 }
 
