@@ -178,6 +178,9 @@ class FakeApi:
         self.enabled_calls = []
         self.quality_calls = []
         self.rotation_calls = []
+        self.select_calls = []
+        self.ban_calls = []
+        self.unban_calls = []
 
     def list_nodes(self):
         return self.nodes
@@ -209,6 +212,18 @@ class FakeApi:
     def rotate_node(self, node_id, old_exit_ip=""):
         self.rotation_calls.append((node_id, old_exit_ip))
         return {"changed": True, "oldExitIp": old_exit_ip, "newExitIp": "203.0.113.10"}
+
+    def select_test_member(self, node_name):
+        self.select_calls.append(node_name)
+        return True
+
+    def ban_test_member(self, node_name):
+        self.ban_calls.append(node_name)
+        return True
+
+    def unban_test_member(self, node_name):
+        self.unban_calls.append(node_name)
+        return True
 
     def list_audits(self, _cursor=""):
         if self.audit_pages:
@@ -734,6 +749,163 @@ class GuardTests(unittest.TestCase):
             guard.run_cycle()
             self.assertEqual(api.enabled_calls, [("1", False)])
             self.assertTrue(guard.state["nodes"]["1"]["disabled_by_guard"])
+
+    def test_mihomo_synced_node_selects_before_probe_and_bans_on_quarantine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = config(
+                state_file=Path(directory) / "state.json",
+                lock_file=Path(directory) / "lock",
+                node_ids=("10",),
+            )
+            nodes = self.nodes(5)
+            nodes.append({"id": "10", "name": "mihomo-sg-1", "sourceKey": "mihomo:test-group:mihomo-sg-1", "enabled": True, "proxyConfigured": True})
+            hard = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 1200}
+            api = FakeApi(nodes, [hard])
+            guard = quality_guard.Guard(cfg, api)
+            guard.run_cycle()
+            self.assertEqual(api.select_calls, ["mihomo-sg-1"])
+            self.assertEqual(api.enabled_calls, [("10", False)])
+            self.assertEqual(api.ban_calls, ["mihomo-sg-1"])
+            self.assertEqual(api.quality_calls, ["10"])
+
+    def test_mihomo_synced_node_never_triggers_rotation_webhook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = config(
+                state_file=Path(directory) / "state.json",
+                lock_file=Path(directory) / "lock",
+                node_ids=("10",),
+                fail_closed=True,
+                consecutive_errors=1,
+                rotation_url="http://127.0.0.1:19099/rotate",
+                rotatable_node_ids=("10",),
+            )
+            nodes = self.nodes(5)
+            nodes.append({"id": "10", "name": "mihomo-sg-1", "sourceKey": "mihomo:test-group:mihomo-sg-1", "enabled": True, "proxyConfigured": True})
+            api = FakeApi(nodes, [RuntimeError("temporary"), RuntimeError("still failing")])
+            guard = quality_guard.Guard(cfg, api)
+            guard.run_cycle()
+            guard.run_cycle()
+            self.assertEqual(api.enabled_calls, [("10", False)])
+            self.assertEqual(api.rotation_calls, [])
+            self.assertEqual(api.ban_calls, ["mihomo-sg-1"])
+
+    def test_mihomo_synced_node_unbans_on_healthy_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = config(
+                state_file=Path(directory) / "state.json",
+                lock_file=Path(directory) / "lock",
+                node_ids=("10",),
+            )
+            nodes = self.nodes(5)
+            nodes.append({"id": "10", "name": "mihomo-sg-1", "sourceKey": "mihomo:test-group:mihomo-sg-1", "enabled": False, "proxyConfigured": True})
+            good = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 100}
+            api = FakeApi(nodes, [good])
+            guard = quality_guard.Guard(cfg, api)
+            state = guard._state_for("10")
+            state.update({"disabled_by_guard": True, "quarantined_until": 0})
+            guard.run_cycle()
+            self.assertEqual(api.enabled_calls, [("10", True)])
+            self.assertEqual(api.unban_calls, ["mihomo-sg-1"])
+            self.assertFalse(state["disabled_by_guard"])
+
+    def test_mihomo_select_failure_skips_probe_without_quarantine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = config(
+                state_file=Path(directory) / "state.json",
+                lock_file=Path(directory) / "lock",
+                node_ids=("10",),
+            )
+            nodes = self.nodes(5)
+            nodes.append({"id": "10", "name": "mihomo-sg-1", "sourceKey": "mihomo:test-group:mihomo-sg-1", "enabled": True, "proxyConfigured": True})
+            api = FakeApi(nodes, [])
+            api.select_test_member = lambda _node_name: False
+            guard = quality_guard.Guard(cfg, api)
+            guard.run_cycle()
+            state = guard.state["nodes"]["10"]
+            self.assertEqual(state["error_strikes"], 1)
+            self.assertEqual(api.quality_calls, [])
+            self.assertEqual(api.enabled_calls, [])
+            self.assertFalse(state["disabled_by_guard"])
+
+    def test_regular_nodes_do_not_use_test_member_controls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = config(
+                state_file=Path(directory) / "state.json",
+                lock_file=Path(directory) / "lock",
+                node_ids=("1",),
+            )
+            hard = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 1200}
+            api = FakeApi(self.nodes(), [hard])
+            guard = quality_guard.Guard(cfg, api)
+            guard.run_cycle()
+            self.assertEqual(api.select_calls, [])
+            self.assertEqual(api.ban_calls, [])
+            self.assertEqual(api.enabled_calls, [("1", False)])
+
+    def test_mihomo_epoch_change_detected_via_test_epoch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = config(
+                state_file=Path(directory) / "state.json",
+                lock_file=Path(directory) / "lock",
+                node_ids=("10",),
+            )
+
+            class SwitchingApi(FakeApi):
+                def get_mihomo_status(self):
+                    self._test_epoch = getattr(self, "_test_epoch", 0) + 1
+                    return {"enabled": True, "epoch": 99, "testEpoch": self._test_epoch}
+
+            nodes = self.nodes(5)
+            nodes.append({"id": "10", "name": "mihomo-sg-1", "sourceKey": "mihomo:test-group:mihomo-sg-1", "enabled": True, "proxyConfigured": True})
+            hard = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 1200}
+            api = SwitchingApi(nodes, [hard])
+            guard = quality_guard.Guard(cfg, api)
+            guard.run_cycle()
+            self.assertEqual(api.quality_calls, ["10"])
+            self.assertEqual(api.enabled_calls, [])
+            self.assertFalse(guard.state["nodes"]["10"]["disabled_by_guard"])
+
+    def test_mihomo_epoch_check_falls_back_when_test_epoch_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = config(
+                state_file=Path(directory) / "state.json",
+                lock_file=Path(directory) / "lock",
+                node_ids=("10",),
+            )
+
+            class StableApi(FakeApi):
+                def get_mihomo_status(self):
+                    return {"enabled": True, "epoch": 7}
+
+            nodes = self.nodes(5)
+            nodes.append({"id": "10", "name": "mihomo-sg-1", "sourceKey": "mihomo:test-group:mihomo-sg-1", "enabled": True, "proxyConfigured": True})
+            hard = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 1200}
+            api = StableApi(nodes, [hard])
+            guard = quality_guard.Guard(cfg, api)
+            guard.run_cycle()
+            self.assertEqual(api.enabled_calls, [("10", False)])
+            self.assertTrue(guard.state["nodes"]["10"]["disabled_by_guard"])
+
+    def test_mihomo_epoch_change_detected_via_production_epoch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = config(
+                state_file=Path(directory) / "state.json",
+                lock_file=Path(directory) / "lock",
+                node_ids=("1",),
+            )
+
+            class SwitchingApi(FakeApi):
+                def get_mihomo_status(self):
+                    self._epoch = getattr(self, "_epoch", 0) + 1
+                    return {"enabled": True, "epoch": self._epoch}
+
+            hard = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 1200}
+            api = SwitchingApi(self.nodes(), [hard])
+            guard = quality_guard.Guard(cfg, api)
+            guard.run_cycle()
+            self.assertEqual(api.quality_calls, ["1"])
+            self.assertEqual(api.enabled_calls, [])
+            self.assertFalse(guard.state["nodes"]["1"]["disabled_by_guard"])
 
     @staticmethod
     def audit(audit_id, node_id, output_tps, quality_probe=False):

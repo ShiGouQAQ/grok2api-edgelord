@@ -429,6 +429,64 @@ class ApiClient:
         )
         return int(result.get("updated") or 0)
 
+    def select_test_member(self, node_name: str) -> bool:
+        """将测试组当前成员切换到指定节点；成功返回 True，失败记录并返回 False。
+
+        nodeName 即 Mihomo 测试组成员名（同步器建行时 DB 节点 Name=成员名），
+        body 的 nodeId 字段即节点名，与 Go 侧 mihomoTestSelect 契约一致。
+        """
+        try:
+            self._request(
+                "POST",
+                f"{INTERNAL_API_PREFIX}/egress-mihomo/select",
+                {"nodeId": node_name},
+            )
+        except (ApiError, RuntimeError, ValueError) as exc:
+            log_event(
+                "mihomo_select_request_failed",
+                node_name=node_name,
+                error_type=type(exc).__name__,
+            )
+            return False
+        return True
+
+    def ban_test_member(self, node_name: str) -> bool:
+        """封禁测试组内一个成员；成功返回 True，失败记录并返回 False。
+
+        Go 侧黑名单带 TTL（10 分钟）兜底，封禁到期后成员自动回到测试组。
+        """
+        try:
+            self._request(
+                "POST",
+                f"{INTERNAL_API_PREFIX}/egress-mihomo/ban",
+                {"nodeId": node_name},
+            )
+        except (ApiError, RuntimeError, ValueError) as exc:
+            log_event(
+                "mihomo_ban_request_failed",
+                node_name=node_name,
+                error_type=type(exc).__name__,
+            )
+            return False
+        return True
+
+    def unban_test_member(self, node_name: str) -> bool:
+        """解除测试组内一个成员的封禁；成功返回 True，失败记录并返回 False。"""
+        try:
+            self._request(
+                "POST",
+                f"{INTERNAL_API_PREFIX}/egress-mihomo/unban",
+                {"nodeId": node_name},
+            )
+        except (ApiError, RuntimeError, ValueError) as exc:
+            log_event(
+                "mihomo_unban_request_failed",
+                node_name=node_name,
+                error_type=type(exc).__name__,
+            )
+            return False
+        return True
+
     def rotate_node(self, node_id: str, old_exit_ip: str = "") -> dict[str, Any]:
         if not self.config.rotation_url:
             raise RuntimeError("rotation endpoint is not configured")
@@ -660,6 +718,7 @@ class Guard:
         self.api = api
         self.state = load_state(config.state_file)
         self._resolved_node_ids = list(config.node_ids)
+        self._mihomo_member_by_node: dict[str, str] = {}
         self.state.setdefault("started_at", time.time())
         self.state.setdefault("recent_events", [])
         ensure_statistics(self.state)
@@ -777,7 +836,48 @@ class Guard:
             return target_enabled
         return target_enabled and enabled - 1 >= self.config.min_healthy_nodes
 
+    def _is_mihomo_synced(self, node: dict[str, Any]) -> bool:
+        """判断节点是否由 Mihomo 测试组同步而来。
+
+        双判据：SourceKey 以 "mihomo:" 开头，或 Name 以 "mihomo-" 开头。
+        后端 nodeResponse 尚未暴露 sourceKey（handler.go nodeResponse 现状
+        无此字段），故 sourceKey 判据当前恒为 False，实际只依赖 Name 判据
+        ——同步器建行时 Name=测试组成员名。需后端补 sourceKey 暴露后
+        sourceKey 判据才会生效。
+        """
+        if str(node.get("sourceKey") or "").startswith("mihomo:"):
+            return True
+        return str(node.get("name") or "").startswith("mihomo-")
+
+    def _select_test_member(self, node: dict[str, Any]) -> bool:
+        """探测前先将测试组当前成员切换为目标节点，保证探测归因一致。
+
+        非同步节点直接放行（不调用 select）；同步节点 select 失败返回
+        False，由调用方记账并跳过本轮探测。
+        """
+        if not self._is_mihomo_synced(node):
+            return True
+        node_name = str(node.get("name") or "")
+        if node_name and self.api.select_test_member(node_name):
+            return True
+        log_event(
+            "mihomo_select_failed",
+            node_id=str(node.get("id") or ""),
+            node_name=node.get("name"),
+        )
+        return False
+
     def _should_rotate(self, node_id: str, reason: str) -> bool:
+        if node_id in self._mihomo_member_by_node:
+            # Mihomo 同步节点的出口=测试组成员，隔离/换路靠测试组 ban/select
+            # 完成；对生产组触发 rotate webhook 是错误归因，因此永不旋转。
+            log_event(
+                "mihomo_synced_rotation_skipped",
+                node_id=node_id,
+                reason=reason,
+                detail="mihomo synced node rotates via test-group ban/select, not webhook",
+            )
+            return False
         return (
             bool(self.config.rotation_url)
             and node_id in set(self.config.rotatable_node_ids)
@@ -810,7 +910,25 @@ class Guard:
         if not before:
             return False
         after = self.api.get_mihomo_status()
-        if not after or after.get("epoch") == before.get("epoch"):
+        if not after:
+            return False
+        if node_id in self._mihomo_member_by_node:
+            # 同步节点探测的是测试组成员：优先比对 testEpoch（Go 侧新字段，
+            # 随状态接口一并返回）；旧后端未暴露 testEpoch 时退化到生产 epoch。
+            before_epoch = before.get("testEpoch")
+            after_epoch = after.get("testEpoch")
+            if before_epoch is not None and after_epoch is not None:
+                if after_epoch == before_epoch:
+                    return False
+                log_event(
+                    "probe_skipped_epoch_changed",
+                    node_id=node_id,
+                    node_name=node_name,
+                    epoch_field="testEpoch",
+                    **fields,
+                )
+                return True
+        if after.get("epoch") == before.get("epoch"):
             return False
         log_event(
             "probe_skipped_epoch_changed",
@@ -876,6 +994,17 @@ class Guard:
             )
             return
         node["enabled"] = False
+        if self._is_mihomo_synced(node):
+            node_name = str(node.get("name") or "")
+            if node_name and not self.api.ban_test_member(node_name):
+                # 封禁失败仅记录、不阻断隔离：节点已被 set_enabled(False) 禁用，
+                # 且 Go 侧测试组黑名单自带 TTL（10 分钟）兜底，探测也始终先
+                # select 目标成员，隔离语义不依赖本次 ban 成功。
+                log_event(
+                    "mihomo_ban_failed",
+                    node_id=node_id,
+                    node_name=node.get("name"),
+                )
         self._bump_statistic("actions", "quarantined")
         append_state_event(
             self.state,
@@ -966,6 +1095,20 @@ class Guard:
         ):
             return
         self._bump_statistic("active", "total")
+        if not self._select_test_member(node):
+            # select 失败按探测错误记账但暂不隔离：等下一轮重试，避免测试组
+            # 切换抖动被误判为节点质量问题。
+            self._bump_statistic("active", "errors")
+            state["error_strikes"] = int(state.get("error_strikes", 0)) + 1
+            state["last_probe_at"] = now
+            log_event(
+                "quality_probe_skipped_select_failed",
+                node_id=node_id,
+                node_name=node.get("name"),
+                trigger=trigger,
+                strikes=state["error_strikes"],
+            )
+            return
         before = self.api.get_mihomo_status()
         try:
             result = self.api.quality_test(node_id)
@@ -1047,6 +1190,16 @@ class Guard:
                 exit_ip=str(rotation.get("newExitIp") or ""),
             )
         try:
+            if not self._select_test_member(node):
+                # select 失败保持隔离，下一轮再试。
+                state["quarantined_until"] = now + self.config.quarantine_seconds
+                state["last_reason"] = "mihomo_select_failed"
+                log_event(
+                    "recovery_probe_skipped_select_failed",
+                    node_id=node_id,
+                    node_name=node.get("name"),
+                )
+                return
             try:
                 connectivity = self.api.connectivity_test(node_id)
                 connectivity_status = str(connectivity.get("status") or "unknown")
@@ -1102,6 +1255,16 @@ class Guard:
                 updated=updated,
             )
             return
+        if self._is_mihomo_synced(node):
+            node_name = str(node.get("name") or "")
+            if node_name and not self.api.unban_test_member(node_name):
+                # 解除封禁失败仅记录、不阻断恢复：节点已重新启用，黑名单 TTL
+                # 到期后测试组自然恢复该成员。
+                log_event(
+                    "mihomo_unban_failed",
+                    node_id=node_id,
+                    node_name=node.get("name"),
+                )
         state.update(
             {
                 "active_soft_strikes": 0,
@@ -1145,6 +1308,11 @@ class Guard:
         self, now: float
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
         all_nodes = self.api.list_nodes()
+        self._mihomo_member_by_node = {
+            str(node.get("id") or ""): str(node.get("name") or "")
+            for node in all_nodes
+            if node.get("id") and self._is_mihomo_synced(node)
+        }
         protected_node_ids = self.api.fixed_fallback_node_ids()
         previous_protected = set(
             str(value) for value in self.state.get("protected_node_ids", [])
