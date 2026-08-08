@@ -359,6 +359,22 @@ export function clearMihomoBlacklist(): Promise<{ cleared: number }> {
   return apiRequest("/api/admin/v1/egress-mihomo/blacklist/clear", { method: "POST" }, createObjectDecoder<{ cleared: number }>("mihomo blacklist clear", { cleared: isNumber }));
 }
 
+export function rotateMihomoNode(input: { nodeId: string; oldExitIp?: string }): Promise<{ changed: boolean; nodeId: string; oldExitIp: string; newExitIp: string; newNode: string }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/rotate", { method: "POST", body: input }, createObjectDecoder("mihomo rotate", { changed: isBoolean, nodeId: isString, oldExitIp: isString, newExitIp: isString, newNode: isString }));
+}
+
+export function selectMihomoNode(nodeId: string): Promise<{ changed: boolean; currentNode: string }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/select", { method: "POST", body: { nodeId } }, createObjectDecoder("mihomo select", { changed: isBoolean, currentNode: isString }));
+}
+
+export function banMihomoNode(nodeId: string): Promise<{ bannedNodes: string[] }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/ban", { method: "POST", body: { nodeId } }, createObjectDecoder("mihomo ban", { bannedNodes: isArrayOf(isString) }));
+}
+
+export function unbanMihomoNode(nodeId: string): Promise<{ bannedNodes: string[] }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/unban", { method: "POST", body: { nodeId } }, createObjectDecoder("mihomo unban", { bannedNodes: isArrayOf(isString) }));
+}
+
 type ListEgressNodesInput = {
   page?: number;
   pageSize?: number;

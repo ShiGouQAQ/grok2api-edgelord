@@ -11,6 +11,8 @@ export type QualityGuardPolicy = {
   consecutiveErrors: number;
   quarantineSeconds: number;
   minHealthyNodes: number;
+  rotationUrl?: string;
+  rotatableNodeIds?: string[];
 };
 
 export type QualityGuardNodeState = {
@@ -76,6 +78,8 @@ export type QualityGuardStatus = {
     quarantine_seconds: number;
     min_healthy_nodes: number;
     max_output_tokens: number;
+    rotation_url?: string;
+    rotatable_node_ids?: string[];
   };
   nodes?: Record<string, QualityGuardNodeState>;
   protectedNodeIds?: string[];

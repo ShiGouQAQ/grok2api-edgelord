@@ -1,6 +1,6 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery, useQueryClient, type UseMutationResult } from "@tanstack/react-query";
-import { Activity, AlertTriangle, BarChart3, Bot, Coins, Eye, Gauge, MoreHorizontal, Pencil, Plus, Power, PowerOff, RefreshCw, RotateCcw, RotateCw, Shield, ShieldCheck, ShieldX, TimerReset, Trash2, Zap } from "lucide-react";
+import { Activity, AlertTriangle, ArrowRightLeft, BarChart3, Bot, Coins, Eraser, Eye, Gauge, MoreHorizontal, Pencil, Plus, Power, PowerOff, RefreshCw, RotateCcw, RotateCw, Shield, ShieldCheck, ShieldX, TimerReset, Trash2, Zap } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
@@ -15,12 +15,16 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { getQualityGuardStatus, runQualityTest, updateQualityGuardPolicy, type QualityGuardEvent, type QualityGuardNodeState, type QualityGuardPolicy, type QualityGuardStatistics, type QualityGuardStatus, type QualityTestResult } from "@/features/quality-guard/quality-guard-api";
 import { createEgressNode, deleteEgressNodes, listAllEgressNodes, updateEgressNode, updateEgressNodesEnabled, type EgressNodeDTO, type EgressNodeInput } from "@/features/settings/settings-api";
-import { ErrorState } from "@/shared/components/data-state";
+import { banMihomoNode, clearMihomoBlacklist, getMihomoStatus, rotateMihomoNode, selectMihomoNode, switchMihomoNode, unbanMihomoNode } from "@/features/settings/settings-api";
+import { MihomoMemberList } from "@/features/settings/egress-mihomo";
+import { ErrorState, LoadingState } from "@/shared/components/data-state";
 import { PageHeader } from "@/shared/components/page-header";
 import { cn } from "@/shared/lib/cn";
 
@@ -170,6 +174,8 @@ export function QualityGuardPage() {
 
           {status.statistics ? <StatisticsPanel statistics={status.statistics} locale={i18n.language} /> : null}
 
+          <MihomoGroupEgressCard />
+
           <section className="overflow-hidden rounded-lg bg-card" aria-labelledby="guard-nodes-title">
             <div className="flex flex-col gap-2 border-b px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
               <div>
@@ -252,6 +258,129 @@ function StatisticsPanel({ statistics, locale }: { statistics: QualityGuardStati
       </div>)}
     </div>
   </section>;
+}
+
+function MihomoGroupEgressCard() {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const [selectedMember, setSelectedMember] = useState<string>("");
+  const [rotateOpen, setRotateOpen] = useState(false);
+  const query = useQuery({
+    queryKey: ["egress-mihomo-status"],
+    queryFn: getMihomoStatus,
+    refetchInterval: 2_000,
+    refetchIntervalInBackground: false,
+  });
+  const invalidate = () => void queryClient.invalidateQueries({ queryKey: ["egress-mihomo-status"] });
+
+  const switchMutation = useMutation({
+    mutationFn: switchMihomoNode,
+    onSuccess: (value) => { invalidate(); toast.success(t("settings.egress.mihomoSwitched", { node: value.node })); },
+    onError: (error) => toast.error(error.message),
+  });
+  const clearMutation = useMutation({
+    mutationFn: clearMihomoBlacklist,
+    onSuccess: (value) => { invalidate(); toast.success(t("settings.egress.mihomoBlacklistCleared", { count: value.cleared })); },
+    onError: (error) => toast.error(error.message),
+  });
+  const rotateMutation = useMutation({
+    mutationFn: () => rotateMihomoNode({ nodeId: query.data?.currentNode ?? "", oldExitIp: "" }),
+    onSuccess: () => { setRotateOpen(false); invalidate(); toast.success(t("qualityGuard.mihomoRotated")); },
+    onError: (error) => toast.error(error.message),
+  });
+  const selectMutation = useMutation({
+    mutationFn: (nodeId: string) => selectMihomoNode(nodeId),
+    onSuccess: () => { invalidate(); toast.success(t("qualityGuard.mihomoMemberSelected")); },
+    onError: (error) => toast.error(error.message),
+  });
+  const banMutation = useMutation({
+    mutationFn: (nodeId: string) => banMihomoNode(nodeId),
+    onSuccess: () => { invalidate(); toast.success(t("qualityGuard.mihomoBanned")); },
+    onError: (error) => toast.error(error.message),
+  });
+  const unbanMutation = useMutation({
+    mutationFn: (nodeId: string) => unbanMihomoNode(nodeId),
+    onSuccess: () => { invalidate(); toast.success(t("qualityGuard.mihomoUnbanned")); },
+    onError: (error) => toast.error(error.message),
+  });
+
+  const data = query.data;
+  const busy = selectMutation.isPending || banMutation.isPending || unbanMutation.isPending;
+  const effectiveSelected = selectedMember || data?.currentNode || "";
+
+  return (
+    <section className="overflow-hidden rounded-lg bg-card" aria-labelledby="guard-mihomo-title">
+      <div className="flex flex-col gap-2 border-b px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+        <div>
+          <h2 id="guard-mihomo-title" className="text-sm font-medium">{t("qualityGuard.mihomoGroupExit")}</h2>
+          <p className="mt-1 text-xs text-muted-foreground">{t("qualityGuard.mihomoGroupExitHelp")}</p>
+        </div>
+        {data?.enabled ? <div className="flex flex-wrap items-center gap-1.5 self-start sm:self-auto sm:justify-end">
+          <Tooltip><TooltipTrigger asChild><Button type="button" size="sm" variant="secondary" disabled={switchMutation.isPending} onClick={() => switchMutation.mutate()}>{switchMutation.isPending ? <Spinner /> : <ArrowRightLeft />}{t("settings.egress.mihomoSwitch")}</Button></TooltipTrigger><TooltipContent>{t("qualityGuard.mihomoSwitchConfirmHelp")}</TooltipContent></Tooltip>
+          <Tooltip><TooltipTrigger asChild><Button type="button" size="sm" variant="secondary" disabled={clearMutation.isPending} onClick={() => clearMutation.mutate()}>{clearMutation.isPending ? <Spinner /> : <Eraser />}{t("settings.egress.mihomoClearBlacklist")}</Button></TooltipTrigger><TooltipContent>{t("settings.egress.mihomoClearBlacklistHelp")}</TooltipContent></Tooltip>
+          <Tooltip><TooltipTrigger asChild><Button type="button" size="sm" variant="secondary" disabled={rotateMutation.isPending} onClick={() => setRotateOpen(true)}>{rotateMutation.isPending ? <Spinner /> : <RotateCw />}{t("qualityGuard.mihomoRotate")}</Button></TooltipTrigger><TooltipContent>{t("qualityGuard.mihomoRotateHelp")}</TooltipContent></Tooltip>
+        </div> : null}
+      </div>
+      {query.isError ? <div className="p-4"><ErrorState message={query.error.message} onRetry={() => void query.refetch()} /></div> : null}
+      {query.isPending ? <div className="min-h-28 p-4"><LoadingState /></div> : null}
+      {data ? (
+        !data.enabled ? (
+          <div className="px-4 py-4 sm:px-5"><p className="text-xs text-muted-foreground">{t("settings.egress.mihomoDisabled")}</p></div>
+        ) : (
+          <div className="space-y-4 px-4 py-4 sm:px-5">
+            <dl className="grid gap-x-8 gap-y-3 sm:grid-cols-3">
+              <MihomoValue label={t("settings.egress.mihomoCurrentNode")}>
+                <Badge variant="secondary" className="text-[10px]">{data.currentNode || "—"}</Badge>
+              </MihomoValue>
+              <MihomoValue label={t("settings.egress.mihomoSwitchCount")}>
+                <span className="text-xs tabular-nums text-foreground">{data.switchCount}</span>
+              </MihomoValue>
+              <MihomoValue label={t("settings.egress.mihomoReachable")}>
+                <Badge variant={data.reachable ? "secondary" : "destructive"} className={cn("text-[10px]", data.reachable && "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300")}>{data.reachable ? t("settings.egress.healthy") : t("settings.egress.unhealthy")}</Badge>
+              </MihomoValue>
+            </dl>
+            {data.members.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Select value={effectiveSelected} onValueChange={setSelectedMember}>
+                  <SelectTrigger className="w-48" aria-label={t("qualityGuard.mihomoSelectMember")}><SelectValue placeholder={t("qualityGuard.mihomoSelectMember")} /></SelectTrigger>
+                  <SelectContent>
+                    {data.members.map((member) => <SelectItem key={member.name} value={member.name}>{member.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <Button type="button" size="sm" variant="secondary" disabled={!effectiveSelected || busy} onClick={() => selectMutation.mutate(effectiveSelected)}>{t("qualityGuard.mihomoSelectMember")}</Button>
+                <Button type="button" size="sm" variant="secondary" disabled={!effectiveSelected || busy} onClick={() => banMutation.mutate(effectiveSelected)}>{t("qualityGuard.mihomoBanMember")}</Button>
+                <Button type="button" size="sm" variant="secondary" disabled={!effectiveSelected || busy} onClick={() => unbanMutation.mutate(effectiveSelected)}>{t("qualityGuard.mihomoUnbanMember")}</Button>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">{t("qualityGuard.mihomoNoMembers")}</p>
+            )}
+            <MihomoMemberList members={data.members} testEnabled={data.testEnabled} testMembers={data.testMembers} />
+          </div>
+        )
+      ) : null}
+      <AlertDialog open={rotateOpen} onOpenChange={(open) => { if (!open && !rotateMutation.isPending) setRotateOpen(false); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("qualityGuard.mihomoRotateConfirmTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t("qualityGuard.mihomoRotateConfirmDescription")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={rotateMutation.isPending}>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction disabled={rotateMutation.isPending || !data?.enabled} onClick={(event) => { event.preventDefault(); rotateMutation.mutate(); }}>{rotateMutation.isPending ? <Spinner /> : null}{t("qualityGuard.mihomoRotate")}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </section>
+  );
+}
+
+function MihomoValue({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="min-w-0 space-y-1">
+      <dt className="text-[11px] font-medium text-muted-foreground">{label}</dt>
+      <dd className="min-w-0">{children}</dd>
+    </div>
+  );
 }
 
 function Metric({ icon: Icon, label, value, tone }: { icon: typeof Activity; label: string; value: string; tone?: "good" | "bad" }) {
@@ -404,6 +533,8 @@ const policySchema = z.object({
   consecutiveErrors: z.number().int().min(1).max(20),
   quarantineSeconds: z.number().int().min(30).max(86400),
   minHealthyNodes: z.number().int().min(1).max(1000),
+  rotationUrl: z.string().optional(),
+  rotatableNodeIds: z.array(z.string()).optional(),
 }).refine((value) => value.softTPS < value.hardTPS, { path: ["hardTPS"], message: "softThresholdMustBeLower" });
 
 const DEFAULT_POLICY: QualityGuardPolicy = {
@@ -416,6 +547,8 @@ function PolicyEditor({ open, onOpenChange, status }: { open: boolean; onOpenCha
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const nodeCount = status.config?.node_ids.length ?? 1;
+  const [rotationUrl, setRotationUrl] = useState(status.config?.rotation_url ?? "");
+  const [rotatableNodes, setRotatableNodes] = useState(status.config?.rotatable_node_ids?.join(", ") ?? "");
   const form = useForm<QualityGuardPolicy>({ resolver: zodResolver(policySchema), defaultValues: policyFromStatus(status) });
   const mode = useWatch({ control: form.control, name: "mode" });
   const softTPS = useWatch({ control: form.control, name: "softTPS" });
@@ -438,7 +571,11 @@ function PolicyEditor({ open, onOpenChange, status }: { open: boolean; onOpenCha
   return <Dialog open={open} onOpenChange={onOpenChange}>
     <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
       <DialogHeader><DialogTitle>{t("qualityGuard.editPolicyTitle")}</DialogTitle><DialogDescription>{t("qualityGuard.editPolicyDescription")}</DialogDescription></DialogHeader>
-      <form className="space-y-5" onSubmit={form.handleSubmit((value) => mutation.mutate(value))}>
+      <form className="space-y-5" onSubmit={form.handleSubmit((value) => mutation.mutate({
+        ...value,
+        rotationUrl: rotationUrl.trim(),
+        rotatableNodeIds: rotatableNodes.split(",").map((node) => node.trim()).filter(Boolean),
+      }))}>
         <div className="space-y-2">
           <Label>{t("qualityGuard.mode")}</Label>
           <div role="radiogroup" aria-label={t("qualityGuard.mode")} className="grid grid-cols-3 rounded-md bg-secondary p-1">
@@ -455,6 +592,15 @@ function PolicyEditor({ open, onOpenChange, status }: { open: boolean; onOpenCha
           <PolicyField id="guard-quarantine-seconds" label={t("qualityGuard.quarantineSeconds")} error={form.formState.errors.quarantineSeconds?.message}><Input id="guard-quarantine-seconds" type="number" min={30} max={86400} step={30} {...form.register("quarantineSeconds", { valueAsNumber: true })} /></PolicyField>
           <PolicyField id="guard-minimum-nodes" label={t("qualityGuard.minimumNodes")} error={form.formState.errors.minHealthyNodes?.message}><Input id="guard-minimum-nodes" type="number" min={1} max={nodeCount} {...form.register("minHealthyNodes", { valueAsNumber: true, max: nodeCount })} /></PolicyField>
         </div>
+        <div className="space-y-3 rounded-md border p-4">
+          <p className="text-sm font-medium">{t("policyEditor.rotationSection")}</p>
+          <PolicyField id="guard-rotation-url" label={t("policyEditor.rotationUrl")} help={t("policyEditor.rotationUrlHelp")}>
+            <Input id="guard-rotation-url" value={rotationUrl} onChange={(event) => setRotationUrl(event.target.value)} placeholder="http://127.0.0.1:9090" />
+          </PolicyField>
+          <PolicyField id="guard-rotatable-nodes" label={t("policyEditor.rotatableNodeIds")} help={t("policyEditor.rotatableNodeIdsHelp")}>
+            <Input id="guard-rotatable-nodes" value={rotatableNodes} onChange={(event) => setRotatableNodes(event.target.value)} placeholder="node-a, node-b" />
+          </PolicyField>
+        </div>
         {thresholdsInvalid ? <p className="text-xs text-destructive">{t("qualityGuard.softThresholdMustBeLower")}</p> : null}
         <DialogFooter className="gap-2 sm:justify-between">
           <Button type="button" variant="ghost" size="sm" onClick={resetDefaults}><RotateCcw />{t("qualityGuard.restoreDefaults")}</Button>
@@ -465,9 +611,9 @@ function PolicyEditor({ open, onOpenChange, status }: { open: boolean; onOpenCha
   </Dialog>;
 }
 
-function PolicyField({ id, label, error, children }: { id: string; label: string; error?: string; children: ReactNode }) {
+function PolicyField({ id, label, error, help, children }: { id: string; label: string; error?: string; help?: string; children: ReactNode }) {
   const { t } = useTranslation();
-  return <div className="space-y-2"><Label htmlFor={id}>{label}</Label>{children}{error && error !== "softThresholdMustBeLower" ? <p className="text-xs text-destructive">{t("qualityGuard.invalidPolicyValue")}</p> : null}</div>;
+  return <div className="space-y-2"><Label htmlFor={id}>{label}</Label>{children}{error && error !== "softThresholdMustBeLower" ? <p className="text-xs text-destructive">{t("qualityGuard.invalidPolicyValue")}</p> : null}{help ? <p className="whitespace-pre-line text-xs leading-5 text-muted-foreground">{help}</p> : null}</div>;
 }
 
 function policyFromStatus(status: QualityGuardStatus): QualityGuardPolicy {
@@ -478,6 +624,7 @@ function policyFromStatus(status: QualityGuardStatus): QualityGuardPolicy {
     passivePollSeconds: config.passive_poll_seconds, softTPS: config.soft_tps, hardTPS: config.hard_tps,
     consecutiveSoft: config.consecutive_soft, consecutiveErrors: config.consecutive_errors,
     quarantineSeconds: config.quarantine_seconds, minHealthyNodes: config.min_healthy_nodes,
+    rotationUrl: config.rotation_url ?? "", rotatableNodeIds: config.rotatable_node_ids ?? [],
   };
 }
 
