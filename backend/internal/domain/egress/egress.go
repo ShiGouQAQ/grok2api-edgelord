@@ -1,6 +1,9 @@
 package egress
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Mode string
 
@@ -54,6 +57,12 @@ type Node struct {
 	UpdatedAt                   time.Time
 }
 
+// IsMihomoSynced 报告该节点是否由 Mihomo 测试组成员同步器维护。同步节点
+// 默认禁用、仅供质量守卫逐成员探测，绝不可作为生产出口或固定回退节点。
+func (n Node) IsMihomoSynced() bool {
+	return strings.HasPrefix(n.SourceKey, "mihomo:")
+}
+
 type PublicNode struct {
 	ID                   uint64
 	Name                 string
@@ -62,6 +71,7 @@ type PublicNode struct {
 	ProxyConfigured      bool
 	ProxyPool            bool
 	SourceID             uint64
+	SourceKey            string
 	AccountCapacity      int
 	UserAgent            string
 	CookieConfigured     bool

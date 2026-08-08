@@ -1310,6 +1310,10 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 			if !node.Enabled {
 				continue
 			}
+			// 同步测试节点不进生产池，仅 guard 探测（见 IsMihomoSynced）。
+			if node.IsMihomoSynced() {
+				continue
+			}
 			// A fixed fallback is a reserved last resort, not another member of
 			// the primary pool. It is validated again immediately before use.
 			if _, reserved := reservedFallbackNodes[node.ID]; reserved {
@@ -1476,6 +1480,11 @@ func (m *Manager) fixedFallbackNode(ctx context.Context, scope domain.Scope, nod
 	}
 	if selected.ProxyPool {
 		return domain.Node{}, fmt.Errorf("固定回退节点 %d 使用代理池模式", nodeID)
+	}
+	// 同步测试节点禁止作为固定回退，镜像上方代理池拒绝逻辑：其出口仅供
+	// 质量守卫探测，任何生产流量（含回退）都不应落到它上面。
+	if selected.IsMihomoSynced() {
+		return domain.Node{}, fmt.Errorf("固定回退节点 %d 是 Mihomo 同步测试节点", nodeID)
 	}
 	if strings.TrimSpace(selected.EncryptedProxyURL) == "" {
 		return domain.Node{}, fmt.Errorf("固定回退节点 %d 未配置代理地址", nodeID)
