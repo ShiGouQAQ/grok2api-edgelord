@@ -729,6 +729,7 @@ type nodeResponse struct {
 	ProxyConfigured      bool                `json:"proxyConfigured"`
 	ProxyPool            bool                `json:"proxyPool"`
 	SourceID             uint64              `json:"sourceId,omitempty,string"`
+	SourceKey            string              `json:"sourceKey,omitempty"`
 	AccountCapacity      int                 `json:"accountCapacity"`
 	UserAgent            string              `json:"userAgent"`
 	CookieConfigured     bool                `json:"cookieConfigured"`
@@ -1008,7 +1009,7 @@ func newNodeResponse(value egressdomain.PublicNode) nodeResponse {
 		ID: value.ID, Name: value.Name, Scope: string(value.Scope), Enabled: value.Enabled,
 		ProxyConfigured: value.ProxyConfigured, ProxyPool: value.ProxyPool, UserAgent: value.UserAgent, CookieConfigured: value.CookieConfigured,
 		AccountBoundProxy: value.AccountBoundProxy,
-		SourceID:          value.SourceID, AccountCapacity: value.AccountCapacity,
+		SourceID:          value.SourceID, SourceKey: value.SourceKey, AccountCapacity: value.AccountCapacity,
 		Health: value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
 		ProbeStatus: string(value.ProbeStatus), LastProbedAt: value.LastProbedAt, ProbeLatencyMS: value.ProbeLatencyMS, ExitIP: value.ExitIP, ProbeError: value.ProbeError,
 		ProbeProvider: string(value.ProbeProvider),

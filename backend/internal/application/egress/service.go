@@ -978,6 +978,7 @@ func (s *Service) publicNode(value domain.Node) domain.PublicNode {
 		ProxyConfigured: value.EncryptedProxyURL != "", UserAgent: userAgent, CookieConfigured: value.EncryptedCloudflareCookie != "",
 		ProxyPool:         proxyPool,
 		SourceID:          value.SourceID,
+		SourceKey:         value.SourceKey,
 		AccountCapacity:   value.AccountCapacity,
 		AccountBoundProxy: accountBoundProxy,
 		Health:            health, FailureCount: failureCount, CooldownUntil: cooldownUntil, LastError: lastError,
