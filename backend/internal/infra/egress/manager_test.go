@@ -3340,8 +3340,9 @@ func TestMihomoPlain403NeverRotates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 未分类 403（JS 挑战 / 账号级封禁 / 配额拒绝）：Mihomo 启用也不轮换组
-	// 出口，只冷却 Go 节点，与 mihomo==nil 路径一致。
+	// 未分类 403（JS 挑战 / 账号级封禁 / 配额拒绝）：Mihomo 启用时不轮换组
+	// 出口，也不冷却 Go 节点——所有节点共享同一组出口，冷却单节点对共享
+	// 出口无效，与 Resin/原生池的 isProxyPoolNode 早退语义对齐。
 	repository := &synchronizedEgressRepository{node: domain.Node{ID: 1, Name: "node", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
 	manager := NewManager(repository, cipher)
 	group, groupMu := mihomoTestGroup()
@@ -3365,10 +3366,10 @@ func TestMihomoPlain403NeverRotates(t *testing.T) {
 	if mihomo.SwitchCount() != 0 {
 		t.Fatalf("unclassified 403 must never call SwitchAndBlacklistCurrent: switches=%d", mihomo.SwitchCount())
 	}
-	waitForTrue(t, 3*time.Second, func() bool { return repository.updateCount() == 1 }, "unclassified 403 cools the node")
+	time.Sleep(100 * time.Millisecond)
 	node := repository.snapshot()
-	if node.Health >= 1 || node.LastError != "anti-bot rejection" {
-		t.Fatalf("unclassified 403 must cool the node: %#v", node)
+	if node.Health != 1 || node.LastError != "" || node.FailureCount != 0 {
+		t.Fatalf("unclassified 403 must not cool the node (shared exit): %#v", node)
 	}
 }
 

@@ -2187,32 +2187,39 @@ func (m *Manager) feedbackForScope(ctx context.Context, scope domain.Scope, node
 		m.mihomoMu.RLock()
 		mihomo := m.mihomo
 		m.mihomoMu.RUnlock()
-		if mihomo != nil && nodeBanned {
-			// Mihomo 出口 = 超大共享池：不冷却 Go 节点；异步轮换出口 IP，
-			// Clearance 在下次获取时基于新 IP 重新绑定。切换失败则回退冷却，
-			// 避免节点持续在失效出口上重试；切换被合并（Merged）说明已有在途
-			// 切换负责出口轮换，同样不加冷却。
-			// 所有 DB 节点共享同一个 Mihomo 组出口；只有调用方显式分类为
-			// NODE_BANNED（出口 IP 被封）的 403 才轮换组出口，未分类的 403
-			// （JS 挑战、账号级封禁、配额拒绝）一律冷却节点，绝不轮换共享出口。
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				switch mihomo.SwitchAndBlacklistCurrent(ctx, "request_403") {
-				case MihomoSwitchDone:
-					m.verifyNodeAfterSwitch(ctx, value)
-					// G2：出口已切换，失效依赖旧出口的 client 池——keep-alive 隧道
-					// 会 pin 旧出口直到空闲超时，池不失效则后续请求继续走旧出口；
-					// 与 Resin 账号级路径（InvalidateClearance 关闭租约池）一致。
-					if !m.notifyExitChanged(value.Scope) {
-						m.OnExitChanged(value.Scope)
+		if mihomo != nil {
+			if nodeBanned {
+				// Mihomo 出口 = 超大共享池：不冷却 Go 节点；异步轮换出口 IP，
+				// Clearance 在下次获取时基于新 IP 重新绑定。切换失败则回退冷却，
+				// 避免节点持续在失效出口上重试；切换被合并（Merged）说明已有在途
+				// 切换负责出口轮换，同样不加冷却。
+				// 所有 DB 节点共享同一个 Mihomo 组出口；只有调用方显式分类为
+				// NODE_BANNED（出口 IP 被封）的 403 才轮换组出口。
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					switch mihomo.SwitchAndBlacklistCurrent(ctx, "request_403") {
+					case MihomoSwitchDone:
+						m.verifyNodeAfterSwitch(ctx, value)
+						// G2：出口已切换，失效依赖旧出口的 client 池——keep-alive 隧道
+						// 会 pin 旧出口直到空闲超时，池不失效则后续请求继续走旧出口；
+						// 与 Resin 账号级路径（InvalidateClearance 关闭租约池）一致。
+						if !m.notifyExitChanged(value.Scope) {
+							m.OnExitChanged(value.Scope)
+						}
+					case MihomoSwitchFailed:
+						m.applyForbiddenCooldown(ctx, value, scope)
+					case MihomoSwitchMerged:
+						// 在途切换负责出口，静默
 					}
-				case MihomoSwitchFailed:
-					m.applyForbiddenCooldown(ctx, value, scope)
-				case MihomoSwitchMerged:
-					// 在途切换负责出口，静默
-				}
-			}()
+				}()
+				return
+			}
+			// 未分类 403（JS 挑战 / 账号级封禁 / 配额拒绝）：所有 DB 节点共享
+			// 同一个 Mihomo 组出口，冷却单个节点对共享出口无效（下一个请求仍
+			// 走同一出口），反而污染健康状态。与 Resin/原生池的 isProxyPoolNode
+			// 早退语义对齐：challenge 由 clearance 刷新解决，账号级问题由调用方
+			// 重试兜底。绝不轮换共享出口（与 NODE_BANNED 路径区分）。
 			return
 		}
 		m.applyForbiddenCooldown(ctx, value, scope)
