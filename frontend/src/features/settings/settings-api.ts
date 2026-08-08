@@ -310,6 +310,8 @@ export function updateSettings(revision: string, config: SettingsConfigDTO): Pro
   return apiRequest("/api/admin/v1/settings", { method: "PUT", body: { revision, config } }, decodeSettingsSnapshot);
 }
 
+export type MihomoMemberDTO = { name: string; delayMs: number; banned: boolean; current: boolean; provider: string };
+
 export type MihomoStatusDTO = {
   enabled: boolean;
   apiUrl: string;
@@ -319,8 +321,15 @@ export type MihomoStatusDTO = {
   switchCount: number;
   reachable: boolean;
   lastError: string;
+  epoch: number;
+  testEnabled: boolean;
+  testGroupName: string;
+  testCurrentNode: string;
+  members: MihomoMemberDTO[];
+  testMembers: MihomoMemberDTO[];
 };
 
+const mihomoMemberValidator = hasShape({ name: isString, delayMs: isNumber, banned: isBoolean, current: isBoolean, provider: isString });
 const mihomoStatusValidator = createObjectDecoder<MihomoStatusDTO>("mihomo status", {
   enabled: isBoolean,
   apiUrl: isString,
@@ -330,6 +339,12 @@ const mihomoStatusValidator = createObjectDecoder<MihomoStatusDTO>("mihomo statu
   switchCount: isNumber,
   reachable: isBoolean,
   lastError: isString,
+  epoch: isNumber,
+  testEnabled: isBoolean,
+  testGroupName: isString,
+  testCurrentNode: isString,
+  members: isArrayOf(mihomoMemberValidator),
+  testMembers: isArrayOf(mihomoMemberValidator),
 });
 
 export function getMihomoStatus(): Promise<MihomoStatusDTO> {

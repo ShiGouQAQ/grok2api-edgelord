@@ -9,6 +9,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { DashboardPanel } from "@/features/dashboard/dashboard-panel";
 import { clearMihomoBlacklist, getMihomoStatus, switchMihomoNode } from "@/features/settings/settings-api";
+import { MihomoMemberList } from "@/features/settings/egress-mihomo";
 import { cn } from "@/shared/lib/cn";
 
 // DashboardMihomo 以紧凑小卡展示完整的 Mihomo 出口状态与快捷操作；未启用或未配置时隐藏。
@@ -71,6 +72,9 @@ export function DashboardMihomo() {
           </StatusValue>
         ) : null}
       </dl>
+      <div className="mt-3">
+        <MihomoMemberList members={data.members} testEnabled={data.testEnabled} testMembers={data.testMembers} />
+      </div>
       <div className="mt-3 flex items-center gap-1.5">
         <Tooltip><TooltipTrigger asChild><Button type="button" size="sm" variant="secondary" disabled={switchNode.isPending} onClick={() => switchNode.mutate()}>{switchNode.isPending ? <Spinner /> : <ArrowRightLeft />}{t("settings.egress.mihomoSwitch")}</Button></TooltipTrigger><TooltipContent>{t("settings.egress.mihomoSwitchHelp")}</TooltipContent></Tooltip>
         <Tooltip><TooltipTrigger asChild><Button type="button" size="sm" variant="secondary" disabled={clearBlacklist.isPending} onClick={() => clearBlacklist.mutate()}>{clearBlacklist.isPending ? <Spinner /> : <Eraser />}{t("settings.egress.mihomoClearBlacklist")}</Button></TooltipTrigger><TooltipContent>{t("settings.egress.mihomoClearBlacklistHelp")}</TooltipContent></Tooltip>
