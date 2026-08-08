@@ -193,6 +193,8 @@ type Manager struct {
 	lastClearanceCleanup   time.Time
 	solver                 clearanceSolver
 	clearanceLock          repository.DistributedLock
+	epochStore             repository.EgressEpochStore
+	switchLock             repository.DistributedLock
 	newBuildClient         func(string, time.Duration) (requestClient, error)
 	newBuildEnvClient      func(time.Duration) (requestClient, error)
 	newBrowserClient       func(string, string) (*browserClient, error)
@@ -467,6 +469,23 @@ func (m *Manager) SetClearanceLock(value repository.DistributedLock) {
 	m.clearanceMu.Unlock()
 }
 
+// SetEpochStore 注入跨实例共享的 Mihomo 出口代际版本号存储（多实例部署为
+// Redis 实现，单实例可传 nil 或本地实现）；UpdateMihomoConfig 时透传给生产
+// 客户端，测试组客户端保持本地行为。
+func (m *Manager) SetEpochStore(value repository.EgressEpochStore) {
+	m.mihomoMu.Lock()
+	m.epochStore = value
+	m.mihomoMu.Unlock()
+}
+
+// SetSwitchLock 注入出口切换的跨实例互斥锁，与 SetClearanceLock 共用同一
+// refreshLock 实例；nil 时回退本地无锁切换（单实例零回归）。
+func (m *Manager) SetSwitchLock(value repository.DistributedLock) {
+	m.mihomoMu.Lock()
+	m.switchLock = value
+	m.mihomoMu.Unlock()
+}
+
 func (m *Manager) UpdateClearanceConfig(value ClearanceConfig) {
 	value.Mode = strings.TrimSpace(value.Mode)
 	value.FlareSolverrURL = strings.TrimSpace(value.FlareSolverrURL)
@@ -506,6 +525,9 @@ func (m *Manager) UpdateMihomoConfig(value MihomoConfig) {
 	} else {
 		m.mihomo.UpdateConfig(value)
 	}
+	// 透传跨实例协调组件：epochStore/switchLock 为 nil 时客户端回退本地行为。
+	m.mihomo.SetEpochStore(m.epochStore)
+	m.mihomo.SetSwitchLock(m.switchLock)
 	m.mihomoConfig = value
 	m.updateMihomoTestLocked(value)
 }

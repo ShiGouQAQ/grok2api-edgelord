@@ -2883,6 +2883,57 @@ func TestProxyPoolForbiddenSkipsMihomoSwitch(t *testing.T) {
 	}
 }
 
+// epochStoreStub 验证 Manager → MihomoClient 的 epoch 注入链路。
+type epochStoreStub struct {
+	value uint64
+}
+
+func (s *epochStoreStub) BumpEpoch(context.Context, string) (uint64, error) {
+	s.value++
+	return s.value, nil
+}
+
+func (s *epochStoreStub) GetEpoch(context.Context, string) (uint64, error) {
+	return s.value, nil
+}
+
+func TestMihomoEpochStoreAndSwitchLockInjection(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &synchronizedEgressRepository{node: domain.Node{ID: 1, Name: "node", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
+	manager := NewManager(repository, cipher)
+	// nil 注入必须安全：客户端保持本地回退，不 panic。
+	manager.SetEpochStore(nil)
+	manager.SetSwitchLock(nil)
+	manager.UpdateMihomoConfig(MihomoConfig{Enabled: true, APIURL: "http://mihomo.invalid", GroupName: "XAI-GROUP"})
+	manager.mihomoMu.RLock()
+	mihomo := manager.mihomo
+	manager.mihomoMu.RUnlock()
+	if mihomo == nil || mihomo.epochStore != nil || mihomo.switchLock != nil {
+		t.Fatalf("nil injection must stay nil on client: %#v", mihomo)
+	}
+	// nil 注入下本地 atomic epoch 仍驱动 mihomoEpoch（零回归）。
+	baseline := manager.mihomoEpoch()
+	mihomo.epoch.Add(1)
+	if got := manager.mihomoEpoch(); got != baseline+1 {
+		t.Fatalf("nil store must keep local epoch working: baseline=%d got=%d", baseline, got)
+	}
+
+	// 非 nil 注入必须透传到生产客户端。
+	epochStore := &epochStoreStub{}
+	manager.SetEpochStore(epochStore)
+	manager.SetSwitchLock(alwaysAcquiredDistributedLock{})
+	manager.UpdateMihomoConfig(MihomoConfig{Enabled: true, APIURL: "http://mihomo.invalid", GroupName: "XAI-GROUP"})
+	manager.mihomoMu.RLock()
+	mihomo = manager.mihomo
+	manager.mihomoMu.RUnlock()
+	if mihomo == nil || mihomo.epochStore != epochStore || mihomo.switchLock == nil {
+		t.Fatalf("injected components not propagated to mihomo client: store=%v lock=%v", mihomo.epochStore, mihomo.switchLock)
+	}
+}
+
 func TestMihomoSwitchSuccessSkipsGoCooldown(t *testing.T) {
 	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	if err != nil {

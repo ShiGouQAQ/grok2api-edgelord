@@ -153,6 +153,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	var reasoningReplayStore repository.ReasoningReplayRepository
 	var deviceSessions repository.DeviceSessionRepository
 	var refreshLock repository.DistributedLock
+	var epochStore repository.EgressEpochStore
 	var settingsBus repository.SettingsChangeBus
 	var quotaQueue repository.QuotaRecoveryQueue
 	var quotaRefreshState repository.QuotaRefreshCoordinator
@@ -181,6 +182,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		reasoningReplayStore = redisruntime.NewReasoningReplayStore(redisStore)
 		deviceSessions = redisruntime.NewDeviceSessionStore(redisStore)
 		refreshLock = redisruntime.NewLockStore(redisStore)
+		epochStore = redisStore
 		settingsBus = redisStore
 		quotaQueue = redisStore
 		quotaRefreshState = redisStore
@@ -192,6 +194,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		reasoningReplayStore = memory.NewReasoningReplayStore(cfg.Routing.ReasoningReplayMaxEntries)
 		deviceSessions = memory.NewDeviceSessionStore()
 		refreshLock = memory.NewLockStore()
+		epochStore = memory.NewEgressEpochStore()
 		quotaQueue = memory.NewQuotaRecoveryQueue()
 		quotaRefreshState = memory.NewQuotaRefreshCoordinator()
 	default:
@@ -204,6 +207,11 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressManager := infraegress.NewManager(egressRepo, cipher)
 	egressManager.SetLogger(logger)
 	egressManager.SetClearanceLock(refreshLock)
+	// 多实例部署（redis）：epochStore 与 switchLock 均共享同一 refreshLock 通道，
+	// 出口 epoch 跨实例一致；单实例（memory）：epochStore 为本地实现、switchLock
+	// 为本地锁，Mihomo 客户端对 nil 注入同样安全回退。
+	egressManager.SetEpochStore(epochStore)
+	egressManager.SetSwitchLock(refreshLock)
 	egressManager.UpdateClearanceConfig(clearanceConfig(cfg))
 	egressManager.UpdateMihomoConfig(mihomoConfig(cfg))
 	egressManager.UpdateBuildResponseHeaderTimeout(cfg.Provider.Build.ResponseHeaderTimeout.Value())
