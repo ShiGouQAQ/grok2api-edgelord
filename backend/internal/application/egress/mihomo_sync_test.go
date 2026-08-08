@@ -129,7 +129,7 @@ func newMihomoSyncerForTest(t *testing.T, repo *mihomoSyncRepositoryStub, guardS
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewMihomoSyncer(repo, cipher, guardStatePath)
+	return NewMihomoSyncer(repo, cipher, guardStatePath, "http://127.0.0.1:7891")
 }
 
 func writeGuardState(t *testing.T, disabledNodeIDs ...uint64) string {

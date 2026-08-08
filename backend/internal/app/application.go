@@ -317,7 +317,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	// Mihomo 测试组成员同步器：guardStatePath 与 HTTP handler 的
 	// QualityGuardStatePath 同源（qualityGuardPath("state.json")），使同步器
 	// 能识别被守护隔离的节点并跳过定向 enable。
-	egressService.SetMihomoSyncer(egressapp.NewMihomoSyncer(egressRepo, cipher, qualityGuardPath("state.json")))
+	egressService.SetMihomoSyncer(egressapp.NewMihomoSyncer(egressRepo, cipher, qualityGuardPath("state.json"), mihomoTestProxyURL(cfg)))
 	egressManager.SetFailureProber(egressService.TestNode)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
 	qualityGuardIdentity, err := clientKeyService.EnsureQualityGuardIdentity(ctx, cfg.QualityGuard.Enabled)
@@ -476,6 +476,14 @@ func clearanceConfig(cfg config.Config) infraegress.ClearanceConfig {
 	}
 }
 
+func mihomoTestProxyURL(cfg config.Config) string {
+	value := strings.TrimSpace(cfg.Provider.Web.MihomoTestProxyURL)
+	if value == "" {
+		value = config.DefaultMihomoTestProxyURL
+	}
+	return value
+}
+
 func mihomoConfig(cfg config.Config) infraegress.MihomoConfig {
 	apiURL := cfg.Provider.Web.MihomoAPIURL
 	if strings.TrimSpace(apiURL) == "" {
@@ -505,10 +513,7 @@ func mihomoConfig(cfg config.Config) infraegress.MihomoConfig {
 	if testGroupName == "" {
 		testGroupName = config.DefaultMihomoTestGroupName
 	}
-	testProxyURL := strings.TrimSpace(cfg.Provider.Web.MihomoTestProxyURL)
-	if testProxyURL == "" {
-		testProxyURL = config.DefaultMihomoTestProxyURL
-	}
+	testProxyURL := mihomoTestProxyURL(cfg)
 	// DelayProbeURL 为空 = 禁用主动延迟探测（回退首可用节点，保持现状安全）。
 	delayProbeURL := strings.TrimSpace(cfg.Provider.Web.MihomoDelayProbeURL)
 	if delayProbeURL == "" {

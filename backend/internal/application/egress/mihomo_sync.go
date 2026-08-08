@@ -22,8 +22,10 @@ const (
 	// 该 source 从不参与订阅拉取（Enabled=false 且无 URL），仅作为成员节点
 	// 的归属标记；首版单测试组约定一个 source，多组需扩展为按组映射。
 	mihomoSyncSourceName = "mihomo-test-group"
-	// mihomoDefaultProxyURL 是同步成员的默认本地出口，经 cipher 加密后落库。
-	mihomoDefaultProxyURL = "socks5://127.0.0.1:7891"
+	// mihomoDefaultTestProxyURL 是同步成员测试通道出口的默认值；
+	// 生产部署应经 NewMihomoSyncer 传入实际可达地址（如 http://grok-mihomo:7891，
+	// 容器环境 127.0.0.1 指向本容器回环而非 mihomo）。
+	mihomoDefaultTestProxyURL = "http://127.0.0.1:7891"
 	// mihomoMaxGuardStateBytes 镜像 transport 层 qualityGuardState 读取上限。
 	mihomoMaxGuardStateBytes = 8 << 20
 )
@@ -46,14 +48,18 @@ type MihomoSyncer struct {
 	repo           MihomoSyncRepository
 	cipher         *security.Cipher
 	guardStatePath string
+	testProxyURL   string
 	mu             sync.Mutex
 	lastErr        error
 }
 
 // NewMihomoSyncer 构造同步器；guardStatePath 为空或文件缺失时视为无
-// guard-owned 节点。
-func NewMihomoSyncer(repo MihomoSyncRepository, cipher *security.Cipher, guardStatePath string) *MihomoSyncer {
-	return &MihomoSyncer{repo: repo, cipher: cipher, guardStatePath: strings.TrimSpace(guardStatePath)}
+// guard-owned 节点。testProxyURL 为空时回退默认值。
+func NewMihomoSyncer(repo MihomoSyncRepository, cipher *security.Cipher, guardStatePath string, testProxyURL string) *MihomoSyncer {
+	if testProxyURL = strings.TrimSpace(testProxyURL); testProxyURL == "" {
+		testProxyURL = mihomoDefaultTestProxyURL
+	}
+	return &MihomoSyncer{repo: repo, cipher: cipher, guardStatePath: strings.TrimSpace(guardStatePath), testProxyURL: testProxyURL}
 }
 
 // LastError 返回最近一次 Sync 的错误（幂等查询，不触发重试）。
@@ -108,7 +114,7 @@ func (s *MihomoSyncer) Sync(ctx context.Context, members []string, groupName str
 			byName[name] = updated
 			continue
 		}
-		encryptedProxy, encryptErr := s.cipher.Encrypt(mihomoDefaultProxyURL)
+		encryptedProxy, encryptErr := s.cipher.Encrypt(s.testProxyURL)
 		if encryptErr != nil {
 			s.lastErr = encryptErr
 			return 0, 0, encryptErr
