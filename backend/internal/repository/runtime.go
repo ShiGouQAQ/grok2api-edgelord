@@ -161,6 +161,51 @@ type InvalidationBus interface {
 	ListenInvalidations(ctx context.Context, handler func(context.Context, InvalidationEvent) error) error
 }
 
+type EgressEventKind string
+
+const (
+	// EgressEventExitChanged 出口已切换/轮换：接收方失效依赖旧出口的 client 池。
+	EgressEventExitChanged EgressEventKind = "exit_changed"
+	// EgressEventNodeBanned / EgressEventNodeUnbanned / EgressEventBlacklistCleared
+	// 是 Mihomo 黑名单操作：接收方合并进本地 blacklist（只增/只清，幂等）。
+	EgressEventNodeBanned       EgressEventKind = "node_banned"
+	EgressEventNodeUnbanned     EgressEventKind = "node_unbanned"
+	EgressEventBlacklistCleared EgressEventKind = "blacklist_cleared"
+)
+
+// EgressEvent 是在实例之间传递的出口协调事件，载荷最小化：只携带语义字段
+// （出口变更 / 黑名单操作），不做状态复制；Mihomo 节点集与黑名单本体仍是
+// 进程内状态，事件只负责让各实例执行本地等价动作。
+type EgressEvent struct {
+	Kind     EgressEventKind `json:"kind"`
+	Group    string          `json:"group,omitempty"`    // Mihomo 组名；黑名单事件必填
+	NodeName string          `json:"nodeName,omitempty"` // ban/unban 目标节点
+	Scope    string          `json:"scope,omitempty"`    // exit_changed 作用域（空 = 全部作用域）
+
+	SourceInstance string    `json:"sourceInstance,omitempty"`
+	PublishedAt    time.Time `json:"publishedAt,omitempty"`
+}
+
+func (e EgressEvent) Valid() bool {
+	switch e.Kind {
+	case EgressEventExitChanged:
+		return true
+	case EgressEventNodeBanned, EgressEventNodeUnbanned:
+		return e.Group != "" && e.NodeName != ""
+	case EgressEventBlacklistCleared:
+		return e.Group != ""
+	default:
+		return false
+	}
+}
+
+// EgressEventBus 在实例之间分发出口变更与 Mihomo 黑名单协调事件，语义镜像
+// InvalidationBus：发布方不复制权威状态，接收方应用本地等价动作。
+type EgressEventBus interface {
+	PublishEgressEvent(ctx context.Context, event EgressEvent) error
+	ListenEgressEvents(ctx context.Context, handler func(context.Context, EgressEvent) error) error
+}
+
 // QuotaRecoveryQueue 保存分模式额度的到期探测事件，支持多实例原子认领。
 type QuotaRecoveryQueue interface {
 	ScheduleQuotaRecovery(ctx context.Context, value account.QuotaRecoveryEvent) error

@@ -426,6 +426,48 @@ func (s *Store) ListenInvalidations(ctx context.Context, handler func(context.Co
 	}
 }
 
+// PublishEgressEvent 发布出口变更/黑名单协调事件，供其他实例应用本地等价
+// 动作（client 池失效 / 黑名单合并）。载荷最小化：不复制状态，只传语义。
+func (s *Store) PublishEgressEvent(ctx context.Context, event repository.EgressEvent) error {
+	if !event.Valid() {
+		return errors.New("invalid egress event")
+	}
+	if event.PublishedAt.IsZero() {
+		event.PublishedAt = time.Now().UTC()
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	return s.client.Publish(ctx, s.key("events", "egress"), payload).Err()
+}
+
+func (s *Store) ListenEgressEvents(ctx context.Context, handler func(context.Context, repository.EgressEvent) error) error {
+	pubsub := s.client.Subscribe(ctx, s.key("events", "egress"))
+	defer pubsub.Close()
+	if _, err := pubsub.Receive(ctx); err != nil {
+		return err
+	}
+	channel := pubsub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case message, ok := <-channel:
+			if !ok {
+				return errors.New("Redis egress event channel closed")
+			}
+			var event repository.EgressEvent
+			if err := json.Unmarshal([]byte(message.Payload), &event); err != nil || !event.Valid() {
+				continue
+			}
+			if err := handler(ctx, event); err != nil {
+				return err
+			}
+		}
+	}
+}
+
 // ListenSettingsChanges 监听设置变更并调用重载函数，go-redis 会在连接中断后自动重连。
 func (s *Store) ListenSettingsChanges(ctx context.Context, handler func(context.Context) error) error {
 	pubsub := s.client.Subscribe(ctx, s.key("events", "settings"))
