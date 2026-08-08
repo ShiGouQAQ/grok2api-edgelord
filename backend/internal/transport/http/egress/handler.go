@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -163,10 +164,21 @@ type mihomoRotateRequest struct {
 // mihomoRotate 实现质量守护 rotate_node 契约：组模型下所有 DB 节点共享
 // 同一个 Mihomo 组出口，nodeId 仅作契约校验、不参与选路。响应只读字段是
 // changed（guard 要求 changed==true 否则判定轮换失败）。
+//
+// 白名单防护（G3）：rotate 是组级操作，会轮换整组出口（包括 protected 的固定
+// 回退节点），因此不能由任意 internal token 持有者触发。nodeId 必须命中
+// bootstrap rotatable_node_ids 白名单：白名单为空 → 一律 403（未配置可轮换
+// 节点即不允许轮换，fail-closed）；白名单非空且 nodeId 不在其中 → 403。
+// 白名单只限制谁能触发组级 rotate，不参与选路。空 nodeId 保持 400。
 func (h *Handler) mihomoRotate(c *gin.Context) {
 	var request mihomoRotateRequest
 	if c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.NodeID) == "" {
 		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	nodeID := strings.TrimSpace(request.NodeID)
+	if !slices.Contains(h.guardBootstrapRotatableNodeIDs(), nodeID) {
+		response.Error(c, http.StatusForbidden, "nodeNotRotatable", "节点不在可轮换白名单内")
 		return
 	}
 	value, err := h.service.Rotate(c.Request.Context())
@@ -175,7 +187,7 @@ func (h *Handler) mihomoRotate(c *gin.Context) {
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{
-		"changed": value.Changed, "nodeId": request.NodeID, "oldExitIp": request.OldExitIP,
+		"changed": value.Changed, "nodeId": nodeID, "oldExitIp": request.OldExitIP,
 		"newExitIp": "", "newNode": value.NewNode,
 	})
 }

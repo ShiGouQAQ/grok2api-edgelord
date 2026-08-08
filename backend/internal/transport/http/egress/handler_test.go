@@ -403,12 +403,27 @@ func (value stubMihomoManager) MihomoTestUnban(string) (int, error) {
 }
 
 func newQualityGuardRotateRouter(service *egressapp.Service) *gin.Engine {
+	return newQualityGuardRotateRouterWithPaths(service)
+}
+
+// newQualityGuardRotateRouterWithPaths 允许注入 bootstrap 路径夹具，用于
+// rotate 白名单（rotatable_node_ids）相关测试。
+func newQualityGuardRotateRouterWithPaths(service *egressapp.Service, paths ...string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	internal := router.Group("/api/internal/v1/quality-guard")
 	internal.Use(middleware.QualityGuardAuth("guard-secret"))
-	NewHandler(service).RegisterQualityGuard(internal)
+	NewHandler(service, paths...).RegisterQualityGuard(internal)
 	return router
+}
+
+func writeQualityGuardBootstrapFixture(t *testing.T, directory, bootstrap string) string {
+	t.Helper()
+	path := directory + "/bootstrap.json"
+	if err := os.WriteFile(path, []byte(bootstrap), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestQualityGuardRotateRequiresToken(t *testing.T) {
@@ -421,15 +436,60 @@ func TestQualityGuardRotateRequiresToken(t *testing.T) {
 }
 
 func TestQualityGuardRotateReportsChanged(t *testing.T) {
+	bootstrapPath := writeQualityGuardBootstrapFixture(t, t.TempDir(), `{"version":1,"enabled":true,"config":{"rotatable_node_ids":["8"]}}`)
 	service := egressapp.NewService(nil, nil, "")
 	service.SetMihomoManager(stubMihomoManager{rotation: egressapp.MihomoRotation{Changed: true, NewNode: "fast"}})
-	router := newQualityGuardRotateRouter(service)
+	router := newQualityGuardRotateRouterWithPaths(service, "", "", bootstrapPath)
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/rotate", bytes.NewBufferString(`{"nodeId":"8","oldExitIp":"10.0.0.1"}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer guard-secret")
 	router.ServeHTTP(recorder, request)
 	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"changed":true`) || !strings.Contains(recorder.Body.String(), `"nodeId":"8"`) || !strings.Contains(recorder.Body.String(), `"oldExitIp":"10.0.0.1"`) || !strings.Contains(recorder.Body.String(), `"newNode":"fast"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardRotateAllowsRotatableNode(t *testing.T) {
+	bootstrapPath := writeQualityGuardBootstrapFixture(t, t.TempDir(), `{"version":1,"enabled":true,"config":{"rotatable_node_ids":["8","9"]}}`)
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{rotation: egressapp.MihomoRotation{Changed: true, NewNode: "fast"}})
+	router := newQualityGuardRotateRouterWithPaths(service, "", "", bootstrapPath)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/rotate", bytes.NewBufferString(`{"nodeId":"9"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"changed":true`) || !strings.Contains(recorder.Body.String(), `"nodeId":"9"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardRotateRejectsNonRotatableNode(t *testing.T) {
+	bootstrapPath := writeQualityGuardBootstrapFixture(t, t.TempDir(), `{"version":1,"enabled":true,"config":{"rotatable_node_ids":["8"]}}`)
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{rotation: egressapp.MihomoRotation{Changed: true}})
+	router := newQualityGuardRotateRouterWithPaths(service, "", "", bootstrapPath)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/rotate", bytes.NewBufferString(`{"nodeId":"7"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 403 || !strings.Contains(recorder.Body.String(), `"code":"nodeNotRotatable"`) || strings.Contains(recorder.Body.String(), `"changed":`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestQualityGuardRotateRejectsEmptyWhitelist(t *testing.T) {
+	service := egressapp.NewService(nil, nil, "")
+	service.SetMihomoManager(stubMihomoManager{rotation: egressapp.MihomoRotation{Changed: true}})
+	router := newQualityGuardRotateRouter(service)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("POST", "/api/internal/v1/quality-guard/egress-mihomo/rotate", bytes.NewBufferString(`{"nodeId":"8"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer guard-secret")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 403 || !strings.Contains(recorder.Body.String(), `"code":"nodeNotRotatable"`) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
