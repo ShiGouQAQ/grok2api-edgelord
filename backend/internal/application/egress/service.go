@@ -201,6 +201,16 @@ type ClearanceManager interface {
 	ForgetClearance(uint64)
 }
 
+// MihomoMemberStatus 镜像 infraegress.MihomoMemberStatus；成员字段语义与
+// infra 层一致（DelayMS -1 = 无延迟数据，Provider 空 = 无 provider 的节点）。
+type MihomoMemberStatus struct {
+	Name     string `json:"name"`
+	DelayMS  int    `json:"delayMs"`
+	Banned   bool   `json:"banned"`
+	Current  bool   `json:"current"`
+	Provider string `json:"provider"`
+}
+
 // MihomoStatus 镜像 infraegress.MihomoStatus，避免 application → infra →
 // application 的导入环（infra/egress 已导入本包）。
 type MihomoStatus struct {
@@ -218,6 +228,10 @@ type MihomoStatus struct {
 	TestEnabled     bool
 	TestGroupName   string
 	TestCurrentNode string
+	// Members/TestMembers 是生产组/测试组成员快照；未启用测试组时 TestMembers
+	// 为空。成员拉取失败时为空，不使状态降级。
+	Members     []MihomoMemberStatus
+	TestMembers []MihomoMemberStatus
 }
 
 // MihomoRotation 是质量守护 rotate_node 契约的结果：Changed 为 true 表示

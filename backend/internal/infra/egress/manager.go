@@ -524,6 +524,18 @@ func (m *Manager) updateMihomoTestLocked(value MihomoConfig) {
 	}
 }
 
+// MihomoMemberStatus 是 Mihomo 代理组成员的状态快照，供状态 API 展示。
+// DelayMS 取节点 history 最后一条；-1 表示无延迟数据（history 为空或
+// 最后一条 <= 0）。Provider 是成员所属机场/订阅名，无 provider 的节点
+// （自建、组内直连项）为空。
+type MihomoMemberStatus struct {
+	Name     string `json:"name"`
+	DelayMS  int    `json:"delayMs"`
+	Banned   bool   `json:"banned"`
+	Current  bool   `json:"current"`
+	Provider string `json:"provider"`
+}
+
 // MihomoStatus 是 Mihomo 出口状态的只读快照，供状态 API 展示。
 type MihomoStatus struct {
 	Enabled     bool
@@ -540,6 +552,10 @@ type MihomoStatus struct {
 	TestEnabled     bool
 	TestGroupName   string
 	TestCurrentNode string
+	// Members/TestMembers 是生产组/测试组成员快照（当前节点优先，其次按
+	// 延迟升序，无数据最后）。成员拉取失败时为空，不使状态 API 降级。
+	Members     []MihomoMemberStatus
+	TestMembers []MihomoMemberStatus
 }
 
 // MihomoStatus 返回 Mihomo 出口的当前状态；获取当前节点失败时
@@ -571,6 +587,7 @@ func (m *Manager) MihomoStatus(ctx context.Context) MihomoStatus {
 	}
 	status.CurrentNode = current
 	status.Reachable = true
+	status.Members = m.mihomoMembers(mihomo, statusCtx)
 	if testMihomo != nil {
 		status.TestEnabled = testConfig.Enabled
 		status.TestGroupName = testConfig.GroupName
@@ -579,8 +596,63 @@ func (m *Manager) MihomoStatus(ctx context.Context) MihomoStatus {
 		if node, err := testMihomo.GetCurrentNode(testCtx); err == nil {
 			status.TestCurrentNode = node
 		}
+		status.TestMembers = m.mihomoMembers(testMihomo, testCtx)
 	}
 	return status
+}
+
+// mihomoMembers 拉取代理组成员快照并按展示顺序排序：当前节点优先，其次按
+// DelayMS 升序，无数据（-1）排最后。拉取失败时返回 nil 并记录警告，绝不让
+// 状态 API 降级（成员为空但其余字段仍有效）。
+func (m *Manager) mihomoMembers(client *MihomoClient, ctx context.Context) []MihomoMemberStatus {
+	group, err := client.fetchGroupNamed(ctx, "")
+	if err != nil {
+		m.log().Warn("mihomo_status_members_failed", "error", err)
+		return nil
+	}
+	banned := make(map[string]struct{}, len(group.All))
+	for _, name := range client.BannedNodes() {
+		banned[name] = struct{}{}
+	}
+	type memberInfo struct {
+		delay    int
+		provider string
+	}
+	info := make(map[string]memberInfo, len(group.All))
+	for providerName, provider := range group.Providers {
+		for _, node := range provider.Nodes {
+			entry := info[node.Name]
+			entry.provider = providerName
+			if len(node.History) > 0 {
+				entry.delay = node.History[len(node.History)-1].Delay
+			}
+			info[node.Name] = entry
+		}
+	}
+	members := make([]MihomoMemberStatus, 0, len(group.All))
+	for _, name := range group.All {
+		entry := info[name]
+		delay := entry.delay
+		if delay <= 0 {
+			delay = -1 // 无延迟数据（history 空或最后一条 -1/0）
+		}
+		_, isBanned := banned[name]
+		members = append(members, MihomoMemberStatus{
+			Name: name, DelayMS: delay, Banned: isBanned,
+			Current: name == group.Now, Provider: entry.provider,
+		})
+	}
+	sort.SliceStable(members, func(i, j int) bool {
+		if members[i].Current != members[j].Current {
+			return members[i].Current
+		}
+		noDataI, noDataJ := members[i].DelayMS < 0, members[j].DelayMS < 0
+		if noDataI != noDataJ {
+			return !noDataI
+		}
+		return members[i].DelayMS < members[j].DelayMS
+	})
+	return members
 }
 
 // MihomoSwitch 手动切换到当前最优节点（不封禁当前节点）。

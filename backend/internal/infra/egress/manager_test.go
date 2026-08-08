@@ -3440,6 +3440,15 @@ func TestMihomoStatusExposesTestGroup(t *testing.T) {
 	if status.Epoch != manager.mihomoEpoch() {
 		t.Fatalf("status epoch must reflect the production client only")
 	}
+	if len(status.TestMembers) != 2 {
+		t.Fatalf("test members: got %v, want [t1 t2]", status.TestMembers)
+	}
+	if status.TestMembers[0].Name != "t1" || !status.TestMembers[0].Current || status.TestMembers[0].DelayMS != -1 || status.TestMembers[0].Provider != "" {
+		t.Fatalf("test member[0] must be current t1 with no delay/provider: %+v", status.TestMembers[0])
+	}
+	if status.TestMembers[1].Name != "t2" || status.TestMembers[1].Current || status.TestMembers[1].DelayMS != -1 {
+		t.Fatalf("test member[1] must be non-current t2: %+v", status.TestMembers[1])
+	}
 }
 
 func TestMihomoStatusZeroValuesWhenTestClientAbsent(t *testing.T) {
@@ -3458,6 +3467,78 @@ func TestMihomoStatusZeroValuesWhenTestClientAbsent(t *testing.T) {
 	status := manager.MihomoStatus(context.Background())
 	if status.TestEnabled || status.TestGroupName != "" || status.TestCurrentNode != "" {
 		t.Fatalf("legacy config must surface zero test status: %+v", status)
+	}
+	if len(status.TestMembers) != 0 {
+		t.Fatalf("legacy config must surface empty test members: %v", status.TestMembers)
+	}
+}
+
+func TestMihomoStatusExposesMembers(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+	manager.UpdateMihomoConfig(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+
+	manager.mihomoMu.RLock()
+	mihomo := manager.mihomo
+	manager.mihomoMu.RUnlock()
+	mihomo.BanNode("fast") // 黑名单成员必须标记 Banned
+
+	status := manager.MihomoStatus(context.Background())
+	if len(status.Members) != 3 {
+		t.Fatalf("members: got %v, want 3 entries", status.Members)
+	}
+	slow, fast, dead := status.Members[0], status.Members[1], status.Members[2]
+	if slow.Name != "slow" || !slow.Current || slow.DelayMS != 300 || slow.Banned || slow.Provider != "p1" {
+		t.Fatalf("slow must be current with p1/300ms: %+v", slow)
+	}
+	if fast.Name != "fast" || fast.Current || fast.DelayMS != 50 || !fast.Banned || fast.Provider != "p1" {
+		t.Fatalf("fast must sort second with p1/50ms/banned: %+v", fast)
+	}
+	if dead.Name != "dead" || dead.Current || dead.DelayMS != -1 || dead.Banned || dead.Provider != "p1" {
+		t.Fatalf("dead must sort last with no delay data: %+v", dead)
+	}
+	if len(status.TestMembers) != 0 {
+		t.Fatalf("test client absent must leave test members empty: %v", status.TestMembers)
+	}
+}
+
+func TestMihomoStatusMembersDegradeOnFetchError(t *testing.T) {
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(&synchronizedEgressRepository{}, cipher)
+	group, groupMu := mihomoTestGroup()
+	// 第一次 GET（GetCurrentNode）成功，后续 GET（成员拉取）失败：状态仍需
+	// 保留当前节点且不覆盖 LastError，仅成员为空。
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && requests.Add(1) > 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		groupMu.Lock()
+		_ = json.NewEncoder(w).Encode(group)
+		groupMu.Unlock()
+	}))
+	defer server.Close()
+	manager.UpdateMihomoConfig(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+
+	status := manager.MihomoStatus(context.Background())
+	if !status.Reachable || status.CurrentNode != "slow" || status.LastError != "" {
+		t.Fatalf("current-node fetch must still succeed without LastError: %+v", status)
+	}
+	if len(status.Members) != 0 {
+		t.Fatalf("member fetch failure must degrade to empty members: %v", status.Members)
 	}
 }
 

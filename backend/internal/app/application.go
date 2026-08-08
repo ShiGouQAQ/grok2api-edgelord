@@ -518,7 +518,23 @@ func (value egressMihomoManager) MihomoStatus(ctx context.Context) egressapp.Mih
 		CurrentNode: status.CurrentNode, BannedNodes: status.BannedNodes, SwitchCount: status.SwitchCount,
 		Epoch: status.Epoch, Reachable: status.Reachable, LastError: status.LastError,
 		TestEnabled: status.TestEnabled, TestGroupName: status.TestGroupName, TestCurrentNode: status.TestCurrentNode,
+		Members: mapMihomoMembers(status.Members), TestMembers: mapMihomoMembers(status.TestMembers),
 	}
+}
+
+// mapMihomoMembers 逐元素转换 infra 层成员快照为应用层镜像类型。
+func mapMihomoMembers(in []infraegress.MihomoMemberStatus) []egressapp.MihomoMemberStatus {
+	if in == nil {
+		return nil
+	}
+	out := make([]egressapp.MihomoMemberStatus, len(in))
+	for i, member := range in {
+		out[i] = egressapp.MihomoMemberStatus{
+			Name: member.Name, DelayMS: member.DelayMS, Banned: member.Banned,
+			Current: member.Current, Provider: member.Provider,
+		}
+	}
+	return out
 }
 
 func (value egressMihomoManager) MihomoSwitch(ctx context.Context) (string, error) {

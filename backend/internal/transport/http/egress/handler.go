@@ -109,11 +109,20 @@ func (h *Handler) mihomoStatus(c *gin.Context) {
 	if bannedNodes == nil {
 		bannedNodes = []string{}
 	}
+	members := value.Members
+	if members == nil {
+		members = []egressapp.MihomoMemberStatus{}
+	}
+	testMembers := value.TestMembers
+	if testMembers == nil {
+		testMembers = []egressapp.MihomoMemberStatus{}
+	}
 	response.Success(c, http.StatusOK, gin.H{
 		"enabled": value.Enabled, "apiUrl": value.APIURL, "groupName": value.GroupName,
 		"currentNode": value.CurrentNode, "bannedNodes": bannedNodes, "switchCount": value.SwitchCount,
 		"epoch": value.Epoch, "reachable": value.Reachable, "lastError": value.LastError,
 		"testEnabled": value.TestEnabled, "testGroupName": value.TestGroupName, "testCurrentNode": value.TestCurrentNode,
+		"members": members, "testMembers": testMembers,
 	})
 }
 
