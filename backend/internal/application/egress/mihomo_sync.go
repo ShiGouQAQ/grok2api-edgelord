@@ -53,8 +53,10 @@ type MihomoSyncer struct {
 	lastErr        error
 }
 
-// NewMihomoSyncer 构造同步器；guardStatePath 为空或文件缺失时视为无
-// guard-owned 节点。testProxyURL 为空时回退默认值。
+// NewMihomoSyncer 构造同步器；guardStatePath 为空时 Sync 报错（fail-closed，
+// 调用方应配置 GROK2API_QUALITY_GUARD_DIR 显式暴露问题），文件缺失视为
+// 无 guard-owned 节点。testProxyURL 为空时回退默认值（仅在测试通道启用
+// 时参与同步）。
 func NewMihomoSyncer(repo MihomoSyncRepository, cipher *security.Cipher, guardStatePath string, testProxyURL string) *MihomoSyncer {
 	if testProxyURL = strings.TrimSpace(testProxyURL); testProxyURL == "" {
 		testProxyURL = mihomoDefaultTestProxyURL
@@ -146,6 +148,24 @@ func (s *MihomoSyncer) Sync(ctx context.Context, members []string, groupName str
 			continue
 		}
 		enableIDs = append(enableIDs, node.ID)
+	}
+	if len(enableIDs) > 0 {
+		// 双读收紧窗口：enable 前重读 guard-owned 集合，过滤本轮收集期间刚
+		// 被守护隔离的节点（第一读发生在 Sync 起点，收集后可能已过时）。
+		// 剩余竞态窗口：重读后到 UPDATE 提交之间 guard 新隔离的节点本轮仍
+		// 会被 enable，由下一轮 Sync（≤60s）与 guard 下一轮探测兜底。
+		guardOwned, err = s.readGuardOwnedNodes()
+		if err != nil {
+			s.lastErr = err
+			return 0, 0, err
+		}
+		filtered := enableIDs[:0]
+		for _, id := range enableIDs {
+			if !guardOwned[id] {
+				filtered = append(filtered, id)
+			}
+		}
+		enableIDs = filtered
 	}
 	if len(enableIDs) > 0 {
 		if _, err := s.repo.UpdateEgressNodesEnabled(ctx, enableIDs, true); err != nil {
@@ -263,10 +283,12 @@ type mihomoGuardNodeState struct {
 }
 
 // readGuardOwnedNodes 读取质量守护 state.json 中被守护禁用的节点 ID 集合。
-// 文件缺失/路径为空 → 无 owned；格式非法 → 报错（调用方 fail-closed）。
+// 路径为空 → 报错（fail-closed：env 未配置时拒绝启用任何成员，绝不静默
+// 覆盖守护隔离）；文件缺失 → 无 owned（守护尚未写入，视为未隔离）；格式
+// 非法 → 报错（调用方 fail-closed）。
 func (s *MihomoSyncer) readGuardOwnedNodes() (map[uint64]bool, error) {
 	if s.guardStatePath == "" {
-		return nil, nil
+		return nil, errors.New("GROK2API_QUALITY_GUARD_DIR 未配置（guard 状态路径为空），同步器拒绝启用任何成员")
 	}
 	file, err := os.Open(s.guardStatePath)
 	if err != nil {

@@ -149,9 +149,16 @@ func writeGuardState(t *testing.T, disabledNodeIDs ...uint64) string {
 	return path
 }
 
+// missingGuardStatePath 返回不存在的 state.json 路径：文件缺失 = 无
+// guard-owned 节点（与空路径 fail-closed 语义区分）。
+func missingGuardStatePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "does-not-exist.json")
+}
+
 func TestMihomoSyncCreatesNewMembersDisabled(t *testing.T) {
 	repo := &mihomoSyncRepositoryStub{}
-	syncer := newMihomoSyncerForTest(t, repo, "")
+	syncer := newMihomoSyncerForTest(t, repo, missingGuardStatePath(t))
 	created, disabled, err := syncer.Sync(context.Background(), []string{"US-01", "JP-02"}, "XAI-TEST-GROUP")
 	if err != nil {
 		t.Fatal(err)
@@ -234,8 +241,8 @@ func TestMihomoSyncEnablesNonGuardOwnedMember(t *testing.T) {
 		SourceID: 1, SourceKey: "mihomo:XAI-TEST-GROUP:US-01", EncryptedProxyURL: encryptedProxy,
 	}}
 	repo.sources = []domain.SubscriptionSource{{ID: 1, Name: mihomoSyncSourceName, Scope: domain.ScopeBuild}}
-	// guardStatePath 为空：无 guard-owned 节点。
-	syncer := newMihomoSyncerForTest(t, repo, "")
+	// guardStatePath 指向不存在的文件：无 guard-owned 节点。
+	syncer := newMihomoSyncerForTest(t, repo, missingGuardStatePath(t))
 
 	created, disabled, err := syncer.Sync(context.Background(), []string{"US-01"}, "XAI-TEST-GROUP")
 	if err != nil {
@@ -270,7 +277,7 @@ func TestMihomoSyncDisablesRemovedMemberWithoutDelete(t *testing.T) {
 			SourceID: 1, SourceKey: "mihomo:XAI-TEST-GROUP:JP-02", EncryptedProxyURL: encryptedProxy},
 	}
 	repo.sources = []domain.SubscriptionSource{{ID: 1, Name: mihomoSyncSourceName, Scope: domain.ScopeBuild}}
-	syncer := newMihomoSyncerForTest(t, repo, "")
+	syncer := newMihomoSyncerForTest(t, repo, missingGuardStatePath(t))
 
 	// JP-02 退出测试组。
 	created, disabled, err := syncer.Sync(context.Background(), []string{"US-01"}, "XAI-TEST-GROUP")
@@ -294,7 +301,7 @@ func TestMihomoSyncDisablesRemovedMemberWithoutDelete(t *testing.T) {
 
 func TestMihomoSyncIsIdempotent(t *testing.T) {
 	repo := &mihomoSyncRepositoryStub{}
-	syncer := newMihomoSyncerForTest(t, repo, "")
+	syncer := newMihomoSyncerForTest(t, repo, missingGuardStatePath(t))
 	ctx := context.Background()
 	if _, _, err := syncer.Sync(ctx, []string{"US-01"}, "XAI-TEST-GROUP"); err != nil {
 		t.Fatal(err)
@@ -313,6 +320,36 @@ func TestMihomoSyncIsIdempotent(t *testing.T) {
 	}
 	if len(nodes) != 1 {
 		t.Fatalf("expected exactly one node, got %d", len(nodes))
+	}
+}
+
+func TestMihomoSyncEmptyGuardPathFailsClosed(t *testing.T) {
+	// guardStatePath 为空（GROK2API_QUALITY_GUARD_DIR 未配置）：Sync 必须
+	// 报错且不启用任何成员（确定性 fail-closed，替代旧的静默 fail-open）。
+	repo := &mihomoSyncRepositoryStub{}
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptedProxy, err := cipher.Encrypt("socks5://127.0.0.1:7891")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo.nodes = []domain.Node{{
+		ID: 1, Name: "US-01", Scope: domain.ScopeBuild, Enabled: false,
+		SourceID: 1, SourceKey: "mihomo:XAI-TEST-GROUP:US-01", EncryptedProxyURL: encryptedProxy,
+	}}
+	repo.sources = []domain.SubscriptionSource{{ID: 1, Name: mihomoSyncSourceName, Scope: domain.ScopeBuild}}
+	syncer := newMihomoSyncerForTest(t, repo, "")
+
+	if _, _, err := syncer.Sync(context.Background(), []string{"US-01"}, "XAI-TEST-GROUP"); err == nil {
+		t.Fatal("empty guard state path must fail Sync (fail-closed)")
+	}
+	if len(repo.enabledCalls) != 0 {
+		t.Fatalf("empty guard state path must not enable members, enabledCalls=%v", repo.enabledCalls)
+	}
+	if node, found := repo.nodeByName("US-01"); found && node.Enabled {
+		t.Fatal("member must stay disabled when guard state path is empty")
 	}
 }
 
