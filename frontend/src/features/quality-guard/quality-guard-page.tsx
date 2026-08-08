@@ -22,8 +22,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { getQualityGuardStatus, runQualityTest, updateQualityGuardPolicy, type QualityGuardEvent, type QualityGuardNodeState, type QualityGuardPolicy, type QualityGuardStatistics, type QualityGuardStatus, type QualityTestResult } from "@/features/quality-guard/quality-guard-api";
 import { createEgressNode, deleteEgressNodes, listAllEgressNodes, updateEgressNode, updateEgressNodesEnabled, type EgressNodeDTO, type EgressNodeInput } from "@/features/settings/settings-api";
-import { banMihomoNode, clearMihomoBlacklist, getMihomoStatus, rotateMihomoNode, selectMihomoNode, switchMihomoNode, unbanMihomoNode } from "@/features/settings/settings-api";
-import { MihomoMemberList } from "@/features/settings/egress-mihomo";
+import { banMihomoNode, clearMihomoBlacklist, getMihomoStatus, rotateMihomoNode, selectMihomoNode, switchMihomoNode, unbanMihomoNode, type MihomoMemberDTO } from "@/features/settings/settings-api";
 import { ErrorState, LoadingState } from "@/shared/components/data-state";
 import { PageHeader } from "@/shared/components/page-header";
 import { cn } from "@/shared/lib/cn";
@@ -354,7 +353,8 @@ function MihomoGroupEgressCard() {
             ) : (
               <p className="text-xs text-muted-foreground">{t("qualityGuard.mihomoNoMembers")}</p>
             )}
-            <MihomoMemberList members={data.members} testEnabled={data.testEnabled} testMembers={data.testMembers} />
+            <MihomoMembersTable title={t("settings.egress.mihomoMembers")} members={data.members} />
+            {data.testEnabled && data.testMembers.length > 0 ? <MihomoMembersTable title={t("settings.egress.mihomoTestGroup")} members={data.testMembers} /> : null}
           </div>
         )
       ) : null}
@@ -379,6 +379,43 @@ function MihomoValue({ label, children }: { label: string; children: ReactNode }
     <div className="min-w-0 space-y-1">
       <dt className="text-[11px] font-medium text-muted-foreground">{label}</dt>
       <dd className="min-w-0">{children}</dd>
+    </div>
+  );
+}
+
+function MihomoMembersTable({ title, members }: { title: string; members: MihomoMemberDTO[] }) {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[10px] font-medium text-muted-foreground">{title}</div>
+      {members.length > 0 ? (
+        <div className="max-h-40 overflow-auto">
+          <Table>
+            <TableHeader><TableRow>
+              <TableHead>{t("qualityGuard.node")}</TableHead>
+              <TableHead>{t("qualityGuard.source")}</TableHead>
+              <TableHead className="text-right">{t("settings.egress.mihomoLatency")}</TableHead>
+              <TableHead>{t("qualityGuard.state")}</TableHead>
+            </TableRow></TableHeader>
+            <TableBody>
+              {members.map((member) => (
+                <TableRow key={member.name} className={cn(member.current && "bg-emerald-500/10", member.banned && "opacity-70")}>
+                  <TableCell className="text-xs">
+                    <span className={cn("font-medium", member.current && "text-emerald-700 dark:text-emerald-300", member.banned && "text-muted-foreground line-through")}>{member.name}</span>
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{member.provider || "—"}</TableCell>
+                  <TableCell className={cn("text-right text-xs tabular-nums", member.delayMs < 0 && "text-muted-foreground")}>{member.delayMs >= 0 ? `${member.delayMs}ms` : "—"}</TableCell>
+                  <TableCell className="text-xs">
+                    {member.current ? <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{t("settings.egress.mihomoCurrent")}</Badge> : member.banned ? <Badge variant="destructive">{t("settings.egress.mihomoBanned")}</Badge> : null}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">{t("settings.egress.mihomoNoData")}</p>
+      )}
     </div>
   );
 }
