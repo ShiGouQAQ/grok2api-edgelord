@@ -22,10 +22,11 @@ import (
 )
 
 type Handler struct {
-	service         *egressapp.Service
-	guardStatePath  string
-	guardConfigPath string
-	guardProbe      egressapp.QualityProbeInput
+	service            *egressapp.Service
+	guardStatePath     string
+	guardConfigPath    string
+	guardBootstrapPath string
+	guardProbe         egressapp.QualityProbeInput
 }
 
 func NewHandler(service *egressapp.Service, guardStatePath ...string) *Handler {
@@ -37,7 +38,11 @@ func NewHandler(service *egressapp.Service, guardStatePath ...string) *Handler {
 	if len(guardStatePath) > 1 {
 		configPath = strings.TrimSpace(guardStatePath[1])
 	}
-	return &Handler{service: service, guardStatePath: path, guardConfigPath: configPath}
+	bootstrapPath := ""
+	if len(guardStatePath) > 2 {
+		bootstrapPath = strings.TrimSpace(guardStatePath[2])
+	}
+	return &Handler{service: service, guardStatePath: path, guardConfigPath: configPath, guardBootstrapPath: bootstrapPath}
 }
 
 // WithQualityGuardProbe pins the sidecar probe to server-owned credentials and
@@ -77,6 +82,10 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/egress-mihomo/status", h.mihomoStatus)
 	router.POST("/egress-mihomo/switch", h.mihomoSwitch)
 	router.POST("/egress-mihomo/blacklist/clear", h.mihomoClearBlacklist)
+	router.POST("/egress-mihomo/rotate", h.mihomoRotate)
+	router.POST("/egress-mihomo/select", h.mihomoTestSelect)
+	router.POST("/egress-mihomo/ban", h.mihomoTestBan)
+	router.POST("/egress-mihomo/unban", h.mihomoTestUnban)
 }
 
 // RegisterQualityGuard exposes the minimum egress surface required by the
@@ -325,6 +334,7 @@ func (h *Handler) qualityGuardStatus(c *gin.Context) {
 			"hard_tps": state.Guard.HardTPS, "consecutive_soft": state.Guard.ConsecutiveSoft,
 			"consecutive_errors": state.Guard.ConsecutiveErrors, "quarantine_seconds": state.Guard.QuarantineSeconds,
 			"min_healthy_nodes": state.Guard.MinHealthyNodes, "max_output_tokens": state.Guard.MaxOutputTokens,
+			"rotation_url": h.guardBootstrapRotationURL(), "rotatable_node_ids": h.guardBootstrapRotatableNodeIDs(),
 		},
 		"nodes": state.Nodes, "protectedNodeIds": state.ProtectedNodeIDs, "recentEvents": state.RecentEvents,
 	}
@@ -335,15 +345,17 @@ func (h *Handler) qualityGuardStatus(c *gin.Context) {
 }
 
 type qualityGuardConfigRequest struct {
-	Mode                  string  `json:"mode"`
-	ActiveIntervalSeconds int     `json:"activeIntervalSeconds"`
-	PassivePollSeconds    int     `json:"passivePollSeconds"`
-	SoftTPS               float64 `json:"softTPS"`
-	HardTPS               float64 `json:"hardTPS"`
-	ConsecutiveSoft       int     `json:"consecutiveSoft"`
-	ConsecutiveErrors     int     `json:"consecutiveErrors"`
-	QuarantineSeconds     int     `json:"quarantineSeconds"`
-	MinHealthyNodes       int     `json:"minHealthyNodes"`
+	Mode                  string   `json:"mode"`
+	ActiveIntervalSeconds int      `json:"activeIntervalSeconds"`
+	PassivePollSeconds    int      `json:"passivePollSeconds"`
+	SoftTPS               float64  `json:"softTPS"`
+	HardTPS               float64  `json:"hardTPS"`
+	ConsecutiveSoft       int      `json:"consecutiveSoft"`
+	ConsecutiveErrors     int      `json:"consecutiveErrors"`
+	QuarantineSeconds     int      `json:"quarantineSeconds"`
+	MinHealthyNodes       int      `json:"minHealthyNodes"`
+	RotationURL           string   `json:"rotationUrl"`
+	RotatableNodeIDs      []string `json:"rotatableNodeIds"`
 }
 
 type qualityGuardRuntimeConfigFile struct {
@@ -394,6 +406,10 @@ func (h *Handler) updateQualityGuardConfig(c *gin.Context) {
 		response.Error(c, http.StatusServiceUnavailable, "qualityGuardConfigWriteFailed", "质量守护策略保存失败")
 		return
 	}
+	if err := h.updateQualityGuardBootstrap(request); err != nil {
+		response.Error(c, http.StatusServiceUnavailable, "qualityGuardConfigWriteFailed", "质量守护轮换配置保存失败")
+		return
+	}
 	response.Success(c, http.StatusOK, gin.H{"saved": true})
 }
 
@@ -419,6 +435,12 @@ func (r qualityGuardConfigRequest) validate(nodeCount int) error {
 	if r.MinHealthyNodes < 1 || r.MinHealthyNodes > nodeCount {
 		return errors.New("最少保留节点必须在受管节点数量范围内")
 	}
+	if len(r.RotatableNodeIDs) > 0 && strings.TrimSpace(r.RotationURL) == "" {
+		return errors.New("可轮换节点非空时必须配置轮换接口 URL")
+	}
+	if url := strings.TrimSpace(r.RotationURL); url != "" && (strings.Contains(url, "://") == false || !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://")) {
+		return errors.New("轮换接口 URL 必须是无凭据的 HTTP(S) URL")
+	}
 	return nil
 }
 
@@ -432,6 +454,138 @@ func saveQualityGuardRuntimeConfig(path string, value qualityGuardRuntimeConfigF
 		return err
 	}
 	temporary, err := os.CreateTemp(directory, ".runtime-config-")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(append(data, '\n')); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
+}
+
+// qualityGuardBootstrapFile mirrors bootstrap.json; only rotation fields are runtime-editable.
+type qualityGuardBootstrapFile struct {
+	Version       int                         `json:"version"`
+	Enabled       bool                        `json:"enabled"`
+	InternalToken string                      `json:"internal_token,omitempty"`
+	Config        qualityGuardBootstrapConfig `json:"config"`
+}
+
+type qualityGuardBootstrapConfig struct {
+	Model                   string   `json:"model"`
+	Prompt                  string   `json:"prompt"`
+	Expected                string   `json:"expected"`
+	NodeIDs                 []string `json:"node_ids"`
+	Mode                    string   `json:"mode"`
+	ActiveIntervalSeconds   int      `json:"active_interval_seconds"`
+	PassivePollSeconds      int      `json:"passive_poll_seconds"`
+	SoftTPS                 float64  `json:"soft_tps"`
+	HardTPS                 float64  `json:"hard_tps"`
+	ConsecutiveSoft         int      `json:"consecutive_soft"`
+	ConsecutiveErrors       int      `json:"consecutive_errors"`
+	QuarantineSeconds       int      `json:"quarantine_seconds"`
+	NoAccountBackoffSeconds int      `json:"no_account_backoff_seconds"`
+	MinHealthyNodes         int      `json:"min_healthy_nodes"`
+	MaxOutputTokens         int      `json:"max_output_tokens"`
+	FailClosed              bool     `json:"fail_closed"`
+	MinGenerationMS         int      `json:"min_generation_ms"`
+	RotationURL             string   `json:"rotation_url"`
+	RotationToken           string   `json:"rotation_token"`
+	RotationTimeoutSeconds  int      `json:"rotation_timeout_seconds"`
+	RotatableNodeIDs        []string `json:"rotatable_node_ids"`
+}
+
+func (h *Handler) readQualityGuardBootstrap() (qualityGuardBootstrapFile, error) {
+	if h.guardBootstrapPath == "" {
+		return qualityGuardBootstrapFile{}, nil
+	}
+	data, err := os.ReadFile(h.guardBootstrapPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return qualityGuardBootstrapFile{}, nil
+		}
+		return qualityGuardBootstrapFile{}, err
+	}
+	var file qualityGuardBootstrapFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return qualityGuardBootstrapFile{}, err
+	}
+	return file, nil
+}
+
+func (h *Handler) guardBootstrapRotationURL() string {
+	file, err := h.readQualityGuardBootstrap()
+	if err != nil {
+		return ""
+	}
+	return file.Config.RotationURL
+}
+
+func (h *Handler) guardBootstrapRotatableNodeIDs() []string {
+	file, err := h.readQualityGuardBootstrap()
+	if err != nil {
+		return nil
+	}
+	return file.Config.RotatableNodeIDs
+}
+
+func (h *Handler) updateQualityGuardBootstrap(request qualityGuardConfigRequest) error {
+	if h.guardBootstrapPath == "" {
+		return nil
+	}
+	file, err := h.readQualityGuardBootstrap()
+	if err != nil {
+		return err
+	}
+	file.Version = bootstrapVersionFallback(file.Version)
+	file.Config.RotationURL = strings.TrimSpace(request.RotationURL)
+	file.Config.RotatableNodeIDs = compactStrings(request.RotatableNodeIDs)
+	return writeQualityGuardBootstrap(h.guardBootstrapPath, file)
+}
+
+const bootstrapVersionFallbackValue = 1
+
+func bootstrapVersionFallback(value int) int {
+	if value == 0 {
+		return bootstrapVersionFallbackValue
+	}
+	return value
+}
+
+func compactStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+func writeQualityGuardBootstrap(path string, value qualityGuardBootstrapFile) error {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(directory, ".quality-guard-bootstrap-")
 	if err != nil {
 		return err
 	}
