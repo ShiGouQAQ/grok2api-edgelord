@@ -175,6 +175,10 @@ func (s *Service) eligibleNodesForProvider(values []domain.Node, provider accoun
 	result := make([]domain.Node, 0, len(values))
 	maxAge := max(probeInterval*2, time.Minute)
 	for _, value := range values {
+		// 同步节点仅 guard 探测用，禁止进入生产调度候选（auto-assign/auto-balance）。
+		if value.IsMihomoSynced() {
+			continue
+		}
 		if !value.Enabled || value.EncryptedProxyURL == "" || !scopeSupportsProvider(value.Scope, provider) || value.ProbeStatus != domain.ProbeStatusHealthy || value.LastProbedAt == nil || now.Sub(value.LastProbedAt.UTC()) > maxAge {
 			continue
 		}

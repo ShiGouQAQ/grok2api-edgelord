@@ -16,15 +16,17 @@ import (
 )
 
 var (
-	ErrInvalidInput            = errors.New("代理节点参数无效")
-	ErrInvalidFilter           = errors.New("出口代理筛选条件无效")
-	ErrInvalidSort             = errors.New("代理节点排序条件无效")
-	ErrNotFound                = errors.New("代理节点不存在")
-	ErrProbeStale              = errors.New("代理配置在探测期间已更新，请重新测试")
-	ErrQualityProbeUnavailable = errors.New("出口质量探测不可用")
-	ErrQualityProbeNoAccount   = errors.New("质量检测暂无可调度账号")
-	ErrClearanceUnavailable    = errors.New("Clearance 刷新不可用")
-	ErrMihomoUnavailable       = errors.New("Mihomo 状态不可用")
+	ErrInvalidInput               = errors.New("代理节点参数无效")
+	ErrInvalidFilter              = errors.New("出口代理筛选条件无效")
+	ErrInvalidSort                = errors.New("代理节点排序条件无效")
+	ErrNotFound                   = errors.New("代理节点不存在")
+	ErrProbeStale                 = errors.New("代理配置在探测期间已更新，请重新测试")
+	ErrQualityProbeUnavailable    = errors.New("出口质量探测不可用")
+	ErrQualityProbeNoAccount      = errors.New("质量检测暂无可调度账号")
+	ErrClearanceUnavailable       = errors.New("Clearance 刷新不可用")
+	ErrMihomoUnavailable          = errors.New("Mihomo 状态不可用")
+	ErrCannotBindMihomoSyncedNode = errors.New("Mihomo 同步节点仅供质量守卫探测，禁止绑定账号")
+	ErrFallbackNodeIsMihomoSynced = errors.New("Mihomo 同步节点仅供质量守卫探测，不能作为固定回退节点")
 )
 
 const (
@@ -229,6 +231,9 @@ type MihomoStatus struct {
 	TestEnabled     bool
 	TestGroupName   string
 	TestCurrentNode string
+	// TestEpoch 镜像 infraegress 的测试客户端出口代际号（见 app 层
+	// egressMihomoManager 桥接），守卫经 testEpoch 归因测试组探测。
+	TestEpoch uint64
 	// Members/TestMembers 是生产组/测试组成员快照；未启用测试组时 TestMembers
 	// 为空。成员拉取失败时为空，不使状态降级。
 	Members     []MihomoMemberStatus
@@ -723,6 +728,9 @@ func (s *Service) AssignAccounts(ctx context.Context, nodeID uint64, provider ac
 	}
 	if err != nil {
 		return AssignmentResult{}, err
+	}
+	if node.IsMihomoSynced() {
+		return AssignmentResult{}, ErrCannotBindMihomoSyncedNode
 	}
 	if !node.Enabled || strings.TrimSpace(node.EncryptedProxyURL) == "" {
 		return AssignmentResult{}, fmt.Errorf("%w: 只能绑定启用且已配置代理地址的节点", ErrInvalidInput)

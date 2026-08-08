@@ -487,6 +487,9 @@ func (s *Service) validateFallbacks(ctx context.Context, current domain.Operatio
 }
 
 func (s *Service) validateFixedFallbackNode(scope domain.Scope, node domain.Node, rejectCooldown bool) error {
+	if node.IsMihomoSynced() {
+		return ErrFallbackNodeIsMihomoSynced
+	}
 	if !domain.SupportsScope(node.Scope, scope) {
 		return fmt.Errorf("%w: 固定回退节点与 %s 作用域不兼容", ErrInvalidInput, scope)
 	}
