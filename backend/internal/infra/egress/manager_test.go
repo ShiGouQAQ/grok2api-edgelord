@@ -36,28 +36,43 @@ func (responseHeaderTimeoutError) Timeout() bool   { return true }
 func (responseHeaderTimeoutError) Temporary() bool { return true }
 
 func TestForgetClearancesEvictsSelectedNodesInOneBatch(t *testing.T) {
-	manager := NewManager(egressRepositoryTestStub{}, nil)
+	cipher, err := security.NewCipher("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encryptProxy := func(value string) string {
+		encoded, err := cipher.Encrypt(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+	manager := NewManager(egressRepositoryTestStub{nodes: []domain.Node{
+		{ID: 1, Name: "web", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: encryptProxy("socks5h://proxy-a:1080")},
+		{ID: 2, Name: "web2", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: encryptProxy("socks5h://proxy-b:1080")},
+		{ID: 3, Name: "web3", Scope: domain.ScopeWeb, Enabled: true, Health: 1, EncryptedProxyURL: encryptProxy("socks5h://proxy-c:1080")},
+	}}, cipher)
 	first := &scriptedRequestClient{}
 	second := &scriptedRequestClient{}
 	untouched := &scriptedRequestClient{}
 	manager.clients[clientCacheKey{nodeID: 1, scope: domain.ScopeBuild}] = cachedClient{client: first}
 	manager.clients[clientCacheKey{nodeID: 2, scope: domain.ScopeWeb}] = cachedClient{client: second}
 	manager.clients[clientCacheKey{nodeID: 3, scope: domain.ScopeConsole}] = cachedClient{client: untouched}
-	manager.clearances["node:1"] = clearanceState{cookies: "one"}
-	manager.clearances["node:2:sticky"] = clearanceState{cookies: "two"}
-	manager.clearances["node:3"] = clearanceState{cookies: "three"}
+	manager.clearances[manager.clearanceCacheKey(1, "socks5h://proxy-a:1080")] = clearanceState{cookies: "one"}
+	manager.clearances[manager.clearanceCacheKey(2, "socks5h://proxy-b:1080")] = clearanceState{cookies: "two"}
+	manager.clearances[manager.clearanceCacheKey(3, "socks5h://proxy-c:1080")] = clearanceState{cookies: "three"}
 	manager.nodes[domain.ScopeBuild] = cachedNodeSnapshot{values: []domain.Node{{ID: 1}}}
 	manager.healthyNodes[1] = time.Now().UTC()
 
 	manager.ForgetClearances([]uint64{1, 2, 1})
 
-	if _, exists := manager.clearances["node:1"]; exists {
+	if _, exists := manager.clearances[manager.clearanceCacheKey(1, "socks5h://proxy-a:1080")]; exists {
 		t.Fatal("node 1 clearance was retained")
 	}
-	if _, exists := manager.clearances["node:2:sticky"]; exists {
+	if _, exists := manager.clearances[manager.clearanceCacheKey(2, "socks5h://proxy-b:1080")]; exists {
 		t.Fatal("node 2 clearance was retained")
 	}
-	if _, exists := manager.clearances["node:3"]; !exists {
+	if _, exists := manager.clearances[manager.clearanceCacheKey(3, "socks5h://proxy-c:1080")]; !exists {
 		t.Fatal("unselected clearance was removed")
 	}
 	if len(manager.clients) != 1 || first.closedIdle != 1 || second.closedIdle != 1 || untouched.closedIdle != 0 {
@@ -3404,9 +3419,9 @@ func TestMihomoSwitchDoneInvalidatesClientPool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// G2：Mihomo 组出口切换耗散后，失效依赖旧出口的 client 池（keep-alive
-	// 隧道 pin 旧出口直到空闲超时）。403 按节点作用域失效：Web 池被清空并
-	// 关闭空闲连接，Build 池不受影响。
+	// G2+P1-6：Mihomo 组出口切换耗散后，失效依赖旧出口的 client 池（keep-alive
+	// 隧道 pin 旧出口直到空闲超时）。组出口为所有 DB 节点（跨作用域）共享，
+	// 切换后全 scope 失效：Web 池与 Build 池一并清空并关闭空闲连接。
 	repository := &synchronizedEgressRepository{node: domain.Node{ID: 100, Name: "node100", Scope: domain.ScopeWeb, Enabled: true, Health: 1}}
 	manager := NewManager(repository, cipher)
 	group, groupMu := mihomoTestGroup()
@@ -3430,17 +3445,14 @@ func TestMihomoSwitchDoneInvalidatesClientPool(t *testing.T) {
 
 	manager.FeedbackNodeBanned(context.Background(), 100)
 	waitForTrue(t, 3*time.Second, func() bool {
-		return webClient.closed.Load() == 1
-	}, "web-scope client pool closed after mihomo switch")
+		return webClient.closed.Load() == 1 && buildClient.closed.Load() == 1
+	}, "web and build scope client pools closed after mihomo switch")
 	manager.clientMu.RLock()
 	_, webPresent := manager.clients[webKey]
 	_, buildPresent := manager.clients[buildKey]
 	manager.clientMu.RUnlock()
-	if webPresent {
-		t.Fatal("web-scope client must be evicted after group exit switch")
-	}
-	if !buildPresent || buildClient.closed.Load() != 0 {
-		t.Fatalf("build-scope client must survive a web-scope exit switch: kept=%v closed=%d", buildPresent, buildClient.closed.Load())
+	if webPresent || buildPresent {
+		t.Fatalf("all-scope clients must be evicted after group exit switch: web=%v build=%v", webPresent, buildPresent)
 	}
 	if repository.updateCount() != 0 {
 		t.Fatalf("403 with mihomo enabled must not cool the Go node: updates=%d", repository.updateCount())
@@ -3650,6 +3662,15 @@ func TestMihomoStatusExposesTestGroup(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/proxies/XAI-TEST-GROUP"):
+			var body struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			testMu.Lock()
+			testGroup.Now = body.Name // 模拟测试组切换生效
+			testMu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/proxies/XAI-GROUP"):
 			useMu.Lock()
 			_ = json.NewEncoder(w).Encode(useGroup)
@@ -3689,6 +3710,38 @@ func TestMihomoStatusExposesTestGroup(t *testing.T) {
 	}
 	if status.TestMembers[1].Name != "t2" || status.TestMembers[1].Current || status.TestMembers[1].DelayMS != -1 {
 		t.Fatalf("test member[1] must be non-current t2: %+v", status.TestMembers[1])
+	}
+	// TestEpoch 是测试客户端独立的出口代际号：测试组切换只 bump testEpoch，
+	// 生产 Epoch 零扰动（守卫经 testEpoch 归因测试组探测）。
+	manager.mihomoMu.RLock()
+	testClient := manager.mihomoTest
+	manager.mihomoMu.RUnlock()
+	if testClient == nil {
+		t.Fatal("dual-channel config must create a test client")
+	}
+	before := testClient.Epoch()
+	if before == 0 {
+		t.Fatalf("test client epoch must be bumped at config apply, got 0")
+	}
+	if status.TestEpoch != before {
+		t.Fatalf("initial status TestEpoch: got %d, want %d", status.TestEpoch, before)
+	}
+	manager.mihomoMu.RLock()
+	useClient := manager.mihomo
+	manager.mihomoMu.RUnlock()
+	if useClient == nil {
+		t.Fatal("production client must exist")
+	}
+	useEpoch := useClient.Epoch()
+	if _, result := testClient.SwitchTestGroup(context.Background(), "t2", "guard_probe"); result != MihomoSwitchDone {
+		t.Fatalf("test switch: got %v, want Done", result)
+	}
+	status = manager.MihomoStatus(context.Background())
+	if status.TestEpoch != before+1 {
+		t.Fatalf("status TestEpoch must follow the test client epoch: got %d, want %d", status.TestEpoch, before+1)
+	}
+	if status.Epoch != useEpoch {
+		t.Fatalf("test-group switch must not bump production status epoch: got %d, want %d", status.Epoch, useEpoch)
 	}
 }
 

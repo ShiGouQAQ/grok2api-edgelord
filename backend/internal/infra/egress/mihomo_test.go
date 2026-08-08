@@ -1240,6 +1240,7 @@ func TestSetEpochStoreNilFallsBackToLocal(t *testing.T) {
 	defer server.Close()
 
 	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	client.switchMinInterval = 0 // 本测试验证 store 回退语义，禁用自动切换节流
 	store := newFakeEpochStore()
 	client.SetEpochStore(store)
 
@@ -1352,6 +1353,7 @@ func TestSwitchLockAcquiredReleasesAfterSwitch(t *testing.T) {
 	defer server.Close()
 
 	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	client.switchMinInterval = 0 // 本测试验证锁释放语义，禁用自动切换节流
 	lock := &fakeSwitchLock{acquired: true}
 	client.SetSwitchLock(lock)
 
@@ -1459,8 +1461,9 @@ func TestRefreshEpochFromStoreNilAndErrorGraceful(t *testing.T) {
 }
 
 // TestSwitchLockTTLCoversFullRetryWindow 验证锁 TTL = (MaxAttempts+1)×
-// VerifyTimeout + clearanceLockGrace，覆盖最坏同 IP 重试窗口；ttl 不足会
-// 在切换完成前提前过期，第二实例可并发进入切换。
+// (VerifyTimeout + perAttemptHTTPBudget) + clearanceLockGrace，覆盖最坏同 IP
+// 重试窗口（每轮含 SelectOptimal/SwitchNode/verifySwitch 的 HTTP 往返）；
+// ttl 不足会在切换完成前提前过期，第二实例可并发进入切换。
 func TestSwitchLockTTLCoversFullRetryWindow(t *testing.T) {
 	group, groupMu := mihomoTestGroup()
 	var switches []string
@@ -1474,7 +1477,7 @@ func TestSwitchLockTTLCoversFullRetryWindow(t *testing.T) {
 	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
 		t.Fatalf("switch: got %v, want Done", result)
 	}
-	want := time.Duration(3)*10*time.Second + clearanceLockGrace
+	want := time.Duration(3)*(10*time.Second+perAttemptHTTPBudget) + clearanceLockGrace
 	if lock.lastTTL != want {
 		t.Fatalf("lock TTL: got %v, want %v", lock.lastTTL, want)
 	}
@@ -1565,5 +1568,101 @@ func TestDelaySnapshotEpochChangeDiscardsWriteBack(t *testing.T) {
 	client.mu.Unlock()
 	if cached {
 		t.Fatal("stale probe result must not be written back to cache after epoch change")
+	}
+}
+
+// TestBumpEpochDoesNotRegressAfterFailedBumps 验证 P1-3：本地在连续失败 bump
+// 后领先共享值，随后成功 bump（返回较小的 shared）时本地不得回绕到历史值
+// （旧出口 clearance 指纹复活）；max 语义应保留本地领先值。
+func TestBumpEpochDoesNotRegressAfterFailedBumps(t *testing.T) {
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: "http://127.0.0.1:1", GroupName: "XAI-GROUP"})
+	store := newFakeEpochStore()
+	store.bumpErr = errors.New("redis down")
+	client.SetEpochStore(store)
+
+	client.BanNode("slow") // 降级 bump：local+1，shared 不动
+	client.BanNode("fast") // 降级 bump：local+1，shared 不动
+	want := client.Epoch() // 两次失败 bump 后的本地领先值（含构造时的初始 bump）
+	store.mu.Lock()
+	store.bumpErr = nil
+	store.mu.Unlock()
+	client.BanNode("dead") // 成功 bump：shared 只到 1，远小于本地领先值
+	if got := client.Epoch(); got != want {
+		t.Fatalf("local epoch regressed after successful bump: got %d, want %d", got, want)
+	}
+	store.mu.Lock()
+	shared := store.bumps["XAI-GROUP"]
+	store.mu.Unlock()
+	if shared != 1 {
+		t.Fatalf("shared store must have bumped once: got %d, want 1", shared)
+	}
+	if want <= shared {
+		t.Fatalf("test must exercise max branch: local %d must exceed shared %d", want, shared)
+	}
+}
+
+// TestAutoSwitchThrottledWithinInterval 验证 P1-1：故障驱动的自动切换
+// （SwitchAndBlacklistCurrent）在 switchMinInterval 内的第二次触发被节流为
+// Merged（不执行 PUT、不加冷却），而人工/管理驱动切换（SwitchToOptimal）
+// 不受节流限制。
+func TestAutoSwitchThrottledWithinInterval(t *testing.T) {
+	group, groupMu := mihomoTestGroup()
+	var switches []string
+	var switchMu sync.Mutex
+	server := mihomoTestServer(t, &group, groupMu, http.StatusNoContent, 0, &switches, &switchMu)
+	defer server.Close()
+
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: server.URL, GroupName: "XAI-GROUP"})
+	client.switchMinInterval = time.Minute // 拉长间隔：窗口内第二次自动切换必须被节流
+
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchDone {
+		t.Fatalf("first auto switch: got %v, want Done", result)
+	}
+	if result := client.SwitchAndBlacklistCurrent(context.Background(), "test"); result != MihomoSwitchMerged {
+		t.Fatalf("second auto switch within interval must be throttled to Merged, got %v", result)
+	}
+	switchMu.Lock()
+	puts := len(switches)
+	switchMu.Unlock()
+	if puts != 1 {
+		t.Fatalf("throttled switch must not PUT: got %d puts, want 1", puts)
+	}
+
+	if _, result := client.SwitchToOptimal(context.Background(), "manual"); result != MihomoSwitchDone {
+		t.Fatalf("manual switch must bypass throttle: got %v, want Done", result)
+	}
+}
+
+// TestRefreshEpochThrottledMergesWithinInterval 验证 P1-4：refreshEpochThrottled
+// 在 epochRefreshInterval 内合并（第二次调用不触发 GetEpoch 追平），间隔重置
+// 后再次追平。
+func TestRefreshEpochThrottledMergesWithinInterval(t *testing.T) {
+	client := NewMihomoClient(MihomoConfig{Enabled: true, APIURL: "http://127.0.0.1:1", GroupName: "XAI-GROUP"})
+	store := newFakeEpochStore()
+	client.SetEpochStore(store)
+	client.epochRefreshInterval = time.Hour // 窗口内刷新必须被合并
+
+	store.mu.Lock()
+	store.bumps["XAI-GROUP"] = 7
+	store.mu.Unlock()
+	client.refreshEpochThrottled() // 首次刷新：追平
+	if client.Epoch() != 7 {
+		t.Fatalf("first refresh must catch up: got %d, want 7", client.Epoch())
+	}
+
+	store.mu.Lock()
+	store.bumps["XAI-GROUP"] = 9 // 他实例又 bump 两次
+	store.mu.Unlock()
+	client.refreshEpochThrottled() // 间隔内：跳过
+	if client.Epoch() != 7 {
+		t.Fatalf("refresh within interval must be merged: got %d, want 7", client.Epoch())
+	}
+
+	client.mu.Lock()
+	client.lastEpochRefresh = time.Time{} // 重置节流
+	client.mu.Unlock()
+	client.refreshEpochThrottled()
+	if client.Epoch() != 9 {
+		t.Fatalf("refresh after throttle reset must catch up: got %d, want 9", client.Epoch())
 	}
 }

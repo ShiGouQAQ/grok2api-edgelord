@@ -147,55 +147,56 @@ func (l *Lease) Release() {
 }
 
 type Manager struct {
-	repository             repository.EgressRepository
-	cipher                 *security.Cipher
-	logger                 *slog.Logger
-	nodeMu                 sync.RWMutex
-	clientMu               sync.RWMutex
-	clearanceMu            sync.Mutex
-	operationsMu           sync.RWMutex
-	clients                map[clientCacheKey]cachedClient
-	inflight               sync.Map
-	nodes                  map[domain.Scope]cachedNodeSnapshot
-	healthyNodes           map[uint64]time.Time
-	nodeVersions           map[domain.Scope]uint64
-	nodeLoads              singleflight.Group
-	clientLoads            singleflight.Group
-	clientVersions         map[uint64]uint64
-	clientGeneration       uint64
-	buildHeaderTimeout     atomic.Int64
-	buildStreamIdleTimeout atomic.Int64
-	accountIsolated        atomic.Bool
-	operationsConfig       cachedOperationsConfig
-	operationsConfigLoad   singleflight.Group
-	operationsConfigVer    uint64
-	failureProbeMu         sync.Mutex
-	failureProber          FailureProber
-	failureProbes          map[uint64]failureProbeState
-	qualityVerifierMu      sync.Mutex
-	qualityVerifier        QualityVerifier
-	qualityVerifyFailures  atomic.Uint64
-	exitCoordinatorMu      sync.Mutex
-	exitCoordinator        ExitChangeCoordinator
-	lastClientCleanup      time.Time
-	clearanceLoads         singleflight.Group
-	mihomoMu               sync.RWMutex
-	mihomo                 *MihomoClient
-	mihomoTest             *MihomoClient
-	mihomoFallbackNext     time.Time
-	mihomoConfig           MihomoConfig
-	mihomoTestConfig       MihomoConfig
-	clearanceConfig        ClearanceConfig
-	clearanceVersion       uint64
-	clearances             map[string]clearanceState
-	lastClearanceCleanup   time.Time
-	solver                 clearanceSolver
-	clearanceLock          repository.DistributedLock
-	epochStore             repository.EgressEpochStore
-	switchLock             repository.DistributedLock
-	newBuildClient         func(string, time.Duration) (requestClient, error)
-	newBuildEnvClient      func(time.Duration) (requestClient, error)
-	newBrowserClient       func(string, string) (*browserClient, error)
+	repository              repository.EgressRepository
+	cipher                  *security.Cipher
+	logger                  *slog.Logger
+	nodeMu                  sync.RWMutex
+	clientMu                sync.RWMutex
+	clearanceMu             sync.Mutex
+	operationsMu            sync.RWMutex
+	clients                 map[clientCacheKey]cachedClient
+	inflight                sync.Map
+	nodes                   map[domain.Scope]cachedNodeSnapshot
+	healthyNodes            map[uint64]time.Time
+	nodeVersions            map[domain.Scope]uint64
+	nodeLoads               singleflight.Group
+	clientLoads             singleflight.Group
+	clientVersions          map[uint64]uint64
+	clientGeneration        uint64
+	buildHeaderTimeout      atomic.Int64
+	buildStreamIdleTimeout  atomic.Int64
+	accountIsolated         atomic.Bool
+	operationsConfig        cachedOperationsConfig
+	operationsConfigLoad    singleflight.Group
+	operationsConfigVer     uint64
+	failureProbeMu          sync.Mutex
+	failureProber           FailureProber
+	failureProbes           map[uint64]failureProbeState
+	qualityVerifierMu       sync.Mutex
+	qualityVerifier         QualityVerifier
+	qualityVerifyFailures   atomic.Uint64
+	exitCoordinatorMu       sync.Mutex
+	exitCoordinator         ExitChangeCoordinator
+	lastClientCleanup       time.Time
+	clearanceLoads          singleflight.Group
+	mihomoMu                sync.RWMutex
+	mihomo                  *MihomoClient
+	mihomoTest              *MihomoClient
+	mihomoFallbackNext      time.Time
+	mihomoConfig            MihomoConfig
+	mihomoTestConfig        MihomoConfig
+	clearanceConfig         ClearanceConfig
+	clearanceVersion        uint64
+	clearances              map[string]clearanceState
+	lastClearanceCleanup    time.Time
+	solver                  clearanceSolver
+	clearanceLock           repository.DistributedLock
+	epochStore              repository.EgressEpochStore
+	switchLock              repository.DistributedLock
+	blacklistEventPublisher BlacklistEventPublisher
+	newBuildClient          func(string, time.Duration) (requestClient, error)
+	newBuildEnvClient       func(time.Duration) (requestClient, error)
+	newBrowserClient        func(string, string) (*browserClient, error)
 }
 
 type clearanceState struct {
@@ -358,6 +359,25 @@ func (m *Manager) notifyExitChanged(scope domain.Scope) bool {
 	return true
 }
 
+// ApplyEgressEvent 应用跨实例广播的出口协调事件（订阅回调入口）：
+// exit_changed → OnExitChanged（失效依赖旧出口的 client 池）；黑名单事件 →
+// 合并进生产 Mihomo 客户端本地黑名单。Mihomo 未启用（mihomo 为 nil）时
+// 黑名单事件为 no-op；应用层只在 Mihomo 启用且注入事件总线时订阅。
+func (m *Manager) ApplyEgressEvent(event repository.EgressEvent) {
+	switch event.Kind {
+	case repository.EgressEventExitChanged:
+		m.OnExitChanged(domain.Scope(event.Scope))
+	case repository.EgressEventNodeBanned, repository.EgressEventNodeUnbanned, repository.EgressEventBlacklistCleared:
+		m.mihomoMu.RLock()
+		mihomo := m.mihomo
+		m.mihomoMu.RUnlock()
+		if mihomo == nil {
+			return
+		}
+		mihomo.MergeBlacklistEvent(event)
+	}
+}
+
 // verifyNodeAfterSwitch 在 Mihomo 切换成功后对节点做一次模型质量验证。
 // 验证失败只记录日志并累加诊断计数 qualityVerifyFailures，绝不施加冷却：
 // 403 已表明 Go 节点本身健康，失败更多反映新出口的瞬时状态。
@@ -509,6 +529,15 @@ func (m *Manager) SetSwitchLock(value repository.DistributedLock) {
 	m.mihomoMu.Unlock()
 }
 
+// SetBlacklistEventPublisher 注入跨实例的 Mihomo 黑名单事件发布回调（镜像
+// SetEpochStore 模式）；nil 清除。惰性透传：仅在下一次 UpdateMihomoConfig
+// 时透传给 MihomoClient（客户端在重建时继承），已运行的客户端不受影响。
+func (m *Manager) SetBlacklistEventPublisher(value BlacklistEventPublisher) {
+	m.mihomoMu.Lock()
+	m.blacklistEventPublisher = value
+	m.mihomoMu.Unlock()
+}
+
 func (m *Manager) UpdateClearanceConfig(value ClearanceConfig) {
 	value.Mode = strings.TrimSpace(value.Mode)
 	value.FlareSolverrURL = strings.TrimSpace(value.FlareSolverrURL)
@@ -548,9 +577,11 @@ func (m *Manager) UpdateMihomoConfig(value MihomoConfig) {
 	} else {
 		m.mihomo.UpdateConfig(value)
 	}
-	// 透传跨实例协调组件：epochStore/switchLock 为 nil 时客户端回退本地行为。
+	// 透传跨实例协调组件：epochStore/switchLock/blacklistEventPublisher 为
+	// nil 时客户端回退本地行为。
 	m.mihomo.SetEpochStore(m.epochStore)
 	m.mihomo.SetSwitchLock(m.switchLock)
+	m.mihomo.SetBlacklistEventPublisher(m.blacklistEventPublisher)
 	m.mihomoConfig = value
 	m.updateMihomoTestLocked(value)
 }
@@ -607,6 +638,10 @@ type MihomoStatus struct {
 	TestEnabled     bool
 	TestGroupName   string
 	TestCurrentNode string
+	// TestEpoch 是测试客户端（测试组）独立的出口代际号，与生产 Epoch 互不
+	// 扰动；质量守卫据此归因测试组探测（testEpoch 字段），避免测试组切换
+	// 被误判为生产出口变化。
+	TestEpoch uint64
 	// Members/TestMembers 是生产组/测试组成员快照（当前节点优先，其次按
 	// 延迟升序，无数据最后）。成员拉取失败时为空，不使状态 API 降级。
 	Members     []MihomoMemberStatus
@@ -646,6 +681,7 @@ func (m *Manager) MihomoStatus(ctx context.Context) MihomoStatus {
 	if testMihomo != nil {
 		status.TestEnabled = testConfig.Enabled
 		status.TestGroupName = testConfig.GroupName
+		status.TestEpoch = testMihomo.Epoch()
 		testCtx, testCancel := context.WithTimeout(ctx, 3*time.Second)
 		defer testCancel()
 		if node, err := testMihomo.GetCurrentNode(testCtx); err == nil {
@@ -866,7 +902,16 @@ func (m *Manager) maybeMihomoFallback() {
 	}
 	m.mihomoFallbackNext = now.Add(mihomoFallbackMinInterval)
 	m.mihomoMu.Unlock()
-	go mihomo.SwitchToOptimal(context.Background(), "acquire_fallback")
+	go func() {
+		_, result := mihomo.SwitchToOptimal(context.Background(), "acquire_fallback")
+		if result == MihomoSwitchDone {
+			// P1-6: 出口已切换，失效依赖旧出口的 client 池——所有 DB 节点共享
+			// 组出口，全 scope 失效。
+			if !m.notifyExitChanged("") {
+				m.OnExitChanged("")
+			}
+		}
+	}()
 }
 
 func (m *Manager) Acquire(ctx context.Context, scope domain.Scope, affinity string) (*Lease, error) {
@@ -1268,6 +1313,11 @@ func (m *Manager) acquire(ctx context.Context, scope domain.Scope, affinity stri
 			if !selected.Enabled && !qualityProbe {
 				return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 已禁用", boundNodeID))
 			}
+			// 同步测试节点禁止承载生产流量，即使被手动绑定——与池排除逻辑一致
+			// （质量守卫经测试组 API 探测同步成员，不走本路径）。
+			if selected.IsMihomoSynced() {
+				return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 是 Mihomo 同步测试节点", boundNodeID))
+			}
 			if strings.TrimSpace(selected.EncryptedProxyURL) == "" {
 				return m.acquireUnavailableFallback(ctx, scope, affinity, allowDirect, encryptedCredentialCookies, managedClearance, fmt.Errorf("绑定出口节点 %d 未配置代理地址", boundNodeID))
 			}
@@ -1580,7 +1630,7 @@ func (m *Manager) leaseForNodeWithOptions(ctx context.Context, scope domain.Scop
 	// Manual mode may prefer account-bound cookies. Managed mode always enters
 	// the FlareSolverr lifecycle so stale imported cookies cannot bypass refresh.
 	if managedClearance {
-		clearanceKey = clearanceCacheKey(selected.ID, proxyURL, sticky)
+		clearanceKey = m.clearanceCacheKey(selected.ID, proxyURL)
 		cookies, userAgent, err = m.ensureClearance(ctx, selected, proxyURL, cookies, userAgent, clearanceKey, !sticky)
 		if err != nil {
 			return nil, false, err
@@ -1636,16 +1686,21 @@ func (m *Manager) decrementInflight(nodeID uint64) {
 	}
 }
 
-func clearanceCacheKey(nodeID uint64, proxyURL string, sticky bool) string {
+// clearanceCacheKey 以出口绑定指纹（bindingFingerprint，含 TargetURL+proxyURL+
+// Mihomo epoch）为去重维度：Mihomo 共享出口下多个 DB 节点指纹相同 → 合并缓存
+// 与单飞求解；独立出口节点 proxyURL 天然不同 → fingerprint 天然不同 → 仍各自
+// 求解（与上游按 nodeID 去重的行为等价）。nodeID 不再参与 key：同一出口的节点
+// 共享同一份 clearance，403 失效（Lease.InvalidateClearance）也一次覆盖同出口
+// 全部节点。sticky 账号代理的渲染 URL 含账号身份，指纹天然区分各账号。nodeID
+// ==0（direct）保留字面量 "direct"。
+func (m *Manager) clearanceCacheKey(nodeID uint64, proxyURL string) string {
 	if nodeID == 0 {
 		return "direct"
 	}
-	base := "node:" + strconv.FormatUint(nodeID, 10)
-	if !sticky {
-		return base
-	}
-	digest := sha256.Sum256([]byte(proxyURL))
-	return base + ":account:" + fmt.Sprintf("%x", digest[:16])
+	m.clearanceMu.Lock()
+	cfg := m.clearanceConfig
+	m.clearanceMu.Unlock()
+	return "fp:" + m.clearanceBindingFingerprint(cfg, proxyURL)
 }
 
 func renderAccountProxyURL(template, accountKey string) (string, error) {
@@ -2204,8 +2259,9 @@ func (m *Manager) feedbackForScope(ctx context.Context, scope domain.Scope, node
 						// G2：出口已切换，失效依赖旧出口的 client 池——keep-alive 隧道
 						// 会 pin 旧出口直到空闲超时，池不失效则后续请求继续走旧出口；
 						// 与 Resin 账号级路径（InvalidateClearance 关闭租约池）一致。
-						if !m.notifyExitChanged(value.Scope) {
-							m.OnExitChanged(value.Scope)
+						// Mihomo 组出口为所有 DB 节点（跨作用域）共享，全 scope 失效。
+						if !m.notifyExitChanged("") {
+							m.OnExitChanged("")
 						}
 					case MihomoSwitchFailed:
 						m.applyForbiddenCooldown(ctx, value, scope)
@@ -2289,13 +2345,20 @@ func (m *Manager) applyForbiddenCooldown(ctx context.Context, value domain.Node,
 	value.Health = max(0.05, value.Health*0.7)
 	value.CooldownUntil = nil
 	value.LastError = "anti-bot rejection"
+	var clearanceKey string
+	if isGrokWebScope(scope) && m.clearanceMode() == "flaresolverr" && m.cipher != nil {
+		if proxyURL, decryptErr := m.cipher.Decrypt(value.EncryptedProxyURL); decryptErr == nil {
+			if proxyURL, normalizeErr := application.NormalizeProxyURL(proxyURL); normalizeErr == nil {
+				clearanceKey = m.clearanceCacheKey(value.ID, proxyURL)
+			}
+		}
+	}
 	m.clearanceMu.Lock()
-	if isGrokWebScope(scope) && m.clearanceConfig.Mode == "flaresolverr" {
-		key := clearanceCacheKey(value.ID, "", false)
-		state := m.clearances[key]
+	if clearanceKey != "" {
+		state := m.clearances[clearanceKey]
 		state.invalid = true
 		state.used = true
-		m.clearances[key] = state
+		m.clearances[clearanceKey] = state
 	}
 	m.clearanceMu.Unlock()
 	m.clientMu.Lock()
@@ -2428,7 +2491,16 @@ func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, k
 	bindingFingerprint := m.clearanceBindingFingerprint(cfg, proxyURL)
 	interval := clearanceRefreshInterval(cfg)
 	if persist && node.ID != 0 && lock != nil {
-		release, acquired, err := lock.Acquire(ctx, "egress-clearance:"+strconv.FormatUint(node.ID, 10), timeout+clearanceLockGrace)
+		// 追平共享 epoch 后重算指纹，使锁 key 与持久化匹配都基于最新出口代际。
+		// 其他实例刚切换过出口（共享 epoch 已 bump）时，本实例的指纹随之变化，
+		// 绑定旧出口的持久化 clearance 判定为不新鲜而重新求解；本实例自身切换时
+		// 本地 epoch 已是最新，重算为等价操作（幂等）。锁 key 含 fingerprint：
+		// 共享出口（Mihomo）下所有节点同一指纹 → 跨实例合并去重；独立出口节点
+		// 指纹天然不同 → 仍并行求解（与上游按 nodeID 锁定的行为等价）。
+		m.refreshMihomoEpochFromStore(ctx)
+		bindingFingerprint = m.clearanceBindingFingerprint(cfg, proxyURL)
+		fingerprint = m.clearanceFingerprint(cfg, proxyURL)
+		release, acquired, err := lock.Acquire(ctx, "egress-clearance-fp:"+bindingFingerprint, timeout+clearanceLockGrace)
 		if err != nil {
 			return clearanceSolution{}, fmt.Errorf("协调 Clearance 刷新: %w", err)
 		}
@@ -2448,13 +2520,6 @@ func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, k
 			return clearanceSolution{}, errors.New("另一个实例正在刷新 Cloudflare Clearance")
 		}
 		defer release()
-		// 已持有分布式锁（本实例是求解者）：追平共享 epoch 后重算指纹。若其他
-		// 实例刚切换过出口（共享 epoch 已 bump），本实例的指纹随之变化，绑定旧
-		// 出口的持久化 clearance 判定为不新鲜而重新求解；本实例自身切换时
-		// 本地 epoch 已是最新，重算为等价操作（幂等）。
-		m.refreshMihomoEpochFromStore(ctx)
-		bindingFingerprint = m.clearanceBindingFingerprint(cfg, proxyURL)
-		fingerprint = m.clearanceFingerprint(cfg, proxyURL)
 		if !force {
 			if solution, refreshedAt, ok := m.loadPersistedClearance(ctx, node.ID, fingerprint, bindingFingerprint, interval); ok {
 				m.cacheClearance(key, solution, refreshedAt, solveVersion, fingerprint, bindingFingerprint, interval)
@@ -2480,8 +2545,23 @@ func (m *Manager) refreshNode(ctx context.Context, node domain.Node, proxyURL, k
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()
+					// 轮换前重读出口绑定指纹：本轮求解期间出口未切换（epoch 未变）
+					// 时，失败源于求解器/目标/当前出口本身，轮换只会使全部缓存
+					// 失效并重新触发失败的求解（solve 失败→切换→再失效→再失败的
+					// 无界环）；不轮换，改为冷却节点（既有自动切换节流持续生效）。
+					// epoch 已变说明求解期间出口已被切换，本次失败绑定的是旧出口。
+					if m.clearanceBindingFingerprint(cfg, proxyURL) == bindingFingerprint {
+						m.applyForbiddenCooldown(ctx, node, node.Scope)
+						return
+					}
 					switch mihomo.SwitchAndBlacklistCurrent(ctx, "clearance_solve_failed") {
-					case MihomoSwitchDone, MihomoSwitchMerged:
+					case MihomoSwitchDone:
+						// P1-6: 出口已切换，失效依赖旧出口的 client 池——所有 DB
+						// 节点共享组出口，全 scope 失效。
+						if !m.notifyExitChanged("") {
+							m.OnExitChanged("")
+						}
+					case MihomoSwitchMerged:
 						// 切换成功或已在途：新出口负责后续重新解 CF，静默。
 					case MihomoSwitchFailed:
 						m.applyForbiddenCooldown(ctx, node, node.Scope)
@@ -2541,23 +2621,47 @@ func (m *Manager) waitPersistedClearance(ctx context.Context, nodeID uint64, fin
 	}
 }
 
+// loadPersistedClearance 先按节点自身行读取（与上游一致，覆盖独立出口节点的
+// 常态路径），未命中再按出口维度扫描：共享出口（Mihomo）下多个 DB 节点指纹
+// 相同，求解结果可能落在同出口的其他节点行上，按 fingerprint 匹配任意行即可
+// 跨实例复用，避免各节点各自求解。表结构不变，仅读取方式改变。
 func (m *Manager) loadPersistedClearance(ctx context.Context, nodeID uint64, fingerprint, bindingFingerprint string, interval time.Duration) (clearanceSolution, time.Time, bool) {
-	latest, err := m.repository.GetEgressNode(ctx, nodeID)
-	if err != nil || latest.ClearanceRefreshedAt == nil || latest.ClearanceFingerprint != fingerprint ||
-		(latest.ClearanceBindingFingerprint != "" && latest.ClearanceBindingFingerprint != bindingFingerprint) ||
-		time.Since(*latest.ClearanceRefreshedAt) >= interval {
+	if latest, err := m.repository.GetEgressNode(ctx, nodeID); err == nil {
+		if solution, refreshedAt, ok := m.matchPersistedClearance(latest, fingerprint, bindingFingerprint, interval); ok {
+			return solution, refreshedAt, true
+		}
+	}
+	nodes, err := m.repository.ListEgressNodes(ctx, "", repository.SortQuery{})
+	if err != nil {
 		return clearanceSolution{}, time.Time{}, false
 	}
-	cookies, err := m.cipher.Decrypt(latest.EncryptedCloudflareCookie)
+	for _, candidate := range nodes {
+		if candidate.ID == nodeID {
+			continue
+		}
+		if solution, refreshedAt, ok := m.matchPersistedClearance(candidate, fingerprint, bindingFingerprint, interval); ok {
+			return solution, refreshedAt, true
+		}
+	}
+	return clearanceSolution{}, time.Time{}, false
+}
+
+func (m *Manager) matchPersistedClearance(value domain.Node, fingerprint, bindingFingerprint string, interval time.Duration) (clearanceSolution, time.Time, bool) {
+	if value.ClearanceRefreshedAt == nil || value.ClearanceFingerprint != fingerprint ||
+		(value.ClearanceBindingFingerprint != "" && value.ClearanceBindingFingerprint != bindingFingerprint) ||
+		time.Since(*value.ClearanceRefreshedAt) >= interval {
+		return clearanceSolution{}, time.Time{}, false
+	}
+	cookies, err := m.cipher.Decrypt(value.EncryptedCloudflareCookie)
 	if err != nil {
 		return clearanceSolution{}, time.Time{}, false
 	}
 	cookies = application.SanitizeCloudflareCookies(cookies)
-	userAgent := strings.TrimSpace(latest.UserAgent)
+	userAgent := strings.TrimSpace(value.UserAgent)
 	if userAgent == "" {
 		return clearanceSolution{}, time.Time{}, false
 	}
-	return clearanceSolution{Cookies: cookies, UserAgent: userAgent}, *latest.ClearanceRefreshedAt, true
+	return clearanceSolution{Cookies: cookies, UserAgent: userAgent}, *value.ClearanceRefreshedAt, true
 }
 
 func (m *Manager) cacheClearance(key string, solution clearanceSolution, refreshedAt time.Time, version uint64, fingerprint, bindingFingerprint string, interval time.Duration) {
@@ -2715,27 +2819,36 @@ func (m *Manager) RefreshClearance(ctx context.Context, nodeID uint64) error {
 	if err != nil {
 		return err
 	}
-	key := clearanceCacheKey(node.ID, proxyURL, false)
+	key := m.clearanceCacheKey(node.ID, proxyURL)
 	_, err, _ = m.clearanceLoads.Do(key, func() (any, error) {
 		return m.refreshNode(ctx, node, proxyURL, key, true, true, true, false, time.Time{})
 	})
 	return err
 }
 
+// InvalidateClearance 使节点当前出口（bindingFingerprint）对应的 clearance
+// 缓存失效：共享出口下同指纹的全部节点一并失效（同一份 cookies），独立出口
+// 节点指纹不同互不影响。client 池按节点失效（与上游一致）。
 func (m *Manager) InvalidateClearance(nodeID uint64) {
-	m.clearanceMu.Lock()
-	prefix := "node:" + strconv.FormatUint(nodeID, 10)
-	if nodeID == 0 {
-		prefix = "direct"
-	}
-	for key, state := range m.clearances {
-		if key == prefix || strings.HasPrefix(key, prefix+":") {
-			state.invalid = true
-			state.used = true
-			m.clearances[key] = state
+	key := "direct"
+	if nodeID != 0 {
+		key = ""
+		if value, err := m.repository.GetEgressNode(context.Background(), nodeID); err == nil && m.cipher != nil {
+			if proxyURL, decryptErr := m.cipher.Decrypt(value.EncryptedProxyURL); decryptErr == nil {
+				if proxyURL, normalizeErr := application.NormalizeProxyURL(proxyURL); normalizeErr == nil {
+					key = m.clearanceCacheKey(nodeID, proxyURL)
+				}
+			}
 		}
 	}
-	m.clearanceMu.Unlock()
+	if key != "" {
+		m.clearanceMu.Lock()
+		state := m.clearances[key]
+		state.invalid = true
+		state.used = true
+		m.clearances[key] = state
+		m.clearanceMu.Unlock()
+	}
 	m.clientMu.Lock()
 	stale := m.invalidateClientLocked(nodeID)
 	m.clientMu.Unlock()
@@ -2756,17 +2869,28 @@ func (m *Manager) ForgetClearance(nodeID uint64) {
 // would add avoidable lock contention and CPU work.
 func (m *Manager) ForgetClearances(nodeIDs []uint64) {
 	ids := make(map[uint64]struct{}, len(nodeIDs))
-	prefixes := make(map[string]struct{}, len(nodeIDs))
+	keys := make(map[string]struct{}, len(nodeIDs))
 	for _, nodeID := range nodeIDs {
 		if _, exists := ids[nodeID]; exists {
 			continue
 		}
 		ids[nodeID] = struct{}{}
-		prefix := "node:" + strconv.FormatUint(nodeID, 10)
 		if nodeID == 0 {
-			prefix = "direct"
+			keys["direct"] = struct{}{}
+			continue
 		}
-		prefixes[prefix] = struct{}{}
+		// 按节点当前出口指纹失效：清除同名缓存的节点编辑（改 cookies/UA 等）
+		// 立即生效；改代理的节点指纹已变、旧条目天然不可达，此处为空操作。
+		if m.cipher == nil {
+			continue
+		}
+		if value, err := m.repository.GetEgressNode(context.Background(), nodeID); err == nil {
+			if proxyURL, decryptErr := m.cipher.Decrypt(value.EncryptedProxyURL); decryptErr == nil {
+				if proxyURL, normalizeErr := application.NormalizeProxyURL(proxyURL); normalizeErr == nil {
+					keys[m.clearanceCacheKey(nodeID, proxyURL)] = struct{}{}
+				}
+			}
+		}
 	}
 	if len(ids) == 0 {
 		return
@@ -2775,15 +2899,7 @@ func (m *Manager) ForgetClearances(nodeIDs []uint64) {
 	m.nodeMu.Lock()
 	m.clientMu.Lock()
 	for key := range m.clearances {
-		prefix := key
-		if strings.HasPrefix(key, "node:") {
-			if separator := strings.IndexByte(key[len("node:"):], ':'); separator >= 0 {
-				prefix = key[:len("node:")+separator]
-			}
-		} else if strings.HasPrefix(key, "direct:") {
-			prefix = "direct"
-		}
-		if _, selected := prefixes[prefix]; selected {
+		if _, selected := keys[key]; selected {
 			delete(m.clearances, key)
 		}
 	}
@@ -2865,8 +2981,8 @@ func (m *Manager) RefreshDueClearances(ctx context.Context, force bool) error {
 			refreshErrors = append(refreshErrors, normalizeErr)
 			continue
 		}
+		key := m.clearanceCacheKey(node.ID, proxyURL)
 		m.clearanceMu.Lock()
-		key := clearanceCacheKey(node.ID, proxyURL, false)
 		state, known := m.clearances[key]
 		m.clearanceMu.Unlock()
 		fingerprint := m.clearanceFingerprint(cfg, proxyURL)

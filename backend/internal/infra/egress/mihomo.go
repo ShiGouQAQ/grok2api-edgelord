@@ -47,6 +47,25 @@ const mihomoSwitchLockKeyPrefix = "egress-mihomo-switch:"
 // 共享存储故障时卡死本地切换互斥。
 const mihomoEpochStoreBumpTimeout = 3 * time.Second
 
+// mihomoAutoSwitchMinInterval 是"故障驱动的自动切换"（SwitchAndBlacklist
+// Current）的最小间隔：403 环与 solve 环可能在短时间内反复触发切换，而每次
+// 成功切换 bump epoch 都会使全部 clearance 失效（求解风暴）。间隔内再次
+// 触发直接按 Merged 合并（静默，不加冷却）；人工/管理驱动切换
+// （SwitchToOptimal/Rotate）不受限。
+const mihomoAutoSwitchMinInterval = 30 * time.Second
+
+// mihomoEpochRefreshInterval 是共享 epoch 周期同步的最小间隔（见
+// refreshEpochThrottled）：SelectOptimal 与切换路径调用频繁，逐次 GetEpoch
+// 会产生不必要的 Redis 往返，间隔内合并为一次。
+const mihomoEpochRefreshInterval = time.Second
+
+// perAttemptHTTPBudget 是切换锁 TTL 每轮尝试预留的 HTTP 往返预算：除
+// waitExitIPChange 轮询（VerifyTimeout）外，每轮还有 SelectOptimal 拉组、
+// SwitchNode PUT、verifySwitch GET 等 HTTP 调用（单次 ≤5s client 超时）。
+// TTL 只按 VerifyTimeout 计算会在切换完成前提前过期，锁被第二实例抢走导致
+// 并发切换。
+const perAttemptHTTPBudget = 15 * time.Second
+
 // mihomoDelayProbeTimeout 是主动延迟探测的单节点探测截止时长，同时作为
 // ProbeGroupDelays 的默认 timeout 参数。
 const mihomoDelayProbeTimeout = 5 * time.Second
@@ -162,6 +181,15 @@ type MihomoClient struct {
 	lastNodeSet map[string]struct{}
 	lastNow     string // 上次观察到的默认连接节点（订阅更新可能直接改写 now）
 	switching   bool
+	// lastAutoSwitchTime 是上次"故障驱动的自动切换"成功的时刻；switchMinInterval
+	// 内的再次自动切换被节流（返回 Merged），防止 403/solve 环高频切换触发
+	// clearance 风暴。人工/管理驱动切换（SwitchToOptimal/Rotate）不检查也不更新。
+	lastAutoSwitchTime time.Time
+	switchMinInterval  time.Duration
+	// lastEpochRefresh 是上次共享 epoch 周期同步的时刻；epochRefreshInterval
+	// 内合并（见 refreshEpochThrottled），避免每个请求一次 Redis 往返。
+	lastEpochRefresh     time.Time
+	epochRefreshInterval time.Duration
 	// switchCount 是成功切换的次数（统计用途，状态 API 展示）。
 	switchCount atomic.Uint64
 	// epoch 是出口代际版本号：任何可能改变出口选择状态的事件（成功切换、
@@ -181,15 +209,26 @@ type MihomoClient struct {
 	// 部署零回归。
 	epochStore repository.EgressEpochStore
 	switchLock repository.DistributedLock
+	// blacklistEventPublisher 是可选注入的黑名单事件发布回调（多实例部署
+	// 经 Redis 事件总线广播，其他实例合并进本地黑名单）；nil 时黑名单保持
+	// 进程本地（单实例部署零回归）。发布在 c.mu 持锁路径上同步执行，保证
+	// 各实例合并顺序与发布顺序一致。
+	blacklistEventPublisher BlacklistEventPublisher
 }
+
+// BlacklistEventPublisher 广播一次 Mihomo 黑名单操作（ban/unban/clear）供
+// 其他实例合并；nil 时客户端保持进程本地黑名单（单实例零回归）。
+type BlacklistEventPublisher func(context.Context, repository.EgressEvent) error
 
 // NewMihomoClient 创建并配置一个 Mihomo 客户端。
 func NewMihomoClient(cfg MihomoConfig) *MihomoClient {
 	client := &MihomoClient{
-		logger:     slog.Default(),
-		client:     &http.Client{Timeout: 5 * time.Second},
-		blacklist:  make(map[string]time.Time),
-		delayCache: make(map[string]mihomoDelayCache),
+		logger:               slog.Default(),
+		client:               &http.Client{Timeout: 5 * time.Second},
+		blacklist:            make(map[string]time.Time),
+		delayCache:           make(map[string]mihomoDelayCache),
+		switchMinInterval:    mihomoAutoSwitchMinInterval,
+		epochRefreshInterval: mihomoEpochRefreshInterval,
 	}
 	client.UpdateConfig(cfg)
 	return client
@@ -217,6 +256,14 @@ func (c *MihomoClient) SetEpochStore(store repository.EgressEpochStore) {
 func (c *MihomoClient) SetSwitchLock(lock repository.DistributedLock) {
 	c.mu.Lock()
 	c.switchLock = lock
+	c.mu.Unlock()
+}
+
+// SetBlacklistEventPublisher 注入跨实例黑名单事件发布回调；nil 时回退进程
+// 本地黑名单（单实例部署零回归）。
+func (c *MihomoClient) SetBlacklistEventPublisher(publisher BlacklistEventPublisher) {
+	c.mu.Lock()
+	c.blacklistEventPublisher = publisher
 	c.mu.Unlock()
 }
 
@@ -279,9 +326,11 @@ func (c *MihomoClient) Epoch() uint64 {
 
 // bumpEpochLocked 递增出口代际版本号并清空延迟探测缓存（两者同生命周期：
 // 任何出口选择状态变化都使旧探测结果失效）。注入了 epochStore 时以共享
-// 存储为权威：BumpEpoch 成功用返回值覆盖本地 atomic（成功后本地=共享值，
-// 保证跨实例单调一致）；失败时保留本地 +1 降级（记 Warn，绝不失败）——
-// 代际号语义允许短暂不一致，下一次成功 bump 或 RefreshEpochFromStore 追平。
+// 存储为权威：BumpEpoch 成功用返回值追平本地 atomic（max 语义，只前向）——
+// 本地在降级 bump 期间可能已领先共享值（例如连续两次失败 bump 后共享仍
+// 落后），此时若直接 Store(shared) 会把本地拉回历史值，旧出口 clearance
+// 指纹复活；只有 shared > local 才写入。失败时保留本地 +1 降级（记 Warn，
+// 绝不失败）——代际号语义允许短暂不一致，下一次成功 bump 或周期刷新追平。
 // 调用方须持有 c.mu（保证各事件的本地代际号与共享存储同序）。
 func (c *MihomoClient) bumpEpochLocked() {
 	clear(c.delayCache)
@@ -302,7 +351,25 @@ func (c *MihomoClient) bumpEpochLocked() {
 		c.epoch.Add(1)
 		return
 	}
-	c.epoch.Store(shared)
+	if shared > c.epoch.Load() {
+		c.epoch.Store(shared)
+	}
+}
+
+// refreshEpochThrottled 合并并节流周期性的共享 epoch 同步：最近
+// epochRefreshInterval 内已同步过则跳过（mu 保护，并发调用单飞），避免
+// SelectOptimal/切换高频路径逐次 GetEpoch 的 Redis 往返。多实例部署下其他
+// 实例切换出口会使共享 epoch 领先本地镜像，周期刷新让 clearance 指纹收敛；
+// 单实例（无 epochStore）为 no-op。best-effort：失败仅记 Debug（内部处理）。
+func (c *MihomoClient) refreshEpochThrottled() {
+	c.mu.Lock()
+	if !c.lastEpochRefresh.IsZero() && time.Since(c.lastEpochRefresh) < c.epochRefreshInterval {
+		c.mu.Unlock()
+		return
+	}
+	c.lastEpochRefresh = time.Now()
+	c.mu.Unlock()
+	c.RefreshEpochFromStore(context.Background())
 }
 
 // RefreshEpochFromStore 从共享 epoch 存储拉取当前代际号并追平本地 atomic
@@ -362,6 +429,7 @@ func (c *MihomoClient) ClearBlacklist() int {
 	if count > 0 {
 		clear(c.blacklist)
 		c.bumpEpochLocked()
+		c.publishBlacklistEventLocked(repository.EgressEventBlacklistCleared, "")
 	}
 	return count
 }
@@ -381,6 +449,7 @@ func (c *MihomoClient) BanNode(name string) int {
 		c.bumpEpochLocked()
 	}
 	c.blacklist[name] = time.Now().UTC().Add(mihomoBlacklistTTL)
+	c.publishBlacklistEventLocked(repository.EgressEventNodeBanned, name)
 	return len(c.blacklist)
 }
 
@@ -392,8 +461,64 @@ func (c *MihomoClient) UnbanNode(name string) int {
 	if _, exists := c.blacklist[name]; exists {
 		delete(c.blacklist, name)
 		c.bumpEpochLocked()
+		c.publishBlacklistEventLocked(repository.EgressEventNodeUnbanned, name)
 	}
 	return len(c.blacklist)
+}
+
+// publishBlacklistEventLocked 广播一次黑名单操作到共享事件总线（其他实例
+// 经 MergeBlacklistEvent 合并）。调用方须持有 c.mu；同步发布保证各实例
+// 合并顺序与发布顺序一致。best-effort：失败仅记 Warn，绝不阻断本地黑名单
+// 操作（与 bumpEpochLocked 的降级语义一致）。
+func (c *MihomoClient) publishBlacklistEventLocked(kind repository.EgressEventKind, nodeName string) {
+	publisher := c.blacklistEventPublisher
+	if publisher == nil {
+		return
+	}
+	event := repository.EgressEvent{Kind: kind, Group: c.config.GroupName, NodeName: nodeName}
+	ctx, cancel := context.WithTimeout(context.Background(), mihomoEpochStoreBumpTimeout)
+	defer cancel()
+	if err := publisher(ctx, event); err != nil {
+		logger := c.logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("mihomo_blacklist_event_publish_failed", "kind", string(kind), "group", event.Group, "node", nodeName, "error", err)
+	}
+}
+
+// MergeBlacklistEvent 将其他实例广播的黑名单事件合并进本地黑名单（幂等；
+// 只增/只清，不删除对方刚加的封禁）：
+//   - node_banned：加入（已存在则刷新 TTL）；
+//   - node_unbanned：仅当事件晚于本地封禁时刻（本地封禁时刻 ≈ 截止时刻 -
+//     TTL）才解禁，防止过期的解禁事件删掉刚收到的封禁；
+//   - blacklist_cleared：清空。
+//
+// 组名不匹配（测试组等其他客户端）时忽略。本地不 bump epoch：封禁源实例
+// 已通过共享 epochStore 递增，周期刷新（refreshEpochThrottled）让本地镜像
+// 收敛，clearance 指纹保持一致。
+func (c *MihomoClient) MergeBlacklistEvent(event repository.EgressEvent) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.config.GroupName == "" || event.Group != c.config.GroupName {
+		return
+	}
+	switch event.Kind {
+	case repository.EgressEventNodeBanned:
+		if strings.TrimSpace(event.NodeName) != "" {
+			c.blacklist[event.NodeName] = time.Now().UTC().Add(mihomoBlacklistTTL)
+		}
+	case repository.EgressEventNodeUnbanned:
+		until, exists := c.blacklist[event.NodeName]
+		if !exists {
+			return
+		}
+		if event.PublishedAt.IsZero() || event.PublishedAt.After(until.Add(-mihomoBlacklistTTL)) {
+			delete(c.blacklist, event.NodeName)
+		}
+	case repository.EgressEventBlacklistCleared:
+		clear(c.blacklist)
+	}
 }
 
 // GetGroupNodes 获取代理组当前的全部节点列表（GET /proxies/{group} 的 all）。
@@ -465,6 +590,9 @@ func (c *MihomoClient) SelectOptimalInGroup(ctx context.Context, groupName strin
 }
 
 func (c *MihomoClient) selectOptimalInGroup(ctx context.Context, groupName string, excludeCurrent bool) (string, error) {
+	// P1-4：周期追平共享 epoch 镜像（他实例 bump 后本实例收敛）；节流合并，
+	// best-effort，绝不阻塞选路。
+	c.refreshEpochThrottled()
 	group, err := c.fetchGroupNamed(ctx, groupName)
 	if err != nil {
 		return "", err
@@ -537,21 +665,25 @@ func (c *MihomoClient) selectOptimalInGroup(ctx context.Context, groupName strin
 // SwitchAndBlacklistCurrent 将当前节点加入黑名单并切换到最优节点。
 //
 // 单飞：同一时刻只允许一次切换进行，并发调用直接合并（返回 Merged）。
+// 节流：故障驱动的自动切换受 switchMinInterval 限频，间隔内再次触发直接
+// 返回 Merged（静默，不加冷却），防止 403/solve 环高频切换触发 clearance
+// 风暴。
 // 返回 MihomoSwitchDone 表示真实发生了切换（版本号 +1）；MihomoSwitchFailed
 // 表示执行失败（含同出口 IP 重试耗尽），此时调用方应回退 Go 节点冷却；
 // MihomoSwitchMerged 表示未执行任何操作，调用方不得应用冷却。reason 记录在
 // 日志中用于定位切换来源。
 func (c *MihomoClient) SwitchAndBlacklistCurrent(ctx context.Context, reason string) MihomoSwitchResult {
-	_, result := c.doSwitch(ctx, reason, true)
+	_, result := c.doSwitch(ctx, reason, true, true)
 	return result
 }
 
 // SwitchToOptimal 手动切换到当前最优节点（不封禁当前节点）。
 //
-// 与 SwitchAndBlacklistCurrent 的区别仅在于不动黑名单；单飞语义一致，
-// 并发调用直接合并（返回空串、Merged）。返回 (目标节点, 切换结果)。
+// 与 SwitchAndBlacklistCurrent 的区别仅在于不动黑名单、不受自动切换节流
+// 限制；单飞语义一致，并发调用直接合并（返回空串、Merged）。返回
+// (目标节点, 切换结果)。
 func (c *MihomoClient) SwitchToOptimal(ctx context.Context, reason string) (string, MihomoSwitchResult) {
-	return c.doSwitch(ctx, reason, false)
+	return c.doSwitch(ctx, reason, false, false)
 }
 
 // Rotate 将组切换到当前节点之外的健康成员（排除黑名单），并验证出口 IP
@@ -559,7 +691,7 @@ func (c *MihomoClient) SwitchToOptimal(ctx context.Context, reason string) (stri
 // 后返回新生效的节点名（GetCurrentNode），失败/合并返回 ("", result)。
 // 单飞语义与 SwitchAndBlacklistCurrent 一致。
 func (c *MihomoClient) Rotate(ctx context.Context, reason string) (string, MihomoSwitchResult) {
-	_, result := c.doSwitch(ctx, reason, true)
+	_, result := c.doSwitch(ctx, reason, true, false)
 	if result != MihomoSwitchDone {
 		return "", result
 	}
@@ -615,20 +747,29 @@ func (c *MihomoClient) SwitchTestGroup(ctx context.Context, name, reason string)
 	return name, MihomoSwitchDone
 }
 
-// doSwitch 是切换的唯一状态机入口：单飞 → 取当前节点 → 选最优 → （可选）
-// 封禁当前 → 切换 → 节点级验证（第一道闸）→ 出口 IP 校验（可选第二道闸：
-// 同 IP 封禁目标节点并重选重试，耗尽返回 Failed；探测失败降级为节点级验证
-// 通过）。节点级验证通过后立即提交代际号（缩短"出口已变但 epoch 未提交"
-// 窗口），同 IP 重试循环中只提交一次；重试耗尽返回 Failed 时代际号已提交
-// （出口选择确实变更），与"Failed 不 bump"的旧语义不同。
+// doSwitch 是切换的唯一状态机入口：单飞 → （可选）自动切换节流 → 取当前节点
+// → 选最优 → （可选）封禁当前 → 切换 → 节点级验证（第一道闸）→ 出口 IP 校验
+// （可选第二道闸：同 IP 封禁目标节点并重选重试，耗尽返回 Failed；探测失败
+// 降级为节点级验证通过）。节点级验证通过后立即提交代际号（缩短"出口已变但
+// epoch 未提交"窗口），同 IP 重试循环中只提交一次；重试耗尽返回 Failed 时
+// 代际号已提交（出口选择确实变更），与"Failed 不 bump"的旧语义不同。
+//
+// throttled 标记调用是否为"故障驱动的自动切换"（SwitchAndBlacklistCurrent）：
+// 为 true 时受 switchMinInterval 节流且成功后记录 lastAutoSwitchTime；
+// 人工/管理驱动（SwitchToOptimal/Rotate）传 false 不受限。
 //
 // 单飞顺序：先本地 switching 标志（防同实例并发切换），后分布式锁（防跨
 // 实例并发切换，注入了 switchLock 时）。释放顺序逆序：defer 后注册先执行，
 // 即先释放分布式锁，再清除本地单飞标志。未抢到锁（另一实例在切）按 Merged
 // 语义处理（不执行、不冷却）；锁获取失败 fail-closed 返回 Failed，绝不双
 // 实例并发切换。
-func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCurrent bool) (string, MihomoSwitchResult) {
+func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCurrent, throttled bool) (string, MihomoSwitchResult) {
 	c.mu.Lock()
+	if throttled && !c.lastAutoSwitchTime.IsZero() && time.Since(c.lastAutoSwitchTime) < c.switchMinInterval {
+		c.mu.Unlock()
+		c.log().Info("mihomo_switch_throttled", "reason", reason, "interval", c.switchMinInterval.String())
+		return "", MihomoSwitchMerged
+	}
 	if c.switching {
 		c.mu.Unlock()
 		c.log().Info("mihomo_switch_merged", "reason", reason)
@@ -652,11 +793,12 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 
 	if distLock != nil {
 		// 跨实例互斥：ttl 必须覆盖最坏切换窗口 = (MaxAttempts+1) 次尝试 ×
-		// 每次 VerifyTimeout（默认 4×15s=60s+，同 IP 重试路径每轮
-		// waitExitIPChange 都轮询至 VerifyTimeout 截止），再加
-		// clearanceLockGrace 余量；ttl 不足会在切换完成前提前过期，锁被
-		// 第二实例抢走导致并发切换。
-		ttl := time.Duration(max(1, cfg.MaxAttempts)+1)*cfg.VerifyTimeout + clearanceLockGrace
+		// 每轮耗时（waitExitIPChange 轮询至 VerifyTimeout 截止 + 每轮
+		// SelectOptimal/SwitchNode/verifySwitch 的 HTTP 往返
+		// perAttemptHTTPBudget），再加 clearanceLockGrace 余量（含切换前
+		// 的 GetCurrentNode 与初始出口 IP 探测）；ttl 只按 VerifyTimeout
+		// 计算会在切换完成前提前过期，锁被第二实例抢走导致并发切换。
+		ttl := time.Duration(max(1, cfg.MaxAttempts)+1)*(cfg.VerifyTimeout+perAttemptHTTPBudget) + clearanceLockGrace
 		release, acquired, err := distLock.Acquire(ctx, mihomoSwitchLockKeyPrefix+groupKey, ttl)
 		if err != nil {
 			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "switch_lock", "group", groupKey, "error", err)
@@ -695,6 +837,9 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 			return "", MihomoSwitchFailed
 		}
 		if blacklistCurrent && current != "" && current != node {
+			// 不单独 bump：本轮随后必然 bumpEpochLocked（epochCommitted 提交），
+			// 封禁引起的候选集变化与出口变化同代际，重复 bump 只会多作废一次
+			// clearance。与公共 BanNode 的"封禁即 bump"差异是有意的。
 			c.mu.Lock()
 			c.blacklist[current] = time.Now().UTC().Add(mihomoBlacklistTTL)
 			c.mu.Unlock()
@@ -730,7 +875,8 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 			// 探测全程失败（降级为仅节点级验证）或出口 IP 已变化：成功。
 			break
 		}
-		// 出口 IP 未变化：封禁目标节点并重选重试。
+		// 出口 IP 未变化：封禁目标节点并重选重试。首次提交的 bump 已覆盖
+		// 本轮封禁的候选集变化（与公共 BanNode 的差异是有意的，同上）。
 		if attempt > cfg.MaxAttempts {
 			c.log().Warn("mihomo_switch_failed", "reason", reason, "stage", "exit_ip", "current", current, "target", node, "old_ip", oldIP, "error", "exit IP did not change after retries")
 			return "", MihomoSwitchFailed
@@ -739,6 +885,13 @@ func (c *MihomoClient) doSwitch(ctx context.Context, reason string, blacklistCur
 		c.blacklist[node] = time.Now().UTC().Add(mihomoBlacklistTTL)
 		c.mu.Unlock()
 		c.log().Warn("mihomo_switch_same_ip_retry", "reason", reason, "attempt", attempt, "target", node, "old_ip", oldIP)
+	}
+	// P1-4：追平共享 epoch（他实例可能刚 bump 过共享值）；节流合并，best-effort。
+	c.refreshEpochThrottled()
+	if throttled {
+		c.mu.Lock()
+		c.lastAutoSwitchTime = time.Now()
+		c.mu.Unlock()
 	}
 	c.log().Info("mihomo_switch", "reason", reason, "from", current, "to", node, "switch_count", c.switchCount.Load(), "epoch", c.epoch.Load())
 	return node, MihomoSwitchDone
@@ -921,10 +1074,17 @@ func (c *MihomoClient) probeExitIP(ctx context.Context, cfg MihomoConfig) string
 // (VerifyTimeout) 到期。返回 (最后观察到的合法 IP, 是否至少观察到一次合法
 // IP)：IP 变化立即返回新 IP；截止时仍为旧 IP 返回 (oldIP, true)；全程探测
 // 失败返回 ("", false)。调用方须先检查 ctx.Err()。
+//
+// 重试循环以本地 deadline 为界（每轮探测前先检查），不依赖 ctx：部分调用方
+// （如 Manager.maybeMihomoFallback）传入 context.Background()，ctx.Err() 永不
+// 触发，只有本地 deadline 保证循环有界。
 func (c *MihomoClient) waitExitIPChange(ctx context.Context, cfg MihomoConfig, oldIP string) (string, bool) {
 	deadline := time.Now().Add(cfg.VerifyTimeout)
 	lastIP, sawValid := "", false
 	for {
+		if time.Now().After(deadline) {
+			return lastIP, sawValid
+		}
 		ip := c.probeExitIP(ctx, cfg)
 		if ip != "" {
 			sawValid = true
