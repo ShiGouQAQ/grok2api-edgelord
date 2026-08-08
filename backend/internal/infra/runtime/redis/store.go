@@ -991,3 +991,27 @@ func NewLockStore(store *Store) *LockStore { return &LockStore{store: store} }
 func (l *LockStore) Acquire(ctx context.Context, key string, ttl time.Duration) (func(), bool, error) {
 	return l.store.acquireLock(ctx, strings.TrimSpace(key), ttl)
 }
+
+// BumpEpoch 原子递增出口代际号并返回新值。单命令 HINCRBY 保证跨实例原子性，
+// 键不设 TTL：epoch 是版本号，过期归零会让旧 clearance 复活。
+func (s *Store) BumpEpoch(ctx context.Context, groupKey string) (uint64, error) {
+	if groupKey == "" {
+		return 0, fmt.Errorf("egress epoch group key is empty")
+	}
+	return s.client.HIncrBy(ctx, s.key("egress-epoch", groupKey), "epoch", 1).Uint64()
+}
+
+// GetEpoch 返回指定出口组的当前代际号，缺键返回 0。
+func (s *Store) GetEpoch(ctx context.Context, groupKey string) (uint64, error) {
+	if groupKey == "" {
+		return 0, nil
+	}
+	value, err := s.client.HGet(ctx, s.key("egress-epoch", groupKey), "epoch").Result()
+	if errors.Is(err, redisclient.Nil) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseUint(value, 10, 64)
+}

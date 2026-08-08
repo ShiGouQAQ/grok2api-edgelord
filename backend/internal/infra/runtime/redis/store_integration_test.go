@@ -216,6 +216,66 @@ func TestRedisRuntimeStoreIntegration(t *testing.T) {
 	}
 	unlock()
 
+	if epoch, err := store.GetEpoch(ctx, "mihomo:web"); err != nil || epoch != 0 {
+		t.Fatalf("missing egress epoch = %d, err = %v", epoch, err)
+	}
+	if epoch, err := store.BumpEpoch(ctx, "mihomo:web"); err != nil || epoch != 1 {
+		t.Fatalf("first egress epoch bump = %d, err = %v", epoch, err)
+	}
+	if epoch, err := store.BumpEpoch(ctx, "mihomo:web"); err != nil || epoch != 2 {
+		t.Fatalf("second egress epoch bump = %d, err = %v", epoch, err)
+	}
+	if epoch, err := store.GetEpoch(ctx, "mihomo:web"); err != nil || epoch != 2 {
+		t.Fatalf("read egress epoch = %d, err = %v", epoch, err)
+	}
+	if epoch, err := store.BumpEpoch(ctx, "mihomo:build"); err != nil || epoch != 1 {
+		t.Fatalf("isolated egress epoch bump = %d, err = %v", epoch, err)
+	}
+	epochKey := store.key("egress-epoch", "mihomo:web")
+	if ttl, err := store.client.PTTL(ctx, epochKey).Result(); err != nil || ttl != -1 {
+		t.Fatalf("egress epoch key must not expire: ttl = %s, err = %v", ttl, err)
+	}
+	const epochWorkers = 16
+	const epochBumpsPerWorker = 50
+	epochStart := make(chan struct{})
+	epochResults := make(chan uint64, epochWorkers)
+	epochErrors := make(chan error, epochWorkers)
+	var epochGroup sync.WaitGroup
+	for range epochWorkers {
+		epochGroup.Add(1)
+		go func() {
+			defer epochGroup.Done()
+			<-epochStart
+			for range epochBumpsPerWorker {
+				if _, err := store.BumpEpoch(ctx, "mihomo:race"); err != nil {
+					epochErrors <- err
+					return
+				}
+			}
+			epoch, err := store.GetEpoch(ctx, "mihomo:race")
+			epochResults <- epoch
+			epochErrors <- err
+		}()
+	}
+	close(epochStart)
+	epochGroup.Wait()
+	close(epochResults)
+	close(epochErrors)
+	maxEpoch := uint64(0)
+	for err := range epochErrors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for epoch := range epochResults {
+		if epoch > maxEpoch {
+			maxEpoch = epoch
+		}
+	}
+	if maxEpoch != epochWorkers*epochBumpsPerWorker {
+		t.Fatalf("concurrent egress epoch bumps = %d, want %d", maxEpoch, epochWorkers*epochBumpsPerWorker)
+	}
+
 	dueAt := time.Now().UTC().Add(-time.Second)
 	event := account.QuotaRecoveryEvent{AccountID: 42, Mode: "fast", DueAt: dueAt, Attempts: 3}
 	if err := store.ScheduleQuotaRecovery(ctx, event); err != nil {

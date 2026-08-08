@@ -185,3 +185,10 @@ type QuotaRefreshCoordinator interface {
 	ClearQuotaRefreshDirty(ctx context.Context, accountID uint64, mode string, generation uint64) (bool, error)
 	ListQuotaRefreshDirty(ctx context.Context, now time.Time, limit int) ([]QuotaRefreshDirty, error)
 }
+
+// EgressEpochStore 提供跨实例共享的出口代际号（epoch）。Mihomo 组级切换、
+// 节点集变化等出口选择事件在任意实例上原子递增，所有实例读到同一值。
+type EgressEpochStore interface {
+	BumpEpoch(ctx context.Context, groupKey string) (uint64, error)
+	GetEpoch(ctx context.Context, groupKey string) (uint64, error)
+}
