@@ -337,9 +337,9 @@ curl http://127.0.0.1:8000/v1/responses \
 - 按作用域配置无回退、直连或固定节点
 - 代理池模式，单次连接失败不会触发全局冷却
 - 固定代理传输失败后立即复测；同节点复测自动合并，后续绑定请求限时等待并在恢复后快速重试
-- 可选的[出口质量守护程序](./tools/egress-quality-guard/README.zh-CN.md)，支持逐节点模型探测、防误杀隔离和自动恢复；通过内置的 `quality-guard` Compose profile 按需启用
+- 可选的[出口质量守护程序](./tools/egress-quality-guard/README.zh-CN.md)，支持逐节点模型探测、防误杀隔离和自动恢复；它内置于主容器（s6-overlay 服务 `egress-quality-guard`），随主容器自动启动
 
-首次启用时只需在 `config.yaml` 中增加 `qualityGuard` 并启动 profile。主程序会自动创建并稳定复用不可导出的系统探测身份：
+首次启用时只需在 `config.yaml` 中增加 `qualityGuard`。主程序会自动创建并稳定复用不可导出的系统探测身份：
 
 ```yaml
 qualityGuard:
@@ -348,14 +348,14 @@ qualityGuard:
 ```
 
 ```bash
-docker compose --profile quality-guard up -d --build
+docker compose up -d --build
 ```
 
 曾使用预览版 `clientKeyID` 配置的现有部署可以直接升级：该字段会被兼容读取但不再使用，可安全删除；原来手工创建的探测 Key 不会被程序擅自删除。
 
-后续修改该配置时，执行 `docker compose --profile quality-guard restart grok2api egress-quality-guard` 使基础配置重新加载；管理页面中的策略调整仍支持热加载。
+后续修改该配置时，重启主容器（`docker compose restart grok2api`）使基础配置重新加载；管理页面中的策略调整仍支持热加载。
 
-普通的 `docker compose up -d` 不会启动守护程序，也不会产生主动探测流量。sidecar 只从主程序获得权限受限的内部凭据，不保存或使用管理员密码。启用自动隔离前请先阅读上面的详细说明。
+守护程序内置于主容器，随 `docker compose up -d` 自动启动，仅当 `qualityGuard.enabled` 为 true 时产生主动探测流量。它只从主程序获得权限受限的内部凭据，不保存或使用管理员密码。启用自动隔离前请先阅读上面的详细说明。
 
 Resin 用户名支持 `{account}`：
 

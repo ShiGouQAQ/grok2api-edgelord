@@ -109,8 +109,31 @@ audit:
   ledgerUnhealthyGrace: 10s
   ledgerQueueHighWatermarkPercent: 90
 
-# [按需启用] Grok Build 出口质量守护。仅配置后仍不会自动启动 sidecar；
-# 使用 docker compose --profile quality-guard up -d --build 启动。
+# [按需修改] Mihomo 出口代理接入（Provider Web）参数。运行期可在管理端设置页热更新；
+# 不配置本段时使用下列默认值；启用开关（mihomoEnabled）在管理端设置页。
+provider:
+  web:
+    # [通常不要修改] 出口 IP 探测经此本地 mihomo 代理端口转发。
+    mihomoExitProbeProxyURL: "http://127.0.0.1:7890"
+    # [通常不要修改] IP 回显端点；也支持纯文本 IP 响应体。
+    mihomoIPProbeURL: "https://1.1.1.1/cdn-cgi/trace"
+    # [通常不要修改] 出口 IP 未变化时的重试次数上限（加首次尝试共 maxAttempts+1 次切换）。
+    mihomoMaxAttempts: 3
+    # [通常不要修改] 每次尝试内出口 IP 轮询的截止时长。
+    mihomoVerifyTimeout: 15s
+    # [按需启用] 双通道测试组（质量守卫探测专用，见 tools/mihomo/mihomo-dual-channel.yaml）。
+    # mihomoTestProxyURL 留空 = 禁用测试通道（legacy 单组行为）；配置后测试组
+    # 经独立 listener（默认 7891）直连，守卫自由切换探测成员，生产出口零扰动。
+    mihomoTestGroupName: "XAI-TEST-GROUP"
+    mihomoTestProxyURL: "http://127.0.0.1:7891"
+    # [按需启用] 主动延迟探测端点（走 mihomo 代理）：配置后 select 组切换优先
+    # 选择历史延迟最低的节点；留空 = 禁用主动探测（保持回退首可用节点现状）。
+    # 默认值使用 Apple 官方 captive 检测端点（返回 200，mihomo 延迟测试对
+    # expectedStatus 为空时任何响应均视为成功，且走 HEAD 方法，体积最小）。
+    mihomoDelayProbeURL: "https://captive.apple.com/hotspot-detect.html"
+
+# [按需启用] Grok Build 出口质量守护。守护程序内置于主容器（s6-overlay 服务
+# egress-quality-guard），随主容器自动启动，仅 enabled 时产生探测流量。
 qualityGuard:
   enabled: false
   # 主程序会自动创建并复用不可导出的内部探测身份，无需配置 Client Key。
@@ -129,7 +152,16 @@ qualityGuard:
   failClosed: false
   minimumGenerationWindow: 1s
   # 可选的受信任换 IP Webhook；启用时同时填写 rotatableNodeIDs。
+  # 指向 Go 内置轮换端点时（推荐，组模型下自动把共享 Mihomo 组出口切到下一
+  # 健康节点，nodeId 仅作契约校验）：
+  #   rotationURL: "http://127.0.0.1:8000/api/internal/v1/quality-guard/egress-mihomo/rotate"
+  # 该端点位于 quality-guard 内部认证组内（与 guard 其他内部调用同一令牌）。
   rotationURL: ""
+  # rotationToken：内置端点要求与主服务派生的 quality-guard 内部令牌一致
+  # （即 bootstrap.json 中的 internal_token：主服务写入共享状态目录后，把该
+  # 值拷贝到此处即可；它由 jwtSecret 确定性派生，永不通过 API 暴露）。
+  # 仅当 rotationURL 指向外部轮换服务（如 session_rotator.py）时，才改为
+  # 填写该外部服务自己的令牌。
   rotationToken: ""
   rotationTimeout: 45s
   nodeIDs: []

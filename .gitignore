@@ -50,3 +50,9 @@ __pycache__/
 /.tmp/
 /tmp/
 /Dockerfile.local
+
+# Agent session state
+/.omo/
+/.opencode/
+/.serena/
+/.codebase-memory/
