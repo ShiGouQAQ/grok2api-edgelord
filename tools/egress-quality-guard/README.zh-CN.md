@@ -10,7 +10,7 @@ Token/s，因此建议先观察 JSON 日志，再根据实际流量调整阈值�
 
 - 仅支持已经接入 grok2api 出口节点与请求审计的 Grok Build 流式请求。
 - 至少应有一个可调度的 Grok Build 账号能够使用目标模型；不要求每个受管节点都绑定账号。
-- 主程序会自动创建不可导出的系统探测身份；sidecar 只通过 Compose 内网访问权限受限的内部 API。
+- 主程序会自动创建不可导出的系统探测身份；守护程序只通过容器回环地址访问权限受限的内部 API。
 - 质量判断是启发式信号，不能证明模型能力被上游调整，也不能代替真实业务回归测试。
 
 ## 工作流程
@@ -64,7 +64,7 @@ Webhook，确认出口发生变化，再执行一次真实模型质量检测；�
 
 页面还会显示自统计功能启用以来的自动检测次数、主动探测、被动审计、异常命中、隔离与恢复次数，以及主动探测产生的输出 Token（包含推理 Token）。手动检测不计入累计值。代理的真实上下行字节数无法从 HTTPS/SSE 请求审计中可靠获得，因此页面不会用 Token 数伪装成代理流量。
 
-主 Compose 统一管理私有共享卷。grok2api 会把 `config.yaml` 中的配置规范化后写入带版本的 bootstrap 文件，并从现有 `jwtSecret` 派生仅供质量守护内部接口使用的凭据。sidecar 不读取、保存或使用管理员密码。管理界面保存的策略约 1 秒内热加载；任何公开或管理接口都不会返回内部凭据、Client Key 密钥、代理地址、探针 Prompt 或模型回答正文。
+主 Compose 统一管理私有共享卷。grok2api 会把 `config.yaml` 中的配置规范化后写入带版本的 bootstrap 文件，并从现有 `jwtSecret` 派生仅供质量守护内部接口使用的凭据。守护程序不读取、保存或使用管理员密码。管理界面保存的策略约 1 秒内热加载；任何公开或管理接口都不会返回内部凭据、Client Key 密钥、代理地址、探针 Prompt 或模型回答正文。
 
 ## 防误杀设计
 
@@ -117,21 +117,19 @@ qualityGuard:
 
 ## Docker Compose 快速接入
 
-仓库主 `docker-compose.yml` 已通过可选的 `quality-guard` profile 集成 sidecar。
-普通执行 `docker compose up -d` 不会启动它，也不会产生主动探测流量。
+守护程序内置于主 `grok2api` 容器（s6-overlay 服务 `egress-quality-guard`），随 `docker compose up -d` 自动启动，仅当 `qualityGuard.enabled` 为 true 时产生主动探测流量。
 
 从仓库根目录执行：
 
 ```sh
-docker compose --profile quality-guard config --quiet
-docker compose --profile quality-guard up -d --build
+docker compose config --quiet
+docker compose up -d --build
 ```
 
-以后修改 `config.yaml` 中的 `qualityGuard` 基础配置时，执行
-`docker compose --profile quality-guard restart grok2api egress-quality-guard` 让主程序重新生成 bootstrap。管理页面保存的运行策略仍会热加载，无需重启。
+以后修改 `config.yaml` 中的 `qualityGuard` 基础配置时，重启主容器
+（`docker compose restart grok2api`）让主程序重新生成 bootstrap。管理页面保存的运行策略仍会热加载，无需重启。
 
-先确认受管节点、模型和最低健康节点数正确，再允许 sidecar 长期运行。不要提交状态卷或生产日志。只停止守护程序可执行
-`docker compose --profile quality-guard stop egress-quality-guard`，不会影响主 API。
+先确认受管节点、模型和最低健康节点数正确，再允许守护程序长期运行。不要提交状态卷或生产日志。如需只停止守护程序，将 `qualityGuard.enabled` 设为 false 并重启容器；守护程序干净退出后保持停止，不影响主 API。
 
 ## 已知限制
 

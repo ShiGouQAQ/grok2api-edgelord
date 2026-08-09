@@ -88,9 +88,13 @@ class Config:
             with path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
         except FileNotFoundError as exc:
-            raise ValueError("quality guard bootstrap file is missing; restart grok2api") from exc
+            raise ValueError(
+                "quality guard bootstrap file is missing; restart grok2api"
+            ) from exc
         except (OSError, ValueError) as exc:
-            raise ValueError(f"cannot read quality guard bootstrap: {type(exc).__name__}") from exc
+            raise ValueError(
+                f"cannot read quality guard bootstrap: {type(exc).__name__}"
+            ) from exc
         if not isinstance(payload, dict) or payload.get("version") != BOOTSTRAP_VERSION:
             raise ValueError("unsupported quality guard bootstrap")
         if not payload.get("enabled"):
@@ -99,10 +103,22 @@ class Config:
         if not isinstance(values, dict):
             raise ValueError("quality guard bootstrap config is missing")
         token = str(payload.get("internal_token") or "").strip()
-        node_ids = tuple(dict.fromkeys(str(value).strip() for value in values.get("node_ids", []) if str(value).strip()))
-        rotatable_node_ids = tuple(dict.fromkeys(str(value).strip() for value in values.get("rotatable_node_ids", []) if str(value).strip()))
+        node_ids = tuple(
+            dict.fromkeys(
+                str(value).strip()
+                for value in values.get("node_ids", [])
+                if str(value).strip()
+            )
+        )
+        rotatable_node_ids = tuple(
+            dict.fromkeys(
+                str(value).strip()
+                for value in values.get("rotatable_node_ids", [])
+                if str(value).strip()
+            )
+        )
         config = cls(
-            base_url="http://grok2api:8000",
+            base_url=os.environ.get("GROK2API_BASE_URL", "http://127.0.0.1:8000"),
             internal_token=token,
             model=str(values.get("model") or "").strip(),
             node_ids=node_ids,
@@ -118,7 +134,9 @@ class Config:
             consecutive_soft=int(values.get("consecutive_soft") or 0),
             consecutive_errors=int(values.get("consecutive_errors") or 0),
             quarantine_seconds=int(values.get("quarantine_seconds") or 0),
-            no_account_backoff_seconds=int(values.get("no_account_backoff_seconds") or 0),
+            no_account_backoff_seconds=int(
+                values.get("no_account_backoff_seconds") or 0
+            ),
             min_healthy_nodes=int(values.get("min_healthy_nodes") or 0),
             max_output_tokens=int(values.get("max_output_tokens") or 0),
             fail_closed=bool(values.get("fail_closed")),
@@ -131,7 +149,9 @@ class Config:
             expected=str(values.get("expected") or "").strip(),
             state_file=Path("/var/lib/grok2api-quality-guard/state.json"),
             lock_file=Path("/var/lib/grok2api-quality-guard/guard.lock"),
-            runtime_config_file=Path("/var/lib/grok2api-quality-guard/runtime-config.json"),
+            runtime_config_file=Path(
+                "/var/lib/grok2api-quality-guard/runtime-config.json"
+            ),
         )
         config.validate()
         return config
@@ -147,31 +167,51 @@ class Config:
         if self.mode not in {"active", "passive", "hybrid"}:
             raise ValueError("qualityGuard.mode must be active, passive, or hybrid")
         if self.soft_tps >= self.hard_tps:
-            raise ValueError("qualityGuard.softTPS must be lower than qualityGuard.hardTPS")
+            raise ValueError(
+                "qualityGuard.softTPS must be lower than qualityGuard.hardTPS"
+            )
         if self.active_interval_seconds > 86400:
             raise ValueError("qualityGuard.activeInterval must not exceed 24 hours")
         if self.passive_poll_seconds > 300:
-            raise ValueError("qualityGuard.passivePollInterval must not exceed 5 minutes")
+            raise ValueError(
+                "qualityGuard.passivePollInterval must not exceed 5 minutes"
+            )
         if self.soft_tps > 10000 or self.hard_tps > 10000:
             raise ValueError("quality guard Token/s thresholds must not exceed 10000")
         if self.consecutive_soft > 20 or self.consecutive_errors > 20:
-            raise ValueError("quality guard consecutive strike limits must not exceed 20")
+            raise ValueError(
+                "quality guard consecutive strike limits must not exceed 20"
+            )
         if self.quarantine_seconds > 86400:
             raise ValueError("qualityGuard.quarantineDuration must not exceed 24 hours")
         if self.no_account_backoff_seconds > 86400:
             raise ValueError("qualityGuard.noAccountBackoff must not exceed 24 hours")
-        if self.min_healthy_nodes < 1 or (self.node_ids and self.min_healthy_nodes > len(self.node_ids)):
-            raise ValueError("qualityGuard.minimumHealthyNodes must fit the configured node count")
+        if self.min_healthy_nodes < 1 or (
+            self.node_ids and self.min_healthy_nodes > len(self.node_ids)
+        ):
+            raise ValueError(
+                "qualityGuard.minimumHealthyNodes must fit the configured node count"
+            )
         if self.min_generation_ms > self.request_timeout_seconds * 1000:
-            raise ValueError("qualityGuard.minimumGenerationWindow must fit the request timeout")
+            raise ValueError(
+                "qualityGuard.minimumGenerationWindow must fit the request timeout"
+            )
         if self.rotation_url:
             rotation_url = urllib.parse.urlparse(self.rotation_url)
             if rotation_url.scheme not in {"http", "https"} or not rotation_url.netloc:
-                raise ValueError("qualityGuard.rotationURL must be an absolute HTTP(S) URL")
+                raise ValueError(
+                    "qualityGuard.rotationURL must be an absolute HTTP(S) URL"
+                )
         elif self.rotatable_node_ids:
-            raise ValueError("qualityGuard.rotationURL is required when rotatableNodeIDs are configured")
-        if any(not value.isdigit() or int(value) < 1 for value in self.rotatable_node_ids):
-            raise ValueError("qualityGuard.rotatableNodeIDs must contain positive integers")
+            raise ValueError(
+                "qualityGuard.rotationURL is required when rotatableNodeIDs are configured"
+            )
+        if any(
+            not value.isdigit() or int(value) < 1 for value in self.rotatable_node_ids
+        ):
+            raise ValueError(
+                "qualityGuard.rotatableNodeIDs must contain positive integers"
+            )
         if self.passive_page_size > 2000:
             raise ValueError("internal passive page size must not exceed 2000")
 
@@ -183,8 +223,14 @@ def load_runtime_config(base: Config, path: Path) -> Config:
     except FileNotFoundError:
         return base
     except (OSError, ValueError) as exc:
-        raise ValueError(f"cannot read runtime quality guard config: {type(exc).__name__}") from exc
-    if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("settings"), dict):
+        raise ValueError(
+            f"cannot read runtime quality guard config: {type(exc).__name__}"
+        ) from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != 1
+        or not isinstance(value.get("settings"), dict)
+    ):
         raise ValueError("unsupported runtime quality guard config")
     settings = value["settings"]
     unknown = set(settings) - RUNTIME_CONFIG_FIELDS
@@ -195,9 +241,15 @@ def load_runtime_config(base: Config, path: Path) -> Config:
     if not isinstance(settings["mode"], str):
         raise ValueError("runtime quality guard mode must be a string")
     integer_fields = RUNTIME_CONFIG_FIELDS - {"mode", "soft_tps", "hard_tps"}
-    if any(isinstance(settings[name], bool) or not isinstance(settings[name], int) for name in integer_fields):
+    if any(
+        isinstance(settings[name], bool) or not isinstance(settings[name], int)
+        for name in integer_fields
+    ):
         raise ValueError("runtime quality guard integer field is invalid")
-    if any(isinstance(settings[name], bool) or not isinstance(settings[name], (int, float)) for name in {"soft_tps", "hard_tps"}):
+    if any(
+        isinstance(settings[name], bool) or not isinstance(settings[name], (int, float))
+        for name in {"soft_tps", "hard_tps"}
+    ):
         raise ValueError("runtime quality guard threshold is invalid")
     config = dataclasses.replace(base, **settings)
     config.validate()
@@ -226,7 +278,11 @@ class RuntimeConfigReloader:
         self.signature = signature
         self.missing = missing
         try:
-            candidate = self.base if missing else load_runtime_config(self.base, self.base.runtime_config_file)
+            candidate = (
+                self.base
+                if missing
+                else load_runtime_config(self.base, self.base.runtime_config_file)
+            )
         except ValueError as exc:
             return self.current, True, exc
         changed = candidate != self.current
@@ -246,15 +302,31 @@ class ApiClient:
         self.config = config
         self.ssl_context = ssl.create_default_context()
 
-    def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Any:
-        data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any] | None = None,
+        timeout: int | None = None,
+    ) -> Any:
+        data = (
+            None if body is None else json.dumps(body, separators=(",", ":")).encode()
+        )
         headers = {"Accept": "application/json"}
         if data is not None:
             headers["Content-Type"] = "application/json"
         headers["Authorization"] = f"Bearer {self.config.internal_token}"
-        request = urllib.request.Request(self.config.base_url + path, data=data, headers=headers, method=method)
+        request = urllib.request.Request(
+            self.config.base_url + path, data=data, headers=headers, method=method
+        )
         try:
-            with urllib.request.urlopen(request, timeout=self.config.request_timeout_seconds, context=self.ssl_context) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=(
+                    self.config.request_timeout_seconds if timeout is None else timeout
+                ),
+                context=self.ssl_context,
+            ) as response:
                 payload = json.load(response)
         except urllib.error.HTTPError as exc:
             try:
@@ -262,7 +334,11 @@ class ApiClient:
             except (ValueError, OSError):
                 payload = {}
             error = payload.get("error") or {}
-            raise ApiError(exc.code, str(error.get("code", "request_failed")), str(error.get("message", "request failed"))) from exc
+            raise ApiError(
+                exc.code,
+                str(error.get("code", "request_failed")),
+                str(error.get("message", "request failed")),
+            ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RuntimeError(f"request failed: {type(exc).__name__}") from exc
         return payload.get("data", payload)
@@ -273,8 +349,12 @@ class ApiClient:
         seen_ids: set[str] = set()
         page = 1
         while True:
-            query = urllib.parse.urlencode({"page": page, "pageSize": page_size, "scope": "grok_build"})
-            payload = self._request("GET", f"{INTERNAL_API_PREFIX}/egress-nodes?{query}")
+            query = urllib.parse.urlencode(
+                {"page": page, "pageSize": page_size, "scope": "grok_build"}
+            )
+            payload = self._request(
+                "GET", f"{INTERNAL_API_PREFIX}/egress-nodes?{query}"
+            )
             batch = list(payload.get("items") or [])
             total = max(0, int(payload.get("total") or 0))
             added = 0
@@ -288,7 +368,9 @@ class ApiClient:
             if len(items) >= total or (total == 0 and len(batch) < page_size):
                 return items
             if not batch or added == 0:
-                raise RuntimeError(f"egress node pagination stopped at {len(items)} of {total}")
+                raise RuntimeError(
+                    f"egress node pagination stopped at {len(items)} of {total}"
+                )
             page += 1
 
     def fixed_fallback_node_ids(self) -> set[str]:
@@ -302,11 +384,29 @@ class ApiClient:
                 result.add(node_id)
         return result
 
+    def get_mihomo_status(self) -> dict[str, Any] | None:
+        """Return the mihomo egress status (epoch) or None when unavailable."""
+        endpoint = os.environ.get(
+            "MIHOMO_STATUS_ENDPOINT",
+            f"{INTERNAL_API_PREFIX}/egress-mihomo/status",
+        )
+        try:
+            status = self._request("GET", endpoint, timeout=5)
+        except (ApiError, RuntimeError, ValueError):
+            return None
+        if not isinstance(status, dict) or not bool(status.get("enabled")):
+            return None
+        return status
+
     def quality_test(self, node_id: str) -> dict[str, Any]:
-        return self._request("POST", f"{INTERNAL_API_PREFIX}/egress-nodes/{node_id}/quality-test")
+        return self._request(
+            "POST", f"{INTERNAL_API_PREFIX}/egress-nodes/{node_id}/quality-test"
+        )
 
     def connectivity_test(self, node_id: str) -> dict[str, Any]:
-        return self._request("POST", f"{INTERNAL_API_PREFIX}/egress-nodes/{node_id}/test")
+        return self._request(
+            "POST", f"{INTERNAL_API_PREFIX}/egress-nodes/{node_id}/test"
+        )
 
     def list_audits(self, cursor: str = "") -> dict[str, Any]:
         query = {
@@ -316,20 +416,89 @@ class ApiClient:
         }
         if cursor:
             query["cursor"] = cursor
-        return self._request("GET", f"{INTERNAL_API_PREFIX}/request-audits?{urllib.parse.urlencode(query)}")
+        return self._request(
+            "GET",
+            f"{INTERNAL_API_PREFIX}/request-audits?{urllib.parse.urlencode(query)}",
+        )
 
     def set_enabled(self, node_id: str, enabled: bool) -> int:
-        result = self._request("PATCH", f"{INTERNAL_API_PREFIX}/egress-nodes/batch", {"ids": [node_id], "enabled": enabled})
+        result = self._request(
+            "PATCH",
+            f"{INTERNAL_API_PREFIX}/egress-nodes/batch",
+            {"ids": [node_id], "enabled": enabled},
+        )
         return int(result.get("updated") or 0)
+
+    def select_test_member(self, node_name: str) -> bool:
+        """将测试组当前成员切换到指定节点；成功返回 True，失败记录并返回 False。
+
+        nodeName 即 Mihomo 测试组成员名（同步器建行时 DB 节点 Name=成员名），
+        body 的 nodeId 字段即节点名，与 Go 侧 mihomoTestSelect 契约一致。
+        """
+        try:
+            self._request(
+                "POST",
+                f"{INTERNAL_API_PREFIX}/egress-mihomo/select",
+                {"nodeId": node_name},
+            )
+        except (ApiError, RuntimeError, ValueError) as exc:
+            log_event(
+                "mihomo_select_request_failed",
+                node_name=node_name,
+                error_type=type(exc).__name__,
+            )
+            return False
+        return True
+
+    def ban_test_member(self, node_name: str) -> bool:
+        """封禁测试组内一个成员；成功返回 True，失败记录并返回 False。
+
+        Go 侧黑名单带 TTL（10 分钟）兜底，封禁到期后成员自动回到测试组。
+        """
+        try:
+            self._request(
+                "POST",
+                f"{INTERNAL_API_PREFIX}/egress-mihomo/ban",
+                {"nodeId": node_name},
+            )
+        except (ApiError, RuntimeError, ValueError) as exc:
+            log_event(
+                "mihomo_ban_request_failed",
+                node_name=node_name,
+                error_type=type(exc).__name__,
+            )
+            return False
+        return True
+
+    def unban_test_member(self, node_name: str) -> bool:
+        """解除测试组内一个成员的封禁；成功返回 True，失败记录并返回 False。"""
+        try:
+            self._request(
+                "POST",
+                f"{INTERNAL_API_PREFIX}/egress-mihomo/unban",
+                {"nodeId": node_name},
+            )
+        except (ApiError, RuntimeError, ValueError) as exc:
+            log_event(
+                "mihomo_unban_request_failed",
+                node_name=node_name,
+                error_type=type(exc).__name__,
+            )
+            return False
+        return True
 
     def rotate_node(self, node_id: str, old_exit_ip: str = "") -> dict[str, Any]:
         if not self.config.rotation_url:
             raise RuntimeError("rotation endpoint is not configured")
-        data = json.dumps({"nodeId": node_id, "oldExitIp": old_exit_ip}, separators=(",", ":")).encode()
+        data = json.dumps(
+            {"nodeId": node_id, "oldExitIp": old_exit_ip}, separators=(",", ":")
+        ).encode()
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if self.config.rotation_token:
             headers["Authorization"] = f"Bearer {self.config.rotation_token}"
-        request = urllib.request.Request(self.config.rotation_url, data=data, headers=headers, method="POST")
+        request = urllib.request.Request(
+            self.config.rotation_url, data=data, headers=headers, method="POST"
+        )
         try:
             with urllib.request.urlopen(
                 request,
@@ -342,7 +511,9 @@ class ApiClient:
                 payload = json.loads(exc.read().decode("utf-8", "replace"))
             except (ValueError, OSError):
                 payload = {}
-            raise RuntimeError(f"rotation failed: HTTP {exc.code} {payload.get('error', 'request failed')}") from exc
+            raise RuntimeError(
+                f"rotation failed: HTTP {exc.code} {payload.get('error', 'request failed')}"
+            ) from exc
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             raise RuntimeError(f"rotation failed: {type(exc).__name__}") from exc
         if not isinstance(payload, dict) or not bool(payload.get("changed")):
@@ -361,7 +532,9 @@ def classify_result(result: dict[str, Any], config: Config) -> tuple[str, str]:
     speed = float(speed_value or 0.0)
     generation_ms = int(result.get("generationMs") or 0)
     if generation_ms <= 0:
-        generation_ms = max(0, int(result.get("durationMs") or 0) - int(result.get("firstTokenMs") or 0))
+        generation_ms = max(
+            0, int(result.get("durationMs") or 0) - int(result.get("firstTokenMs") or 0)
+        )
     if output_tokens < 32:
         return "soft", "insufficient_output_tokens"
     if config.fail_closed and generation_ms < config.min_generation_ms:
@@ -373,7 +546,9 @@ def classify_result(result: dict[str, Any], config: Config) -> tuple[str, str]:
     return "healthy", "within_threshold"
 
 
-def classify_audit(value: dict[str, Any], config: Config) -> tuple[str, str, float, int]:
+def classify_audit(
+    value: dict[str, Any], config: Config
+) -> tuple[str, str, float, int]:
     if value.get("provider") != "grok_build" or not bool(value.get("streaming")):
         return "ignored", "not_build_stream", 0.0, 0
     status = int(value.get("statusCode") or 0)
@@ -387,7 +562,11 @@ def classify_audit(value: dict[str, Any], config: Config) -> tuple[str, str, flo
     if generation_ms <= 0 or output_tokens < 32:
         return "ignored", "insufficient_output_tokens", 0.0, output_tokens
     speed = float(output_tokens) * 1000 / float(generation_ms)
-    if config.fail_closed and generation_ms < config.min_generation_ms and speed >= config.soft_tps:
+    if (
+        config.fail_closed
+        and generation_ms < config.min_generation_ms
+        and speed >= config.soft_tps
+    ):
         return "hard", "buffered_burst", speed, output_tokens
     if speed >= config.hard_tps:
         return "hard", "hard_tps", speed, output_tokens
@@ -422,8 +601,22 @@ def default_node_state() -> dict[str, Any]:
 def default_statistics() -> dict[str, Any]:
     return {
         "started_at": time.time(),
-        "active": {"total": 0, "healthy": 0, "soft": 0, "hard": 0, "errors": 0, "output_tokens": 0},
-        "passive": {"total": 0, "healthy": 0, "soft": 0, "hard": 0, "errors": 0, "output_tokens": 0},
+        "active": {
+            "total": 0,
+            "healthy": 0,
+            "soft": 0,
+            "hard": 0,
+            "errors": 0,
+            "output_tokens": 0,
+        },
+        "passive": {
+            "total": 0,
+            "healthy": 0,
+            "soft": 0,
+            "hard": 0,
+            "errors": 0,
+            "output_tokens": 0,
+        },
         "actions": {"quarantined": 0, "restored": 0, "suppressed": 0},
     }
 
@@ -443,7 +636,11 @@ def ensure_statistics(state: dict[str, Any]) -> dict[str, Any]:
             group.setdefault("output_tokens", legacy_tokens)
         for field, default in defaults[group_name].items():
             group.setdefault(field, default)
-            if isinstance(group[field], bool) or not isinstance(group[field], int) or group[field] < 0:
+            if (
+                isinstance(group[field], bool)
+                or not isinstance(group[field], int)
+                or group[field] < 0
+            ):
                 raise RuntimeError("invalid quality guard statistics")
     return statistics
 
@@ -453,7 +650,12 @@ def load_state(path: Path) -> dict[str, Any]:
         with path.open("r", encoding="utf-8") as handle:
             value = json.load(handle)
     except FileNotFoundError:
-        return {"version": 1, "nodes": {}, "passive_initialized": False, "seen_audit_ids": []}
+        return {
+            "version": 1,
+            "nodes": {},
+            "passive_initialized": False,
+            "seen_audit_ids": [],
+        }
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"cannot read state file: {type(exc).__name__}") from exc
     if value.get("version") != 1 or not isinstance(value.get("nodes"), dict):
@@ -477,7 +679,9 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
     try:
         os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(state, handle, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            json.dump(
+                state, handle, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            )
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -497,8 +701,15 @@ def append_state_event(state: dict[str, Any], event: str, **fields: Any) -> None
 
 
 def log_event(event: str, **fields: Any) -> None:
-    payload = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "event": event, **fields}
-    print(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")), flush=True)
+    payload = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "event": event,
+        **fields,
+    }
+    print(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+        flush=True,
+    )
 
 
 class Guard:
@@ -507,6 +718,7 @@ class Guard:
         self.api = api
         self.state = load_state(config.state_file)
         self._resolved_node_ids = list(config.node_ids)
+        self._mihomo_member_by_node: dict[str, str] = {}
         self.state.setdefault("started_at", time.time())
         self.state.setdefault("recent_events", [])
         ensure_statistics(self.state)
@@ -522,7 +734,9 @@ class Guard:
         self.state["guard"] = {
             "mode": self.config.mode,
             "model": self.config.model,
-            "node_ids": list(self.config.node_ids) if self.config.node_ids else self._resolved_node_ids,
+            "node_ids": list(self.config.node_ids)
+            if self.config.node_ids
+            else self._resolved_node_ids,
             "active_interval_seconds": self.config.active_interval_seconds,
             "passive_poll_seconds": self.config.passive_poll_seconds,
             "soft_tps": self.config.soft_tps,
@@ -550,13 +764,24 @@ class Guard:
         legacy_strikes = int(current.pop("soft_strikes", 0))
         current.setdefault("active_soft_strikes", legacy_strikes)
         current.setdefault("passive_soft_strikes", 0)
-        current.setdefault("last_output_tps", float(current.pop("last_visible_tps", 0.0)))
-        current.setdefault("last_output_tokens", int(current.pop("last_visible_tokens", 0)))
+        current.setdefault(
+            "last_output_tps", float(current.pop("last_visible_tps", 0.0))
+        )
+        current.setdefault(
+            "last_output_tokens", int(current.pop("last_visible_tokens", 0))
+        )
         for key, value in default_node_state().items():
             current.setdefault(key, value)
         return current
 
-    def _defer_no_account(self, state: dict[str, Any], node: dict[str, Any], now: float, event: str, **fields: Any) -> None:
+    def _defer_no_account(
+        self,
+        state: dict[str, Any],
+        node: dict[str, Any],
+        now: float,
+        event: str,
+        **fields: Any,
+    ) -> None:
         state["last_probe_at"] = now
         state["last_reason"] = "probe_no_account"
         state["quarantined_until"] = max(
@@ -564,11 +789,22 @@ class Guard:
             now + self.config.no_account_backoff_seconds,
         )
         last_logged = float(state.get("last_no_account_log_at", 0.0))
-        if last_logged <= 0 or now - last_logged >= self.config.no_account_backoff_seconds:
+        if (
+            last_logged <= 0
+            or now - last_logged >= self.config.no_account_backoff_seconds
+        ):
             state["last_no_account_log_at"] = now
-            log_event(event, node_id=str(node["id"]), node_name=node.get("name"), reason="probe_no_account", **fields)
+            log_event(
+                event,
+                node_id=str(node["id"]),
+                node_name=node.get("name"),
+                reason="probe_no_account",
+                **fields,
+            )
 
-    def _eligible_nodes(self, nodes: list[dict[str, Any]], protected_node_ids: set[str]) -> list[dict[str, Any]]:
+    def _eligible_nodes(
+        self, nodes: list[dict[str, Any]], protected_node_ids: set[str]
+    ) -> list[dict[str, Any]]:
         configured = set(self.config.node_ids)
         state_nodes = self.state.get("nodes") or {}
         result = []
@@ -576,7 +812,11 @@ class Guard:
             node_id = str(node.get("id") or "")
             if not node_id or not node.get("proxyConfigured"):
                 continue
-            tracked_quarantine = bool((state_nodes.get(node_id) or {}).get("disabled_by_guard"))
+            if self._is_mihomo_type(node):
+                continue
+            tracked_quarantine = bool(
+                (state_nodes.get(node_id) or {}).get("disabled_by_guard")
+            )
             if node_id in protected_node_ids and not tracked_quarantine:
                 continue
             # A node removed from the configured set while quarantined remains
@@ -589,20 +829,85 @@ class Guard:
         return result
 
     def _can_quarantine(self, nodes: list[dict[str, Any]], node_id: str) -> bool:
-        enabled = sum(1 for node in nodes if bool(node.get("enabled")))
-        target_enabled = any(str(node.get("id")) == node_id and bool(node.get("enabled")) for node in nodes)
+        enabled = sum(
+            1
+            for node in nodes
+            if bool(node.get("enabled")) and not self._is_mihomo_type(node)
+        )
+        target_enabled = any(
+            str(node.get("id")) == node_id and bool(node.get("enabled"))
+            for node in nodes
+        )
         if self.config.fail_closed:
             return target_enabled
         return target_enabled and enabled - 1 >= self.config.min_healthy_nodes
 
+    def _is_mihomo_type(self, node: dict[str, Any]) -> bool:
+        """判断节点是否为操作员显式声明的 Mihomo 组通道节点（type=mihomo）。
+
+        通道节点共享同一条组出口，探测/隔离单节点无效，守卫必须完全隐藏
+        它们（不探测、不隔离、不计入健康基线），由 Mihomo 组成员承载出口质量。
+        """
+        return str(node.get("type") or "") == "mihomo"
+
+    def _is_mihomo_synced(self, node: dict[str, Any]) -> bool:
+        """判断节点是否由 Mihomo 测试组同步而来。
+
+        双判据：SourceKey 以 "mihomo:" 开头，或 Name 以 "mihomo-" 开头。
+        后端 nodeResponse 已暴露 sourceKey（handler.go nodeResponse），
+        sourceKey 判据生效；Name 判据保留兼容历史同步节点。
+        mihomo 类型节点（type=mihomo，手动创建的生产通道）与同步节点互斥
+        ——同步器建行时 Type 恒为空，故显式类型优先，避免命名误判。
+        """
+        if self._is_mihomo_type(node):
+            return False
+        if str(node.get("sourceKey") or "").startswith("mihomo:"):
+            return True
+        return str(node.get("name") or "").startswith("mihomo-")
+
+    def _select_test_member(self, node: dict[str, Any]) -> bool:
+        """探测前先将测试组当前成员切换为目标节点，保证探测归因一致。
+
+        非同步节点直接放行（不调用 select）；同步节点 select 失败返回
+        False，由调用方记账并跳过本轮探测。
+        """
+        if not self._is_mihomo_synced(node):
+            return True
+        node_name = str(node.get("name") or "")
+        if node_name and self.api.select_test_member(node_name):
+            return True
+        log_event(
+            "mihomo_select_failed",
+            node_id=str(node.get("id") or ""),
+            node_name=node.get("name"),
+        )
+        return False
+
     def _should_rotate(self, node_id: str, reason: str) -> bool:
+        if node_id in self._mihomo_member_by_node:
+            # Mihomo 同步节点的出口=测试组成员，隔离/换路靠测试组 ban/select
+            # 完成；对生产组触发 rotate webhook 是错误归因，因此永不旋转。
+            log_event(
+                "mihomo_synced_rotation_skipped",
+                node_id=node_id,
+                reason=reason,
+                detail="mihomo synced node rotates via test-group ban/select, not webhook",
+            )
+            return False
         return (
             bool(self.config.rotation_url)
             and node_id in set(self.config.rotatable_node_ids)
-            and reason in {
-                "hard_tps", "soft_tps", "buffered_burst", "expected_marker_missing",
-                "insufficient_output_tokens", "insufficient_generation_window", "probe_errors",
-                "recovery_probe_error", "rotation_error",
+            and reason
+            in {
+                "hard_tps",
+                "soft_tps",
+                "buffered_burst",
+                "expected_marker_missing",
+                "insufficient_output_tokens",
+                "insufficient_generation_window",
+                "probe_errors",
+                "recovery_probe_error",
+                "rotation_error",
             }
         )
 
@@ -610,22 +915,71 @@ class Guard:
     def _probe_account_unavailable(exc: Exception) -> bool:
         return isinstance(exc, ApiError) and exc.code == "egressQualityProbeNoAccount"
 
-    def _quarantine(self, nodes: list[dict[str, Any]], node: dict[str, Any], reason: str, now: float) -> None:
+    def _epoch_changed(
+        self,
+        before: dict[str, Any] | None,
+        node_id: str,
+        node_name: Any,
+        **fields: Any,
+    ) -> bool:
+        """True when the shared exit switched during the probe (result invalid)."""
+        if not before:
+            return False
+        after = self.api.get_mihomo_status()
+        if not after:
+            return False
+        if node_id in self._mihomo_member_by_node:
+            # 同步节点探测的是测试组成员：优先比对 testEpoch（Go 侧新字段，
+            # 随状态接口一并返回）；旧后端未暴露 testEpoch 时退化到生产 epoch。
+            before_epoch = before.get("testEpoch")
+            after_epoch = after.get("testEpoch")
+            if before_epoch is not None and after_epoch is not None:
+                if after_epoch == before_epoch:
+                    return False
+                log_event(
+                    "probe_skipped_epoch_changed",
+                    node_id=node_id,
+                    node_name=node_name,
+                    epoch_field="testEpoch",
+                    **fields,
+                )
+                return True
+        if after.get("epoch") == before.get("epoch"):
+            return False
+        log_event(
+            "probe_skipped_epoch_changed",
+            node_id=node_id,
+            node_name=node_name,
+            **fields,
+        )
+        return True
+
+    def _quarantine(
+        self, nodes: list[dict[str, Any]], node: dict[str, Any], reason: str, now: float
+    ) -> None:
         node_id = str(node["id"])
         state = self._state_for(node_id)
         if not self._can_quarantine(nodes, node_id):
             self._bump_statistic("actions", "suppressed")
-            log_event("quarantine_suppressed", node_id=node_id, node_name=node.get("name"), reason=reason, minimum_healthy=self.config.min_healthy_nodes)
+            log_event(
+                "quarantine_suppressed",
+                node_id=node_id,
+                node_name=node.get("name"),
+                reason=reason,
+                minimum_healthy=self.config.min_healthy_nodes,
+            )
             return
         previous_state = dict(state)
-        state.update({
-            "active_soft_strikes": 0,
-            "passive_soft_strikes": 0,
-            "error_strikes": 0,
-            "quarantined_until": now + self.config.quarantine_seconds,
-            "disabled_by_guard": True,
-            "last_reason": reason,
-        })
+        state.update(
+            {
+                "active_soft_strikes": 0,
+                "passive_soft_strikes": 0,
+                "error_strikes": 0,
+                "quarantined_until": now + self.config.quarantine_seconds,
+                "disabled_by_guard": True,
+                "last_reason": reason,
+            }
+        )
         # Persist ownership before changing backend scheduling state. A crash
         # after the API call can then be reconciled safely on restart.
         self._save()
@@ -635,42 +989,90 @@ class Guard:
             state.clear()
             state.update(previous_state)
             self._save()
-            log_event("quarantine_failed", node_id=node_id, node_name=node.get("name"), reason=reason, error_type=type(exc).__name__)
+            log_event(
+                "quarantine_failed",
+                node_id=node_id,
+                node_name=node.get("name"),
+                reason=reason,
+                error_type=type(exc).__name__,
+            )
             return
         if updated != 1:
             state.clear()
             state.update(previous_state)
             self._save()
-            log_event("quarantine_not_applied", node_id=node_id, node_name=node.get("name"), reason=reason, updated=updated)
+            log_event(
+                "quarantine_not_applied",
+                node_id=node_id,
+                node_name=node.get("name"),
+                reason=reason,
+                updated=updated,
+            )
             return
         node["enabled"] = False
+        if self._is_mihomo_synced(node):
+            node_name = str(node.get("name") or "")
+            if node_name and not self.api.ban_test_member(node_name):
+                # 封禁失败仅记录、不阻断隔离：节点已被 set_enabled(False) 禁用，
+                # 且 Go 侧测试组黑名单自带 TTL（10 分钟）兜底，探测也始终先
+                # select 目标成员，隔离语义不依赖本次 ban 成功。
+                log_event(
+                    "mihomo_ban_failed",
+                    node_id=node_id,
+                    node_name=node.get("name"),
+                )
         self._bump_statistic("actions", "quarantined")
-        append_state_event(self.state, "node_quarantined", node_id=node_id, node_name=node.get("name"), reason=reason)
+        append_state_event(
+            self.state,
+            "node_quarantined",
+            node_id=node_id,
+            node_name=node.get("name"),
+            reason=reason,
+        )
         self._save()
-        log_event("node_quarantined", node_id=node_id, node_name=node.get("name"), reason=reason, quarantine_seconds=self.config.quarantine_seconds)
+        log_event(
+            "node_quarantined",
+            node_id=node_id,
+            node_name=node.get("name"),
+            reason=reason,
+            quarantine_seconds=self.config.quarantine_seconds,
+        )
         if reason == "buffered_burst":
-            self._recover_quarantined(node, time.time(), rotate=False, rotate_on_failure=True)
+            self._recover_quarantined(
+                node, time.time(), rotate=False, rotate_on_failure=True
+            )
         elif self._should_rotate(node_id, reason):
             self._recover_quarantined(node, time.time(), rotate=True)
 
-    def _record_probe(self, node: dict[str, Any], result: dict[str, Any], classification: str, reason: str, now: float) -> None:
+    def _record_probe(
+        self,
+        node: dict[str, Any],
+        result: dict[str, Any],
+        classification: str,
+        reason: str,
+        now: float,
+    ) -> None:
         node_id = str(node["id"])
         state = self._state_for(node_id)
-        output_tokens = int(result.get("outputTokens") or result.get("visibleTokens") or 0)
+        output_tokens = int(
+            result.get("outputTokens") or result.get("visibleTokens") or 0
+        )
         output_tps_value = result.get("outputTokensPerSecond")
         if output_tps_value is None:
             output_tps_value = result.get("visibleTokensPerSecond")
         output_tps = float(output_tps_value or 0.0)
         state["last_probe_at"] = now
-        state.update({
-            "last_observed_at": now,
-            "last_source": "active",
-            "last_classification": classification,
-            "last_output_tps": round(output_tps, 3),
-            "last_output_tokens": output_tokens,
-            "last_first_token_ms": int(result.get("firstTokenMs") or 0),
-            "last_duration_ms": int(result.get("durationMs") or 0),
-        })
+        state.update(
+            {
+                "last_observed_at": now,
+                "last_source": "active",
+                "last_classification": classification,
+                "last_output_tps": round(output_tps, 3),
+                "last_output_tokens": output_tokens,
+                "last_first_token_ms": int(result.get("firstTokenMs") or 0),
+                "last_duration_ms": int(result.get("durationMs") or 0),
+            }
+        )
         state["error_strikes"] = 0
         self._bump_statistic("active", classification)
         self._bump_statistic("active", "output_tokens", output_tokens)
@@ -695,30 +1097,69 @@ class Guard:
             expected_matched=bool(result.get("expectedMatched")),
         )
 
-    def _probe_active(self, nodes: list[dict[str, Any]], node: dict[str, Any], now: float, trigger: str = "scheduled") -> None:
+    def _probe_active(
+        self,
+        nodes: list[dict[str, Any]],
+        node: dict[str, Any],
+        now: float,
+        trigger: str = "scheduled",
+    ) -> None:
         node_id = str(node["id"])
         state = self._state_for(node_id)
-        if state.get("last_reason") == "probe_no_account" and now < float(state.get("quarantined_until", 0.0)):
+        if state.get("last_reason") == "probe_no_account" and now < float(
+            state.get("quarantined_until", 0.0)
+        ):
             return
         self._bump_statistic("active", "total")
+        if not self._select_test_member(node):
+            # select 失败按探测错误记账但暂不隔离：等下一轮重试，避免测试组
+            # 切换抖动被误判为节点质量问题。
+            self._bump_statistic("active", "errors")
+            state["error_strikes"] = int(state.get("error_strikes", 0)) + 1
+            state["last_probe_at"] = now
+            log_event(
+                "quality_probe_skipped_select_failed",
+                node_id=node_id,
+                node_name=node.get("name"),
+                trigger=trigger,
+                strikes=state["error_strikes"],
+            )
+            return
+        before = self.api.get_mihomo_status()
         try:
             result = self.api.quality_test(node_id)
         except Exception as exc:
             if self._probe_account_unavailable(exc):
-                self._defer_no_account(state, node, now, "quality_probe_deferred", trigger=trigger)
+                self._defer_no_account(
+                    state, node, now, "quality_probe_deferred", trigger=trigger
+                )
                 return
             self._bump_statistic("active", "errors")
             state["error_strikes"] = int(state.get("error_strikes", 0)) + 1
             state["last_probe_at"] = now
-            log_event("quality_probe_failed", node_id=node_id, node_name=node.get("name"), trigger=trigger, error_type=type(exc).__name__, strikes=state["error_strikes"])
-            if trigger == "scheduled" and state["error_strikes"] >= self.config.consecutive_errors:
+            log_event(
+                "quality_probe_failed",
+                node_id=node_id,
+                node_name=node.get("name"),
+                trigger=trigger,
+                error_type=type(exc).__name__,
+                strikes=state["error_strikes"],
+            )
+            if (
+                trigger == "scheduled"
+                and state["error_strikes"] >= self.config.consecutive_errors
+            ):
                 self._quarantine(nodes, node, "probe_errors", now)
+            return
+        if self._epoch_changed(before, node_id, node.get("name"), trigger=trigger):
             return
         classification, reason = classify_result(result, self.config)
         self._record_probe(node, result, classification, reason, now)
-        if classification == "hard" or (
-            classification == "soft" and self.config.fail_closed
-        ) or int(state.get("active_soft_strikes", 0)) >= self.config.consecutive_soft:
+        if (
+            classification == "hard"
+            or (classification == "soft" and self.config.fail_closed)
+            or int(state.get("active_soft_strikes", 0)) >= self.config.consecutive_soft
+        ):
             self._quarantine(nodes, node, reason, now)
 
     def _recover_quarantined(
@@ -737,13 +1178,20 @@ class Guard:
                 state["rotation_failures"] = int(state.get("rotation_failures", 0)) + 1
                 state["quarantined_until"] = now + self.config.quarantine_seconds
                 state["last_reason"] = "rotation_error"
-                log_event("node_rotation_failed", node_id=node_id, node_name=node.get("name"), error_type=type(exc).__name__)
+                log_event(
+                    "node_rotation_failed",
+                    node_id=node_id,
+                    node_name=node.get("name"),
+                    error_type=type(exc).__name__,
+                )
                 return
-            state.update({
-                "last_rotation_at": time.time(),
-                "last_rotation_exit_ip": str(rotation.get("newExitIp") or ""),
-                "rotation_failures": 0,
-            })
+            state.update(
+                {
+                    "last_rotation_at": time.time(),
+                    "last_rotation_exit_ip": str(rotation.get("newExitIp") or ""),
+                    "rotation_failures": 0,
+                }
+            )
             append_state_event(
                 self.state,
                 "node_rotated",
@@ -751,16 +1199,41 @@ class Guard:
                 node_name=node.get("name"),
                 exit_ip=str(rotation.get("newExitIp") or ""),
             )
-            log_event("node_rotated", node_id=node_id, node_name=node.get("name"), exit_ip=str(rotation.get("newExitIp") or ""))
+            log_event(
+                "node_rotated",
+                node_id=node_id,
+                node_name=node.get("name"),
+                exit_ip=str(rotation.get("newExitIp") or ""),
+            )
         try:
+            if not self._select_test_member(node):
+                # select 失败保持隔离，下一轮再试。
+                state["quarantined_until"] = now + self.config.quarantine_seconds
+                state["last_reason"] = "mihomo_select_failed"
+                log_event(
+                    "recovery_probe_skipped_select_failed",
+                    node_id=node_id,
+                    node_name=node.get("name"),
+                )
+                return
             try:
                 connectivity = self.api.connectivity_test(node_id)
                 connectivity_status = str(connectivity.get("status") or "unknown")
             except Exception as exc:
                 connectivity_status = "error"
-                log_event("recovery_connectivity_probe_failed", node_id=node_id, node_name=node.get("name"), error_type=type(exc).__name__)
+                log_event(
+                    "recovery_connectivity_probe_failed",
+                    node_id=node_id,
+                    node_name=node.get("name"),
+                    error_type=type(exc).__name__,
+                )
             self._bump_statistic("active", "total")
+            before = self.api.get_mihomo_status()
             result = self.api.quality_test(node_id)
+            if self._epoch_changed(
+                before, node_id, node.get("name"), trigger="recovery"
+            ):
+                return
             classification, reason = classify_result(result, self.config)
             self._record_probe(node, result, classification, reason, now)
         except Exception as exc:
@@ -770,31 +1243,69 @@ class Guard:
             self._bump_statistic("active", "errors")
             state["quarantined_until"] = now + self.config.quarantine_seconds
             state["last_reason"] = "recovery_probe_error"
-            log_event("recovery_probe_failed", node_id=node_id, node_name=node.get("name"), error_type=type(exc).__name__)
+            log_event(
+                "recovery_probe_failed",
+                node_id=node_id,
+                node_name=node.get("name"),
+                error_type=type(exc).__name__,
+            )
             return
         if classification != "healthy":
             state["quarantined_until"] = now + self.config.quarantine_seconds
             state["last_reason"] = reason
-            log_event("quarantine_extended", node_id=node_id, node_name=node.get("name"), reason=reason)
+            log_event(
+                "quarantine_extended",
+                node_id=node_id,
+                node_name=node.get("name"),
+                reason=reason,
+            )
             if rotate_on_failure and self._should_rotate(node_id, reason):
                 self._recover_quarantined(node, time.time(), rotate=True)
             return
         updated = self.api.set_enabled(node_id, True)
         if updated != 1:
-            log_event("restore_not_applied", node_id=node_id, node_name=node.get("name"), updated=updated)
+            log_event(
+                "restore_not_applied",
+                node_id=node_id,
+                node_name=node.get("name"),
+                updated=updated,
+            )
             return
-        state.update({
-            "active_soft_strikes": 0,
-            "passive_soft_strikes": 0,
-            "error_strikes": 0,
-            "quarantined_until": 0.0,
-            "disabled_by_guard": False,
-            "last_reason": "",
-        })
+        if self._is_mihomo_synced(node):
+            node_name = str(node.get("name") or "")
+            if node_name and not self.api.unban_test_member(node_name):
+                # 解除封禁失败仅记录、不阻断恢复：节点已重新启用，黑名单 TTL
+                # 到期后测试组自然恢复该成员。
+                log_event(
+                    "mihomo_unban_failed",
+                    node_id=node_id,
+                    node_name=node.get("name"),
+                )
+        state.update(
+            {
+                "active_soft_strikes": 0,
+                "passive_soft_strikes": 0,
+                "error_strikes": 0,
+                "quarantined_until": 0.0,
+                "disabled_by_guard": False,
+                "last_reason": "",
+            }
+        )
         node["enabled"] = True
         self._bump_statistic("actions", "restored")
-        append_state_event(self.state, "node_restored", node_id=node_id, node_name=node.get("name"), reason="quality_probe_healthy")
-        log_event("node_restored", node_id=node_id, node_name=node.get("name"), connectivity_status=connectivity_status)
+        append_state_event(
+            self.state,
+            "node_restored",
+            node_id=node_id,
+            node_name=node.get("name"),
+            reason="quality_probe_healthy",
+        )
+        log_event(
+            "node_restored",
+            node_id=node_id,
+            node_name=node.get("name"),
+            connectivity_status=connectivity_status,
+        )
 
     def _probe_quarantined(self, node: dict[str, Any], now: float) -> None:
         node_id = str(node["id"])
@@ -809,10 +1320,19 @@ class Guard:
             rotate_on_failure=reason == "buffered_burst",
         )
 
-    def _prepare_nodes(self, now: float) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+    def _prepare_nodes(
+        self, now: float
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
         all_nodes = self.api.list_nodes()
+        self._mihomo_member_by_node = {
+            str(node.get("id") or ""): str(node.get("name") or "")
+            for node in all_nodes
+            if node.get("id") and self._is_mihomo_synced(node)
+        }
         protected_node_ids = self.api.fixed_fallback_node_ids()
-        previous_protected = set(str(value) for value in self.state.get("protected_node_ids", []))
+        previous_protected = set(
+            str(value) for value in self.state.get("protected_node_ids", [])
+        )
         if protected_node_ids != previous_protected:
             self.state["protected_node_ids"] = sorted(protected_node_ids)
             for node_id in sorted(protected_node_ids - previous_protected):
@@ -825,28 +1345,44 @@ class Guard:
         for node in all_nodes:
             node_id = str(node.get("id") or "")
             state = state_nodes.get(node_id) or {}
-            if node_id not in protected_node_ids or not node.get("enabled") or not state.get("disabled_by_guard"):
+            if (
+                node_id not in protected_node_ids
+                or not node.get("enabled")
+                or not state.get("disabled_by_guard")
+            ):
                 continue
-            state.update({
-                "active_soft_strikes": 0,
-                "passive_soft_strikes": 0,
-                "error_strikes": 0,
-                "quarantined_until": 0.0,
-                "disabled_by_guard": False,
-                "last_reason": "",
-            })
-            log_event("fixed_fallback_guard_released", node_id=node_id, node_name=node.get("name"))
+            state.update(
+                {
+                    "active_soft_strikes": 0,
+                    "passive_soft_strikes": 0,
+                    "error_strikes": 0,
+                    "quarantined_until": 0.0,
+                    "disabled_by_guard": False,
+                    "last_reason": "",
+                }
+            )
+            log_event(
+                "fixed_fallback_guard_released",
+                node_id=node_id,
+                node_name=node.get("name"),
+            )
         if not self.config.node_ids:
             self._resolved_node_ids = [
-                str(node["id"]) for node in all_nodes
-                if node.get("id") and node.get("proxyConfigured") and str(node["id"]) not in protected_node_ids
+                str(node["id"])
+                for node in all_nodes
+                if node.get("id")
+                and node.get("proxyConfigured")
+                and not self._is_mihomo_type(node)
+                and str(node["id"]) not in protected_node_ids
             ]
         nodes = self._eligible_nodes(all_nodes, protected_node_ids)
         present_ids = {str(node.get("id")) for node in all_nodes if node.get("id")}
         managed_ids = {str(node.get("id")) for node in nodes if node.get("id")}
         for stale_id in list(state_nodes):
             tracked = bool((state_nodes.get(stale_id) or {}).get("disabled_by_guard"))
-            if stale_id not in present_ids or (stale_id not in managed_ids and not tracked):
+            if stale_id not in present_ids or (
+                stale_id not in managed_ids and not tracked
+            ):
                 del state_nodes[stale_id]
         skip_ids: set[str] = set()
         if not nodes:
@@ -860,26 +1396,39 @@ class Guard:
                     updated = self.api.set_enabled(node_id, False)
                     if updated == 1:
                         node["enabled"] = False
-                        state["quarantined_until"] = now + self.config.quarantine_seconds
-                        log_event("operator_reenable_requires_probe", node_id=node_id, node_name=node.get("name"))
+                        state["quarantined_until"] = (
+                            now + self.config.quarantine_seconds
+                        )
+                        log_event(
+                            "operator_reenable_requires_probe",
+                            node_id=node_id,
+                            node_name=node.get("name"),
+                        )
                         reason = str(state.get("last_reason") or "")
                         self._recover_quarantined(
                             node,
                             now,
-                            rotate=self._should_rotate(node_id, reason) and reason != "buffered_burst",
+                            rotate=self._should_rotate(node_id, reason)
+                            and reason != "buffered_burst",
                             rotate_on_failure=reason == "buffered_burst",
                         )
                     skip_ids.add(node_id)
                     continue
-                state.update({
-                    "active_soft_strikes": 0,
-                    "passive_soft_strikes": 0,
-                    "error_strikes": 0,
-                    "quarantined_until": 0.0,
-                    "disabled_by_guard": False,
-                    "last_reason": "",
-                })
-                log_event("operator_reenabled_node", node_id=node_id, node_name=node.get("name"))
+                state.update(
+                    {
+                        "active_soft_strikes": 0,
+                        "passive_soft_strikes": 0,
+                        "error_strikes": 0,
+                        "quarantined_until": 0.0,
+                        "disabled_by_guard": False,
+                        "last_reason": "",
+                    }
+                )
+                log_event(
+                    "operator_reenabled_node",
+                    node_id=node_id,
+                    node_name=node.get("name"),
+                )
                 skip_ids.add(node_id)
                 continue
             if state.get("disabled_by_guard"):
@@ -893,7 +1442,11 @@ class Guard:
         for node in nodes:
             node_id = str(node["id"])
             state = self._state_for(node_id)
-            if node_id not in skip_ids and node.get("enabled") and not state.get("disabled_by_guard"):
+            if (
+                node_id not in skip_ids
+                and node.get("enabled")
+                and not state.get("disabled_by_guard")
+            ):
                 self._probe_active(all_nodes, node, now)
             self._save()
         self.state["last_active_cycle_at"] = time.time()
@@ -940,33 +1493,49 @@ class Guard:
             log_event("passive_baseline_initialized", audit_count=len(fetched_ids))
             return []
         if collected and not reached_known and known:
-            log_event("passive_audit_gap", collected=len(collected), max_pages=self.config.passive_max_pages)
+            log_event(
+                "passive_audit_gap",
+                collected=len(collected),
+                max_pages=self.config.passive_max_pages,
+            )
         collected.reverse()
         return collected
 
-    def _record_passive_audit(self, all_nodes: list[dict[str, Any]], node: dict[str, Any], audit_value: dict[str, Any], now: float) -> None:
+    def _record_passive_audit(
+        self,
+        all_nodes: list[dict[str, Any]],
+        node: dict[str, Any],
+        audit_value: dict[str, Any],
+        now: float,
+    ) -> None:
         node_id = str(node["id"])
         state = self._state_for(node_id)
-        classification, reason, speed, output_tokens = classify_audit(audit_value, self.config)
+        classification, reason, speed, output_tokens = classify_audit(
+            audit_value, self.config
+        )
         if classification == "ignored":
             return
         self._bump_statistic("passive", "total")
         self._bump_statistic("passive", classification)
         self._bump_statistic("passive", "output_tokens", output_tokens)
-        state.update({
-            "last_observed_at": now,
-            "last_source": "passive",
-            "last_classification": classification,
-            "last_output_tps": round(speed, 3),
-            "last_output_tokens": output_tokens,
-            "last_first_token_ms": int(audit_value.get("firstTokenMs") or 0),
-            "last_duration_ms": int(audit_value.get("durationMs") or 0),
-        })
+        state.update(
+            {
+                "last_observed_at": now,
+                "last_source": "passive",
+                "last_classification": classification,
+                "last_output_tps": round(speed, 3),
+                "last_output_tokens": output_tokens,
+                "last_first_token_ms": int(audit_value.get("firstTokenMs") or 0),
+                "last_duration_ms": int(audit_value.get("durationMs") or 0),
+            }
+        )
         if classification == "healthy":
             state["passive_soft_strikes"] = 0
             return
         if classification == "soft":
-            state["passive_soft_strikes"] = int(state.get("passive_soft_strikes", 0)) + 1
+            state["passive_soft_strikes"] = (
+                int(state.get("passive_soft_strikes", 0)) + 1
+            )
         else:
             state["passive_soft_strikes"] = self.config.consecutive_soft
         append_state_event(
@@ -1032,9 +1601,19 @@ def acquire_lock(path: Path):
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Active and passive quality guard for grok2api egress nodes")
-    parser.add_argument("--once", action="store_true", help="run one cycle for each detector enabled by the selected mode")
-    parser.add_argument("--check-config", action="store_true", help="validate config.yaml bootstrap and exit")
+    parser = argparse.ArgumentParser(
+        description="Active and passive quality guard for grok2api egress nodes"
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="run one cycle for each detector enabled by the selected mode",
+    )
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="validate config.yaml bootstrap and exit",
+    )
     args = parser.parse_args(argv)
     try:
         base_config = Config.from_bootstrap()
@@ -1068,7 +1647,9 @@ def main(argv: list[str] | None = None) -> int:
     api = ApiClient(config)
     guard = Guard(config, api)
     last_active_at = float(guard.state.get("last_active_cycle_at", 0.0))
-    active_delay = max(0.0, last_active_at + config.active_interval_seconds - time.time())
+    active_delay = max(
+        0.0, last_active_at + config.active_interval_seconds - time.time()
+    )
     next_active = 0.0 if args.once else time.monotonic() + active_delay
     next_passive = 0.0
     log_event(
@@ -1083,7 +1664,9 @@ def main(argv: list[str] | None = None) -> int:
         now = time.monotonic()
         next_config, changed, runtime_error = reloader.reload()
         if runtime_error is not None:
-            log_event("runtime_config_rejected", error_type=type(runtime_error).__name__)
+            log_event(
+                "runtime_config_rejected", error_type=type(runtime_error).__name__
+            )
         elif changed:
             previous_mode = config.mode
             config = next_config
@@ -1091,9 +1674,13 @@ def main(argv: list[str] | None = None) -> int:
             api.config = config
             guard._save()
             last_active_at = float(guard.state.get("last_active_cycle_at", 0.0))
-            next_active = now + max(0.0, last_active_at + config.active_interval_seconds - time.time())
+            next_active = now + max(
+                0.0, last_active_at + config.active_interval_seconds - time.time()
+            )
             next_passive = now
-            log_event("runtime_config_reloaded", previous_mode=previous_mode, mode=config.mode)
+            log_event(
+                "runtime_config_reloaded", previous_mode=previous_mode, mode=config.mode
+            )
         active_enabled = config.mode in {"active", "hybrid"}
         passive_enabled = config.mode in {"passive", "hybrid"}
         if passive_enabled and now >= next_passive:
@@ -1108,7 +1695,9 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:
                 log_event("active_cycle_failed", error_type=type(exc).__name__)
             jitter = random.uniform(-config.jitter_seconds, config.jitter_seconds)
-            next_active = time.monotonic() + max(60.0, config.active_interval_seconds + jitter)
+            next_active = time.monotonic() + max(
+                60.0, config.active_interval_seconds + jitter
+            )
         if args.once:
             break
         deadlines = []
