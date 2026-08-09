@@ -1,0 +1,29 @@
+#!/command/with-contenv sh
+set -eu
+
+umask 077
+
+: "${PUID:=10001}"
+: "${PGID:=10001}"
+for var in PUID PGID; do
+  value=$(eval "printf '%s' \"\$${var}\"")
+  case "$value" in
+    ''|*[!0-9]*) echo "invalid ${var}: ${value} (must be a positive integer)" >&2; exit 1 ;;
+  esac
+done
+
+mkdir -p /var/lib/grok2api-quality-guard
+chown -R "${PUID}:${PGID}" \
+  /app/data \
+  /var/lib/grok2api-quality-guard
+chmod 0700 /var/lib/grok2api-quality-guard
+
+if [ ! -f "${GROK2API_CONFIG_SOURCE}" ]; then
+  echo "missing config: ${GROK2API_CONFIG_SOURCE}" >&2
+  echo "mount config.yaml to /run/grok2api/config.yaml" >&2
+  exit 1
+fi
+
+cp "${GROK2API_CONFIG_SOURCE}" /app/config.yaml
+chown "${PUID}:${PGID}" /app/config.yaml
+chmod 0600 /app/config.yaml
