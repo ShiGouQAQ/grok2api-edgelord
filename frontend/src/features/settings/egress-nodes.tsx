@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CircleAlert, CircleHelp, MoreHorizontal, Pencil, Plus, Power, PowerOff, RefreshCw, Search, Trash2, Upload } from "lucide-react";
+import { CircleAlert, CircleHelp, MoreHorizontal, Pencil, Plus, Power, PowerOff, RefreshCw, Search, ShieldCheck, Trash2, Upload } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -19,7 +19,7 @@ import { Table, TableActionCell, TableActionHead, TableBody, TableCell, TableHea
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EgressAutomation, EgressSources } from "@/features/settings/egress-operations";
-import { cleanupUnhealthyEgressNodes, createEgressNode, deleteEgressNode, deleteEgressNodes, importEgressText, listEgressNodes, previewUnhealthyEgressNodes, refreshEgressClearance, testEgressNode, updateEgressNode, updateEgressNodesEnabled, type EgressIPProbeDTO, type EgressNodeDTO, type EgressNodeInput, type EgressScope } from "@/features/settings/settings-api";
+import { cleanupUnhealthyEgressNodes, createEgressNode, deleteEgressNode, deleteEgressNodes, importEgressText, listEgressNodes, previewUnhealthyEgressNodes, refreshEgressClearance, testEgressNode, updateEgressNode, updateEgressNodesEnabled, type EgressIPProbeDTO, type EgressNodeDTO, type EgressNodeInput, type EgressNodeType, type EgressScope } from "@/features/settings/settings-api";
 import { ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
 import { DataTableFilters } from "@/shared/components/data-table-filters";
@@ -30,9 +30,10 @@ import { useDebouncedValue } from "@/shared/hooks/use-debounced-value";
 import { cn } from "@/shared/lib/cn";
 import { nextTableSort, type SortOrder, type TableSort } from "@/shared/lib/table-sort";
 
-const emptyInput: EgressNodeInput = { name: "", scope: "grok_build", enabled: true, proxyPool: false, accountCapacity: 0, proxyURL: "", userAgent: "", cloudflareCookies: "" };
+const emptyInput: EgressNodeInput = { name: "", scope: "grok_build", type: "", enabled: true, proxyPool: false, accountCapacity: 0, proxyURL: "", userAgent: "", cloudflareCookies: "" };
 type ImportForm = { name: string; scope: EgressScope; accountCapacity: number; content: string };
 const emptyImport: ImportForm = { name: "", scope: "grok_build", accountCapacity: 0, content: "" };
+const isMihomoSyncedNode = (node: EgressNodeDTO) => node.sourceKey?.startsWith("mihomo:") ?? false;
 
 export function EgressNodes({ title, clearanceMode }: { title: string; clearanceMode: "manual" | "flaresolverr" }) {
   const { t } = useTranslation();
@@ -157,7 +158,7 @@ export function EgressNodes({ title, clearanceMode }: { title: string; clearance
   }
 
   function openEdit(node: EgressNodeDTO) {
-    setForm({ name: node.name, scope: node.scope, enabled: node.enabled, proxyPool: node.proxyPool, accountCapacity: node.accountCapacity, userAgent: node.scope === "grok_build" ? "" : node.userAgent, proxyURL: "", cloudflareCookies: "" });
+    setForm({ name: node.name, scope: node.scope, type: node.type ?? "", enabled: node.enabled, proxyPool: node.proxyPool, accountCapacity: node.accountCapacity, userAgent: node.scope === "grok_build" ? "" : node.userAgent, proxyURL: "", cloudflareCookies: "" });
     setEditing(node);
   }
 
@@ -189,6 +190,7 @@ export function EgressNodes({ title, clearanceMode }: { title: string; clearance
     setSelected((current) => {
       const next = new Map(current);
       for (const node of nodes) {
+        if (isMihomoSyncedNode(node)) continue;
         if (checked) next.set(node.id, node);
         else next.delete(node.id);
       }
@@ -197,6 +199,7 @@ export function EgressNodes({ title, clearanceMode }: { title: string; clearance
   }
 
   function toggleNode(node: EgressNodeDTO, checked: boolean): void {
+    if (checked && isMihomoSyncedNode(node)) return;
     setSelected((current) => {
       const next = new Map(current);
       if (checked) next.set(node.id, node);
@@ -211,6 +214,7 @@ export function EgressNodes({ title, clearanceMode }: { title: string; clearance
   const selectedNodes = [...selected.values()];
   const selectedAssignedAccounts = selectedNodes.reduce((total, node) => total + node.assignedAccountCount, 0);
   const selectedSourceNodes = selectedNodes.filter((node) => node.sourceId).length;
+  const selectedManagedNodes = selectedNodes.filter(isMihomoSyncedNode).length;
   const batchPending = removeMany.isPending || updateManyEnabled.isPending;
   const hasActiveFilters = Boolean(debouncedSearch || scopeFilter || enabledFilter || probeFilter || assignmentFilter);
 
@@ -257,9 +261,9 @@ export function EgressNodes({ title, clearanceMode }: { title: string; clearance
                 {selected.size > 0 ? (
                   <>
                     <span className="mr-1 text-xs text-muted-foreground">{t("common.selectedCount", { count: selected.size })}</span>
-                    <Button type="button" size="sm" variant="secondary" disabled={batchPending || selectedNodes.every((node) => node.enabled)} onClick={() => updateManyEnabled.mutate(true)}><Power />{t("common.enable")}</Button>
-                    <Button type="button" size="sm" variant="secondary" disabled={batchPending || selectedNodes.every((node) => !node.enabled)} onClick={() => updateManyEnabled.mutate(false)}><PowerOff />{t("common.disable")}</Button>
-                    <Button type="button" size="sm" variant="secondary" className="bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive" disabled={batchPending} onClick={() => setBatchDeleteOpen(true)}><Trash2 />{t("common.delete")}</Button>
+                    <Button type="button" size="sm" variant="secondary" disabled={batchPending || selectedManagedNodes > 0 || selectedNodes.every((node) => node.enabled)} onClick={() => updateManyEnabled.mutate(true)}><Power />{t("common.enable")}</Button>
+                    <Button type="button" size="sm" variant="secondary" disabled={batchPending || selectedManagedNodes > 0 || selectedNodes.every((node) => !node.enabled)} onClick={() => updateManyEnabled.mutate(false)}><PowerOff />{t("common.disable")}</Button>
+                    <Button type="button" size="sm" variant="secondary" className="bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive" disabled={batchPending || selectedManagedNodes > 0} onClick={() => setBatchDeleteOpen(true)}><Trash2 />{t("common.delete")}</Button>
                   </>
                 ) : null}
                 <Button type="button" size="sm" variant="secondary" disabled={cleanupUnhealthy.isPending} onClick={openCleanup}><Trash2 />{t("settings.egress.cleanupUnavailable")}</Button>
@@ -282,7 +286,7 @@ export function EgressNodes({ title, clearanceMode }: { title: string; clearance
           {!query.isPending && nodes.length === 0 ? <TableBody><TableRow><TableCell colSpan={9} className="h-24 text-center text-xs text-muted-foreground">{hasActiveFilters ? t("settings.egress.noMatches") : t("settings.egress.directFallback")}</TableCell></TableRow></TableBody> : null}
           {!query.isPending && nodes.length > 0 ? <VirtualTableBody items={nodes} colSpan={9} rowHeight={48} renderRow={(node) => (
               <TableRow className="group h-12" key={node.id} data-state={selected.has(node.id) ? "selected" : undefined}>
-                <TableCell className="px-2"><Checkbox checked={selected.has(node.id)} onCheckedChange={(checked) => toggleNode(node, checked === true)} aria-label={t("common.selectItem", { name: node.name })} /></TableCell>
+                <TableCell className="px-2"><Checkbox checked={selected.has(node.id)} disabled={isMihomoSyncedNode(node)} onCheckedChange={(checked) => toggleNode(node, checked === true)} aria-label={t("common.selectItem", { name: node.name })} /></TableCell>
                 <TableCell>
                   <div className="flex min-w-0 items-center gap-2">
                     <span className={cn("size-1.5 shrink-0 rounded-full", node.enabled ? "bg-emerald-500" : "bg-muted-foreground/35")} />
@@ -297,6 +301,12 @@ export function EgressNodes({ title, clearanceMode }: { title: string; clearance
                 <TableCell><HealthMeter value={node.health} /></TableCell>
                 <TableCell><ProbeSummary node={node} /></TableCell>
                 <TableActionCell>
+                  {isMihomoSyncedNode(node) ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild><Button type="button" variant="ghost" size="icon" className="size-8" aria-label={t("settings.egress.managedNode")}><ShieldCheck /></Button></TooltipTrigger>
+                      <TooltipContent className="max-w-72">{t("settings.egress.managedNodeHelp")}</TooltipContent>
+                    </Tooltip>
+                  ) : (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild><Button type="button" variant="ghost" size="icon" className="size-8" aria-label={t("common.actions")}><MoreHorizontal /></Button></DropdownMenuTrigger>
                     <DropdownMenuContent align="end">
@@ -307,6 +317,7 @@ export function EgressNodes({ title, clearanceMode }: { title: string; clearance
                       <DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => remove.mutate(node.id)}><Trash2 />{t("common.delete")}</DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
+                  )}
                 </TableActionCell>
               </TableRow>
             )} /> : null}
@@ -397,6 +408,15 @@ export function EgressNodes({ title, clearanceMode }: { title: string; clearance
                 </SelectContent>
               </Select>
             </Field>
+            <Field label={t("settings.egress.type")} controlId="egress-type" help={t("settings.egress.typeHelp")}>
+              <Select value={form.type} onValueChange={(value) => setForm({ ...form, type: value as EgressNodeType, proxyPool: value === "mihomo" ? false : form.proxyPool })}>
+                <SelectTrigger id="egress-type"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">{t("settings.egress.typeStandard")}</SelectItem>
+                  <SelectItem value="mihomo">{t("settings.egress.typeMihomo")}</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
             {form.scope !== "grok_build" && form.scope !== "grok_console_asset" ? (
               <div className="flex h-10 items-center justify-between gap-4 rounded-md bg-muted/45 px-3">
                 <span className="text-xs font-medium">{t("settings.egress.clearance")}</span>
@@ -416,7 +436,7 @@ export function EgressNodes({ title, clearanceMode }: { title: string; clearance
                 <Label htmlFor="egress-proxy-pool">{t("settings.egress.proxyPool")}</Label>
                 <p className="max-w-[390px] text-xs leading-5 text-muted-foreground">{t("settings.egress.proxyPoolHelp")}</p>
               </div>
-              <Switch id="egress-proxy-pool" className="mt-0.5" checked={form.proxyPool} disabled={!editing?.proxyConfigured && !form.proxyURL?.trim()} onCheckedChange={(proxyPool) => setForm({ ...form, proxyPool })} />
+              <Switch id="egress-proxy-pool" className="mt-0.5" checked={form.proxyPool} disabled={form.type === "mihomo" || (!editing?.proxyConfigured && !form.proxyURL?.trim())} onCheckedChange={(proxyPool) => setForm({ ...form, proxyPool })} />
             </div>
             {form.scope !== "grok_build" && (clearanceMode === "manual" || form.scope === "grok_console_asset") ? (
               <Field label={t("settings.egress.userAgent")} controlId="egress-user-agent">

@@ -399,12 +399,12 @@ export function EgressSources({ scopeLabel }: { scopeLabel: (scope: EgressScope)
               <TableCell className="text-xs text-muted-foreground">{source.lastSyncedAt ? formatDateTime(source.lastSyncedAt, i18n.language) : t("settings.egress.never")}</TableCell>
               <TableCell className="text-center text-xs tabular-nums">{source.defaultAccountCapacity || t("settings.egress.unlimited")}</TableCell>
               <TableActionCell>
-                <DropdownMenu><DropdownMenuTrigger asChild><Button type="button" size="icon" variant="ghost" className="size-8" aria-label={t("common.actions")}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
+                {source.managed ? <Badge variant="outline" title={t("settings.egress.sourceManagedHelp")} className="text-[10px] text-muted-foreground">{t("settings.egress.sourceManaged")}</Badge> : <DropdownMenu><DropdownMenuTrigger asChild><Button type="button" size="icon" variant="ghost" className="size-8" aria-label={t("common.actions")}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
                   <DropdownMenuItem disabled={syncSource.isPending} onClick={() => syncSource.mutate(source.id)}><RefreshCw />{t("settings.egress.sync")}</DropdownMenuItem>
                   <DropdownMenuItem onClick={() => openSource(source)}><Pencil />{t("common.edit")}</DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem className="text-destructive focus:text-destructive" disabled={removeSource.isPending} onClick={() => removeSource.mutate(source.id)}><Trash2 />{t("common.delete")}</DropdownMenuItem>
-                </DropdownMenuContent></DropdownMenu>
+                </DropdownMenuContent></DropdownMenu>}
               </TableActionCell>
             </TableRow>
           )} /> : null}
@@ -432,7 +432,11 @@ export function EgressSources({ scopeLabel }: { scopeLabel: (scope: EgressScope)
 }
 
 function fallbackNodeCandidates(nodes: EgressNodeDTO[], scope: EgressScope): EgressNodeDTO[] {
-  return nodes.filter((node) => node.enabled && node.proxyConfigured && !node.proxyPool && !node.accountBoundProxy && !nodeCooling(node) && supportsFallbackScope(node.scope, scope));
+  return nodes.filter((node) => node.enabled && node.proxyConfigured && !node.proxyPool && !node.accountBoundProxy && !isMihomoSyncedNode(node) && !nodeCooling(node) && supportsFallbackScope(node.scope, scope));
+}
+
+function isMihomoSyncedNode(node: EgressNodeDTO): boolean {
+  return node.sourceKey?.startsWith("mihomo:") ?? false;
 }
 
 function nodeCooling(node: EgressNodeDTO): boolean {

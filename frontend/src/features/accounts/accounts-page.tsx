@@ -90,7 +90,7 @@ import { AccountQuota, ConsoleQuota, WebQuota } from "@/features/accounts/accoun
 import { AccountNameCell } from "@/features/accounts/account-name-cell";
 import { WebAccountScriptsDialog } from "@/features/accounts/web-account-scripts";
 import { WebAccountSettingsDialogs, WebAccountSettingsMenu, type WebAccountConfirmationTarget } from "@/features/accounts/web-account-settings";
-import { assignEgressAccounts, listAllEgressNodes, listEgressNodes, listEgressSources, unassignEgressAccounts, type EgressScope } from "@/features/settings/settings-api";
+import { assignEgressAccounts, listAllEgressNodes, listEgressNodes, listEgressSources, unassignEgressAccounts, type EgressNodeDTO, type EgressScope } from "@/features/settings/settings-api";
 
 function isAbortError(error: unknown): boolean {
   return (error instanceof DOMException || error instanceof Error) && error.name === "AbortError";
@@ -1169,12 +1169,13 @@ export function AccountsPage() {
   const summaryUnavailable = summaryQuery.isError;
   const providerAccountTotal = provider === "grok_build" ? buildSummary.total : provider === "grok_web" ? webSummary.total : consoleSummary.total;
   const hasProviderAccounts = providerAccountTotal > 0 || (result?.total ?? 0) > 0;
-  const bindableEgressNodes = (egressNodesQuery.data?.items ?? []).filter((node) => node.enabled && node.proxyConfigured && scopeSupportsAccountProvider(node.scope, provider));
+  const bindableEgressNodes = (egressNodesQuery.data?.items ?? []).filter((node) => node.enabled && node.proxyConfigured && !isMihomoSyncedNode(node) && scopeSupportsAccountProvider(node.scope, provider));
   const egressFilterSearchTerm = egressFilterOptionsSearch.trim().toLocaleLowerCase();
   const consoleWebNodePages = provider === "grok_console" ? (egressFilterConsoleWebNodesQuery.data?.pages ?? []) : [];
   const scopedEgressNodes = [...(egressFilterNodesQuery.data?.pages ?? []), ...consoleWebNodePages]
     .flatMap((nodePage) => nodePage.items)
     .filter((node) => scopeSupportsAccountProvider(node.scope, provider))
+    .filter((node) => !isMihomoSyncedNode(node))
     .filter((node) => !egressFilterSearchTerm || node.name.toLocaleLowerCase().includes(egressFilterSearchTerm));
   const consoleWebNodesEnabled = provider === "grok_console";
   const consoleWebSourcePages = consoleWebNodesEnabled ? (egressFilterConsoleWebSourcesQuery.data?.pages ?? []) : [];
@@ -2245,6 +2246,10 @@ function scopeSupportsAccountProvider(scope: EgressScope, provider: AccountProvi
   if (provider === "grok_build") return scope === "grok_build";
   if (provider === "grok_web") return scope === "grok_web";
   return scope === "grok_web" || scope === "grok_console";
+}
+
+function isMihomoSyncedNode(node: EgressNodeDTO): boolean {
+  return node.sourceKey?.startsWith("mihomo:") ?? false;
 }
 
 function accountProviderPrimaryEgressScope(provider: AccountProvider): EgressScope {

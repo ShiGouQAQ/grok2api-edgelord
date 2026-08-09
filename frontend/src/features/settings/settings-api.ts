@@ -9,6 +9,7 @@ export type SettingsConfigDTO = {
     baseURL: string; quotaTimeout: string; chatTimeout: string; streamIdleTimeout: string; imageTimeout: string; videoTimeout: string;
     statsigMode: "manual" | "url"; statsigManualValue?: string; statsigManualConfigured: boolean; statsigSignerURL: string;
     clearanceMode: "manual" | "flaresolverr"; flareSolverrURL: string; clearanceTimeout: string; clearanceRefresh: string;
+    mihomoEnabled: boolean; mihomoAPIURL: string; mihomoGroupName: string; mihomoTestGroupName: string; mihomoTestProxyURL: string; mihomoDelayProbeURL: string;
     mediaConcurrency: number; allowNSFW: boolean;
     recoveryBackoffBase: string; recoveryBackoffMax: string;
   };
@@ -38,10 +39,10 @@ export type SettingsConfigDTO = {
 };
 
 export type EgressNodeDTO = {
-	id: string; name: string; scope: EgressScope; enabled: boolean;
+	id: string; name: string; scope: EgressScope; type?: EgressNodeType; enabled: boolean;
 	proxyConfigured: boolean; userAgent: string; cookieConfigured: boolean;
 	accountBoundProxy: boolean; proxyPool: boolean;
-	sourceId?: string; accountCapacity: number; assignedAccountCount: number;
+	sourceId?: string; sourceKey?: string; accountCapacity: number; assignedAccountCount: number;
 	health: number; failureCount: number; cooldownUntil?: string; lastError?: string;
 	probeStatus: "unknown" | "healthy" | "unhealthy"; lastProbedAt?: string; probeLatencyMs: number; exitIp?: string; probeError?: string;
 	probeProvider?: "ipinfo" | "cloudflare";
@@ -49,10 +50,11 @@ export type EgressNodeDTO = {
 };
 
 export type EgressNodeInput = {
-	name: string; scope: EgressScope; enabled: boolean; proxyPool: boolean; proxyURL?: string;
+	name: string; scope: EgressScope; type?: EgressNodeType; enabled: boolean; proxyPool: boolean; proxyURL?: string;
 	accountCapacity: number; clearProxyURL?: boolean; userAgent: string; cloudflareCookies?: string; clearCookies?: boolean;
 };
 
+export type EgressNodeType = "" | "mihomo";
 export type EgressScope = "grok_build" | "grok_web" | "grok_console" | "grok_web_asset" | "grok_console_asset";
 export type EgressFallbackMode = "none" | "direct" | "fixed";
 export type EgressFallbackConfigDTO = { mode: EgressFallbackMode; nodeId?: string };
@@ -67,6 +69,7 @@ export type EgressSourceDTO = {
   id: string; name: string; scope: EgressScope; enabled: boolean; urlConfigured: boolean;
   refreshIntervalSeconds: number; defaultAccountCapacity: number;
   lastSyncedAt?: string; nextSyncAt?: string; lastSyncImported: number; lastSyncError?: string;
+  managed?: boolean;
 };
 export type EgressSourceListDTO = {
   items: EgressSourceDTO[];
@@ -110,6 +113,7 @@ const settingsConfigValidator = hasShape({
     statsigMode: isOneOf("manual", "url"), statsigManualValue: isOptional(isString), statsigManualConfigured: isBoolean,
     statsigSignerURL: isString, clearanceMode: isOneOf("manual", "flaresolverr"), flareSolverrURL: isString,
     clearanceTimeout: isString, clearanceRefresh: isString, mediaConcurrency: isNumber, allowNSFW: isBoolean, recoveryBackoffBase: isString, recoveryBackoffMax: isString,
+    mihomoEnabled: isOptional(isBoolean), mihomoAPIURL: isOptional(isString), mihomoGroupName: isOptional(isString), mihomoTestGroupName: isOptional(isString), mihomoTestProxyURL: isOptional(isString), mihomoDelayProbeURL: isOptional(isString),
   }),
   providerConsole: hasShape({ baseURL: isString, chatTimeout: isString, streamIdleTimeout: isOptional(isString) }),
   batch: hasShape({ importConcurrency: isNumber, conversionConcurrency: isNumber, syncConcurrency: isNumber, refreshConcurrency: isNumber, randomDelay: isString }),
@@ -151,6 +155,12 @@ function withSettingsDefaults(snapshot: SettingsSnapshotDTO): SettingsSnapshotDT
       ...snapshot.config,
       providerWeb: {
         ...snapshot.config.providerWeb,
+        mihomoEnabled: snapshot.config.providerWeb.mihomoEnabled ?? false,
+        mihomoAPIURL: snapshot.config.providerWeb.mihomoAPIURL ?? "",
+        mihomoGroupName: snapshot.config.providerWeb.mihomoGroupName ?? "",
+        mihomoTestGroupName: snapshot.config.providerWeb.mihomoTestGroupName ?? "",
+        mihomoTestProxyURL: snapshot.config.providerWeb.mihomoTestProxyURL ?? "",
+        mihomoDelayProbeURL: snapshot.config.providerWeb.mihomoDelayProbeURL ?? "",
         streamIdleTimeout: snapshot.config.providerWeb.streamIdleTimeout || "1m30s",
       },
       providerConsole: {
@@ -209,7 +219,7 @@ const withEgressNodeProbeDefaults = (value: EgressNodeWireDTO): EgressNodeDTO =>
 const egressNodeValidator = hasShape({
   id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"), enabled: isBoolean,
   proxyConfigured: isBoolean, userAgent: isString, cookieConfigured: isBoolean, accountBoundProxy: isBoolean, proxyPool: isBoolean, health: isNumber, failureCount: isNumber,
-  sourceId: isOptional(isString), accountCapacity: isNumber, assignedAccountCount: isNumber,
+  sourceId: isOptional(isString), sourceKey: isOptional(isString), accountCapacity: isNumber, assignedAccountCount: isNumber,
   probeStatus: isOneOf("unknown", "healthy", "unhealthy"), lastProbedAt: isOptional(isString), probeLatencyMs: isNumber, exitIp: isOptional(isString), probeError: isOptional(isString), probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")),
   ipv4Probe: isOptional(egressIPProbeValidator), ipv6Probe: isOptional(egressIPProbeValidator),
   cooldownUntil: isOptional(isString), lastError: isOptional(isString),
@@ -217,7 +227,7 @@ const egressNodeValidator = hasShape({
 const decodeEgressNodeRaw = createObjectDecoder<EgressNodeWireDTO>("egress node", {
   id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"), enabled: isBoolean,
   proxyConfigured: isBoolean, userAgent: isString, cookieConfigured: isBoolean, accountBoundProxy: isBoolean, proxyPool: isBoolean, health: isNumber, failureCount: isNumber,
-  sourceId: isOptional(isString), accountCapacity: isNumber, assignedAccountCount: isNumber,
+  sourceId: isOptional(isString), sourceKey: isOptional(isString), accountCapacity: isNumber, assignedAccountCount: isNumber,
   probeStatus: isOneOf("unknown", "healthy", "unhealthy"), lastProbedAt: isOptional(isString), probeLatencyMs: isNumber, exitIp: isOptional(isString), probeError: isOptional(isString), probeProvider: isOptional(isOneOf("ipinfo", "cloudflare")),
   ipv4Probe: isOptional(egressIPProbeValidator), ipv6Probe: isOptional(egressIPProbeValidator),
   cooldownUntil: isOptional(isString), lastError: isOptional(isString),
@@ -259,7 +269,7 @@ const egressSourceValidator = hasShape({
 const decodeEgressSource = createObjectDecoder<EgressSourceDTO>("egress source", {
   id: isString, name: isString, scope: isOneOf("grok_build", "grok_web", "grok_console", "grok_web_asset", "grok_console_asset"), enabled: isBoolean, urlConfigured: isBoolean,
   refreshIntervalSeconds: isNumber, defaultAccountCapacity: isNumber, lastSyncedAt: isOptional(isString), nextSyncAt: isOptional(isString),
-  lastSyncImported: isNumber, lastSyncError: isOptional(isString),
+  lastSyncImported: isNumber, lastSyncError: isOptional(isString), managed: isOptional(isBoolean),
 });
 type EgressSourceListWireDTO = {
   items: EgressSourceDTO[];
@@ -307,6 +317,77 @@ export function getSettings(): Promise<SettingsSnapshotDTO> {
 
 export function updateSettings(revision: string, config: SettingsConfigDTO): Promise<SettingsSnapshotDTO> {
   return apiRequest("/api/admin/v1/settings", { method: "PUT", body: { revision, config } }, decodeSettingsSnapshot);
+}
+
+export type MihomoMemberDTO = { name: string; delayMs: number; banned: boolean; current: boolean; provider: string };
+
+export type MihomoStatusDTO = {
+  enabled: boolean;
+  apiUrl: string;
+  groupName: string;
+  currentNode: string;
+  bannedNodes: string[];
+  switchCount: number;
+  reachable: boolean;
+  lastError: string;
+  epoch: number;
+  testEnabled: boolean;
+  testGroupName: string;
+  testCurrentNode: string;
+  testEpoch: number;
+  members: MihomoMemberDTO[];
+  testMembers: MihomoMemberDTO[];
+};
+
+const mihomoMemberValidator = hasShape({ name: isString, delayMs: isNumber, banned: isBoolean, current: isBoolean, provider: isString });
+const mihomoStatusValidator = createObjectDecoder<MihomoStatusDTO>("mihomo status", {
+  enabled: isBoolean,
+  apiUrl: isString,
+  groupName: isString,
+  currentNode: isString,
+  bannedNodes: isArrayOf(isString),
+  switchCount: isNumber,
+  reachable: isBoolean,
+  lastError: isString,
+  epoch: isNumber,
+  testEnabled: isBoolean,
+  testGroupName: isString,
+  testCurrentNode: isString,
+  testEpoch: isNumber,
+  members: isArrayOf(mihomoMemberValidator),
+  testMembers: isArrayOf(mihomoMemberValidator),
+});
+
+export function getMihomoStatus(): Promise<MihomoStatusDTO> {
+  return apiRequest("/api/admin/v1/egress-mihomo/status", {}, mihomoStatusValidator);
+}
+
+export function refreshMihomoDelays(): Promise<MihomoStatusDTO> {
+  return apiRequest("/api/admin/v1/egress-mihomo/refresh-delays", { method: "POST" }, mihomoStatusValidator);
+}
+
+export function switchMihomoNode(): Promise<{ switched: boolean; node: string }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/switch", { method: "POST" }, createObjectDecoder<{ switched: boolean; node: string }>("mihomo switch", { switched: isBoolean, node: isString }));
+}
+
+export function clearMihomoBlacklist(): Promise<{ cleared: number }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/blacklist/clear", { method: "POST" }, createObjectDecoder<{ cleared: number }>("mihomo blacklist clear", { cleared: isNumber }));
+}
+
+export function rotateMihomoNode(input: { nodeId: string; oldExitIp?: string }): Promise<{ changed: boolean; nodeId: string; oldExitIp: string; newExitIp: string; newNode: string }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/rotate", { method: "POST", body: input }, createObjectDecoder("mihomo rotate", { changed: isBoolean, nodeId: isString, oldExitIp: isString, newExitIp: isString, newNode: isString }));
+}
+
+export function selectMihomoNode(nodeId: string): Promise<{ changed: boolean; currentNode: string }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/select", { method: "POST", body: { nodeId } }, createObjectDecoder("mihomo select", { changed: isBoolean, currentNode: isString }));
+}
+
+export function banMihomoNode(nodeId: string): Promise<{ bannedNodes: string[] }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/ban", { method: "POST", body: { nodeId } }, createObjectDecoder("mihomo ban", { bannedNodes: isArrayOf(isString) }));
+}
+
+export function unbanMihomoNode(nodeId: string): Promise<{ bannedNodes: string[] }> {
+  return apiRequest("/api/admin/v1/egress-mihomo/unban", { method: "POST", body: { nodeId } }, createObjectDecoder("mihomo unban", { bannedNodes: isArrayOf(isString) }));
 }
 
 type ListEgressNodesInput = {
