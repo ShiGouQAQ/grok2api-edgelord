@@ -16,14 +16,19 @@ import (
 )
 
 var (
-	ErrInvalidInput            = errors.New("代理节点参数无效")
-	ErrInvalidFilter           = errors.New("出口代理筛选条件无效")
-	ErrInvalidSort             = errors.New("代理节点排序条件无效")
-	ErrNotFound                = errors.New("代理节点不存在")
-	ErrProbeStale              = errors.New("代理配置在探测期间已更新，请重新测试")
-	ErrQualityProbeUnavailable = errors.New("出口质量探测不可用")
-	ErrQualityProbeNoAccount   = errors.New("质量检测暂无可调度账号")
-	ErrClearanceUnavailable    = errors.New("Clearance 刷新不可用")
+	ErrInvalidInput               = errors.New("代理节点参数无效")
+	ErrInvalidFilter              = errors.New("出口代理筛选条件无效")
+	ErrInvalidSort                = errors.New("代理节点排序条件无效")
+	ErrNotFound                   = errors.New("代理节点不存在")
+	ErrProbeStale                 = errors.New("代理配置在探测期间已更新，请重新测试")
+	ErrQualityProbeUnavailable    = errors.New("出口质量探测不可用")
+	ErrQualityProbeNoAccount      = errors.New("质量检测暂无可调度账号")
+	ErrClearanceUnavailable       = errors.New("Clearance 刷新不可用")
+	ErrMihomoUnavailable          = errors.New("Mihomo 状态不可用")
+	ErrCannotBindMihomoSyncedNode = errors.New("Mihomo 同步节点仅供质量守卫探测，禁止绑定账号")
+	ErrFallbackNodeIsMihomoSynced = errors.New("Mihomo 同步节点仅供质量守卫探测，不能作为固定回退节点")
+	ErrManagedSource              = errors.New("系统托管的订阅源不可修改")
+	ErrManagedMihomoNode          = errors.New("Mihomo 同步节点由系统自动管理，禁止修改或删除")
 )
 
 const (
@@ -75,6 +80,7 @@ const (
 type Input struct {
 	Name              string
 	Scope             domain.Scope
+	Type              domain.NodeType
 	Enabled           bool
 	ProxyPool         *bool
 	AccountCapacity   *int
@@ -106,9 +112,11 @@ type Service struct {
 	mu                sync.RWMutex
 	browserUA         string
 	clearance         ClearanceManager
+	mihomo            MihomoManager
 	prober            NodeProber
 	operationsCache   OperationsConfigInvalidator
 	qualityProber     QualityProber
+	mihomoSyncer      *MihomoSyncer
 	assignmentMu      sync.Mutex
 	lastAssignmentRun time.Time
 	assignmentRunning bool
@@ -199,6 +207,60 @@ type ClearanceManager interface {
 	ForgetClearance(uint64)
 }
 
+// MihomoMemberStatus 镜像 infraegress.MihomoMemberStatus；成员字段语义与
+// infra 层一致（DelayMS -1 = 无延迟数据，Provider 空 = 无 provider 的节点）。
+type MihomoMemberStatus struct {
+	Name     string `json:"name"`
+	DelayMS  int    `json:"delayMs"`
+	Banned   bool   `json:"banned"`
+	Current  bool   `json:"current"`
+	Provider string `json:"provider"`
+}
+
+// MihomoStatus 镜像 infraegress.MihomoStatus，避免 application → infra →
+// application 的导入环（infra/egress 已导入本包）。
+type MihomoStatus struct {
+	Enabled     bool
+	APIURL      string
+	GroupName   string
+	CurrentNode string
+	BannedNodes []string
+	SwitchCount uint64
+	Epoch       uint64
+	Reachable   bool
+	LastError   string
+	// TestEnabled/TestGroupName/TestCurrentNode 是测试组（双通道守卫探测）状态；
+	// 未启用测试组时为零值。
+	TestEnabled     bool
+	TestGroupName   string
+	TestCurrentNode string
+	// TestEpoch 镜像 infraegress 的测试客户端出口代际号（见 app 层
+	// egressMihomoManager 桥接），守卫经 testEpoch 归因测试组探测。
+	TestEpoch uint64
+	// Members/TestMembers 是生产组/测试组成员快照；未启用测试组时 TestMembers
+	// 为空。成员拉取失败时为空，不使状态降级。
+	Members     []MihomoMemberStatus
+	TestMembers []MihomoMemberStatus
+}
+
+// MihomoRotation 是质量守护 rotate_node 契约的结果：Changed 为 true 表示
+// 组出口已确认轮换（含单飞合并，镜像 403 分支的静默语义），false 表示失败。
+type MihomoRotation struct {
+	Changed bool
+	NewNode string
+}
+
+type MihomoManager interface {
+	MihomoStatus(context.Context) MihomoStatus
+	MihomoSwitch(context.Context) (string, error)
+	MihomoClearBlacklist() (int, error)
+	Rotate(context.Context) (MihomoRotation, error)
+	MihomoTestSelect(context.Context, string) (string, error)
+	MihomoTestBan(string) (int, error)
+	MihomoTestUnban(string) (int, error)
+	MihomoRefreshDelays(context.Context) MihomoStatus
+}
+
 type BatchClearanceManager interface {
 	ForgetClearances([]uint64)
 }
@@ -224,6 +286,110 @@ func (s *Service) SetClearanceManager(value ClearanceManager) {
 	s.mu.Lock()
 	s.clearance = value
 	s.mu.Unlock()
+}
+
+func (s *Service) SetMihomoManager(value MihomoManager) {
+	s.mu.Lock()
+	s.mihomo = value
+	s.mu.Unlock()
+}
+
+// SetMihomoSyncer 注入 Mihomo 测试组成员同步器；nil 时维护循环跳过同步。
+func (s *Service) SetMihomoSyncer(value *MihomoSyncer) {
+	s.mu.Lock()
+	s.mihomoSyncer = value
+	s.mu.Unlock()
+}
+
+// MihomoStatus 转发出口 Manager 的 Mihomo 订阅状态。
+func (s *Service) MihomoStatus(ctx context.Context) (MihomoStatus, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return MihomoStatus{}, ErrMihomoUnavailable
+	}
+	return manager.MihomoStatus(ctx), nil
+}
+
+// MihomoRefreshDelays 手动触发延迟探测并返回刷新后的状态：清空缓存后
+// 重新拉取，成员组装时必然触发实时探测（生产组与测试组同步刷新）。
+func (s *Service) MihomoRefreshDelays(ctx context.Context) (MihomoStatus, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return MihomoStatus{}, ErrMihomoUnavailable
+	}
+	return manager.MihomoRefreshDelays(ctx), nil
+}
+
+// MihomoSwitch 手动切换出口节点；Mihomo 未启用时返回 ErrMihomoUnavailable。
+func (s *Service) MihomoSwitch(ctx context.Context) (string, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return "", ErrMihomoUnavailable
+	}
+	return manager.MihomoSwitch(ctx)
+}
+
+// MihomoClearBlacklist 清空出口节点黑名单；Mihomo 未启用时返回 ErrMihomoUnavailable。
+func (s *Service) MihomoClearBlacklist() (int, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return 0, ErrMihomoUnavailable
+	}
+	return manager.MihomoClearBlacklist()
+}
+
+// Rotate 轮换 Mihomo 组出口（质量守护 rotate_node 契约的组模型实现）；
+// Mihomo 未启用时返回 ErrMihomoUnavailable。nodeId 在组模型下不参与选路。
+func (s *Service) Rotate(ctx context.Context) (MihomoRotation, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return MihomoRotation{}, ErrMihomoUnavailable
+	}
+	return manager.Rotate(ctx)
+}
+
+// MihomoTestSelect 将测试组切换到指定节点（质量守护 select_node 契约的组模型
+// 实现）；Mihomo 未启用时返回 ErrMihomoUnavailable。
+func (s *Service) MihomoTestSelect(ctx context.Context, nodeName string) (string, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return "", ErrMihomoUnavailable
+	}
+	return manager.MihomoTestSelect(ctx, nodeName)
+}
+
+// MihomoTestBan 封禁测试组内一个节点；Mihomo 未启用时返回 ErrMihomoUnavailable。
+func (s *Service) MihomoTestBan(nodeName string) (int, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return 0, ErrMihomoUnavailable
+	}
+	return manager.MihomoTestBan(nodeName)
+}
+
+// MihomoTestUnban 解禁测试组内一个节点；Mihomo 未启用时返回 ErrMihomoUnavailable。
+func (s *Service) MihomoTestUnban(nodeName string) (int, error) {
+	s.mu.RLock()
+	manager := s.mihomo
+	s.mu.RUnlock()
+	if manager == nil {
+		return 0, ErrMihomoUnavailable
+	}
+	return manager.MihomoTestUnban(nodeName)
 }
 
 func (s *Service) DefaultUserAgents() map[string]string {
@@ -276,6 +442,18 @@ func (s *Service) ListAll(ctx context.Context, scope domain.Scope, sort reposito
 	return s.publicNodes(values), nil
 }
 
+// GetNode 返回单个节点的公开视图；不存在时返回 ErrNotFound。
+func (s *Service) GetNode(ctx context.Context, id uint64) (domain.PublicNode, error) {
+	value, err := s.repository.GetEgressNode(ctx, id)
+	if errors.Is(err, repository.ErrNotFound) {
+		return domain.PublicNode{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.PublicNode{}, err
+	}
+	return s.publicNode(value), nil
+}
+
 func (s *Service) publicNodes(values []domain.Node) []domain.PublicNode {
 	result := make([]domain.PublicNode, 0, len(values))
 	for _, value := range values {
@@ -323,6 +501,9 @@ func (s *Service) Update(ctx context.Context, id uint64, input Input) (domain.Pu
 	}
 	if err != nil {
 		return domain.PublicNode{}, err
+	}
+	if value.IsMihomoSynced() {
+		return domain.PublicNode{}, ErrManagedMihomoNode
 	}
 	previousScope := value.Scope
 	value, err = s.applyInput(value, input, false)
@@ -374,6 +555,18 @@ func (s *Service) UpdateManyEnabled(ctx context.Context, nodeIDs []uint64, enabl
 	ids := uniqueIDs(nodeIDs)
 	if len(ids) == 0 {
 		return 0, fmt.Errorf("%w: 代理节点参数无效", ErrInvalidInput)
+	}
+	for _, id := range ids {
+		value, err := s.repository.GetEgressNode(ctx, id)
+		if errors.Is(err, repository.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if value.IsMihomoSynced() {
+			return 0, ErrManagedMihomoNode
+		}
 	}
 
 	// Disabling a fixed fallback would make the persisted routing policy
@@ -449,7 +642,17 @@ func (s *Service) UpdateManyEnabled(ctx context.Context, nodeIDs []uint64, enabl
 }
 
 func (s *Service) Delete(ctx context.Context, id uint64) error {
-	err := s.repository.DeleteEgressNode(ctx, id)
+	value, err := s.repository.GetEgressNode(ctx, id)
+	if errors.Is(err, repository.ErrNotFound) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if value.IsMihomoSynced() {
+		return ErrManagedMihomoNode
+	}
+	err = s.repository.DeleteEgressNode(ctx, id)
 	if errors.Is(err, repository.ErrNotFound) {
 		return ErrNotFound
 	}
@@ -467,6 +670,18 @@ func (s *Service) DeleteMany(ctx context.Context, nodeIDs []uint64) (int, error)
 	ids := uniqueIDs(nodeIDs)
 	if len(ids) == 0 {
 		return 0, fmt.Errorf("%w: 代理节点参数无效", ErrInvalidInput)
+	}
+	for _, id := range ids {
+		value, err := s.repository.GetEgressNode(ctx, id)
+		if errors.Is(err, repository.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if value.IsMihomoSynced() {
+			return 0, ErrManagedMihomoNode
+		}
 	}
 	if batch, ok := s.repository.(BatchNodeDeleter); ok {
 		deleted, err := batch.DeleteEgressNodes(ctx, ids)
@@ -509,6 +724,9 @@ func (s *Service) PreviewUnhealthyCleanup(ctx context.Context) (UnhealthyCleanup
 		if value.IPv4Probe.Status != domain.ProbeStatusUnhealthy || value.IPv6Probe.Status != domain.ProbeStatusUnhealthy {
 			continue
 		}
+		if value.IsMihomoSynced() {
+			continue
+		}
 		result.Nodes++
 		result.BoundAccounts += int64(value.AssignedAccountCount)
 		if value.SourceID != 0 {
@@ -539,6 +757,9 @@ func (s *Service) DeleteUnhealthy(ctx context.Context) (int, error) {
 	ids := make([]uint64, 0)
 	for _, value := range values {
 		if value.IPv4Probe.Status == domain.ProbeStatusUnhealthy && value.IPv6Probe.Status == domain.ProbeStatusUnhealthy {
+			if value.IsMihomoSynced() {
+				continue
+			}
 			ids = append(ids, value.ID)
 		}
 	}
@@ -578,6 +799,9 @@ func (s *Service) AssignAccounts(ctx context.Context, nodeID uint64, provider ac
 	}
 	if err != nil {
 		return AssignmentResult{}, err
+	}
+	if node.IsMihomoSynced() {
+		return AssignmentResult{}, ErrCannotBindMihomoSyncedNode
 	}
 	if !node.Enabled || strings.TrimSpace(node.EncryptedProxyURL) == "" {
 		return AssignmentResult{}, fmt.Errorf("%w: 只能绑定启用且已配置代理地址的节点", ErrInvalidInput)
@@ -722,6 +946,10 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 		return domain.Node{}, fmt.Errorf("%w: scope 必须是 grok_build、grok_web、grok_console、grok_web_asset 或 grok_console_asset", ErrInvalidInput)
 	}
 	value.Name, value.Scope, value.Enabled, value.ProxyPool = name, input.Scope, input.Enabled, proxyPool
+	// 编辑时 input.Type 零值表示未变更，保留既有类型；创建时归一未知值。
+	if create || input.Type != "" {
+		value.Type = input.Type.Normalized()
+	}
 	if input.AccountCapacity != nil {
 		if *input.AccountCapacity < 0 || *input.AccountCapacity > 100000 {
 			return domain.Node{}, fmt.Errorf("%w: 每个代理的账号容量必须在 0 到 100000 之间", ErrInvalidInput)
@@ -750,6 +978,15 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 		if err != nil {
 			return domain.Node{}, fmt.Errorf("%w: %v", ErrInvalidInput, err)
 		}
+		// TODO(mihomo): Mihomo 组通道节点禁止开启 ProxyPool——开启后 isProxyPoolNode 在
+		// feedbackForScope 403 处理链中提前 return（manager.go isProxyPoolNode 早退），
+		// NODE_BANNED 组切换分支永远到达不了，被封出口永不轮换。
+		// 识别依据：①同步节点 SourceKey 前缀 mihomo:（同步器建行恒 false，此处兜底拒绝）
+		// ②ProxyURL host 为 loopback（127.0.0.1/localhost——本地端口不可能是独立出口池，
+		//   freshTunnel 每请求新 CONNECT 到同一端口零出口多样性）。
+		if proxyPool && proxyURLForbiddenWithPool(normalized, value.SourceKey, input.Type.Normalized()) {
+			return domain.Node{}, fmt.Errorf("%w: Mihomo 组通道节点禁止启用代理池模式", ErrInvalidInput)
+		}
 		if normalized != "" {
 			value.EncryptedProxyURL, err = s.cipher.Encrypt(normalized)
 			if err != nil {
@@ -759,6 +996,15 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 	}
 	if value.ProxyPool && strings.TrimSpace(value.EncryptedProxyURL) == "" {
 		return domain.Node{}, fmt.Errorf("%w: 代理池模式需要配置代理地址", ErrInvalidInput)
+	}
+	// TODO(mihomo): 编辑既有节点且未改 ProxyURL 时，若旧 URL 已是 Mihomo 本地通道
+	// （127.0.0.1/localhost），同样拒绝开启 ProxyPool。
+	if value.ProxyPool && input.ProxyURL == nil {
+		if decrypted, err := s.cipher.Decrypt(value.EncryptedProxyURL); err == nil {
+			if proxyURLForbiddenWithPool(decrypted, value.SourceKey, value.Type) {
+				return domain.Node{}, fmt.Errorf("%w: Mihomo 组通道节点禁止启用代理池模式", ErrInvalidInput)
+			}
+		}
 	}
 	if input.Scope == domain.ScopeBuild || input.Scope == domain.ScopeConsoleAsset {
 		value.EncryptedCloudflareCookie = ""
@@ -811,10 +1057,11 @@ func (s *Service) publicNode(value domain.Node) domain.PublicNode {
 		health, failureCount, cooldownUntil, lastError = 1, 0, nil, ""
 	}
 	return domain.PublicNode{
-		ID: value.ID, Name: value.Name, Scope: value.Scope, Enabled: value.Enabled,
+		ID: value.ID, Name: value.Name, Scope: value.Scope, Type: value.Type, Enabled: value.Enabled,
 		ProxyConfigured: value.EncryptedProxyURL != "", UserAgent: userAgent, CookieConfigured: value.EncryptedCloudflareCookie != "",
 		ProxyPool:         proxyPool,
 		SourceID:          value.SourceID,
+		SourceKey:         value.SourceKey,
 		AccountCapacity:   value.AccountCapacity,
 		AccountBoundProxy: accountBoundProxy,
 		Health:            health, FailureCount: failureCount, CooldownUntil: cooldownUntil, LastError: lastError,
@@ -832,6 +1079,39 @@ func (s *Service) accountBoundProxy(value domain.Node) bool {
 	}
 	proxyURL, err := s.cipher.Decrypt(value.EncryptedProxyURL)
 	return err == nil && strings.Contains(proxyURL, ProxyAccountPlaceholder)
+}
+
+// proxyURLForbiddenWithPool 判定 ProxyPool=true 是否与节点出口机制冲突：
+// Mihomo 组通道节点（显式 Type=mihomo，或同步节点 SourceKey 前缀 mihomo:，
+// 或明文 ProxyURL host 为 loopback）开启代理池会让 isProxyPoolNode 在 403
+// 处理链提前 return，NODE_BANNED 组切换永不触发。见 TODO(mihomo) 于
+// applyInput。Type 显式判定覆盖非 loopback 部署（如容器内 http://grok-mihomo:7890）。
+func proxyURLForbiddenWithPool(plainProxyURL, sourceKey string, nodeType domain.NodeType) bool {
+	if nodeType == domain.NodeTypeMihomo {
+		return true
+	}
+	if strings.HasPrefix(sourceKey, "mihomo:") {
+		return true
+	}
+	return isLoopbackProxyURL(plainProxyURL)
+}
+
+// isLoopbackProxyURL 判定明文代理 URL 的 host 是否为本地回环（127.0.0.1、
+// localhost、::1）——本地端口不可能是独立出口池，配 ProxyPool 无意义且有害。
+func isLoopbackProxyURL(plainProxyURL string) bool {
+	if strings.TrimSpace(plainProxyURL) == "" {
+		return false
+	}
+	parsed, err := url.Parse(plainProxyURL)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func NormalizeProxyURL(value string) (string, error) {

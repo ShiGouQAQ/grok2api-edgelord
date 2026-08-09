@@ -20,13 +20,25 @@ import (
 )
 
 const (
-	DatabaseURLEnv                = "GROK2API_DATABASE_URL"
-	StatsigModeManual             = "manual"
-	StatsigModeURL                = "url"
-	ClearanceModeManual           = "manual"
-	ClearanceModeFlareSolverr     = "flaresolverr"
-	DefaultStatsigSignerURL       = "https://grok.wodf.de/sign"
-	DefaultFlareSolverrURL        = "http://flaresolverr:8191"
+	DatabaseURLEnv                 = "GROK2API_DATABASE_URL"
+	StatsigModeManual              = "manual"
+	StatsigModeURL                 = "url"
+	ClearanceModeManual            = "manual"
+	ClearanceModeFlareSolverr      = "flaresolverr"
+	DefaultStatsigSignerURL        = "https://grok.wodf.de/sign"
+	DefaultFlareSolverrURL         = "http://flaresolverr:8191"
+	DefaultMihomoAPIURL            = "http://127.0.0.1:9093"
+	DefaultMihomoGroupName         = "XAI-GROUP"
+	DefaultMihomoExitProbeProxyURL = "http://127.0.0.1:7890"
+	DefaultMihomoIPProbeURL        = "https://1.1.1.1/cdn-cgi/trace"
+	DefaultMihomoMaxAttempts       = 3
+	DefaultMihomoVerifyTimeout     = 15 * time.Second
+	DefaultMihomoTestGroupName     = "XAI-TEST-GROUP"
+	DefaultMihomoTestProxyURL      = "http://127.0.0.1:7891"
+	// DefaultMihomoDelayProbeURL 默认用 Apple 官方 captive 检测端点
+	// （返回 200，mihomo URLTest 对 expectedStatus 为空时任何响应均视为成功，
+	// 且使用 HEAD 方法，体积最小）；留空 = 禁用主动延迟探测（回退首可用节点）。
+	DefaultMihomoDelayProbeURL    = "https://captive.apple.com/hotspot-detect.html"
 	RecommendedBuildClientVersion = "0.2.119"
 	RecommendedBuildUserAgent     = "grok-shell/" + RecommendedBuildClientVersion + " (linux; x86_64)"
 
@@ -178,6 +190,19 @@ type WebProviderConfig struct {
 	AllowNSFW           bool     `yaml:"allowNSFW"`
 	RecoveryBackoffBase Duration `yaml:"recoveryBackoffBase"`
 	RecoveryBackoffMax  Duration `yaml:"recoveryBackoffMax"`
+	MihomoEnabled       bool     `yaml:"-"`
+	MihomoAPIURL        string   `yaml:"-"`
+	MihomoGroupName     string   `yaml:"-"`
+	// 下列字段可从 config.yaml（provider.web 段）配置，零值运行时回落到默认常量。
+	MihomoExitProbeProxyURL string   `yaml:"mihomoExitProbeProxyURL"`
+	MihomoIPProbeURL        string   `yaml:"mihomoIPProbeURL"`
+	MihomoMaxAttempts       int      `yaml:"mihomoMaxAttempts"`
+	MihomoVerifyTimeout     Duration `yaml:"mihomoVerifyTimeout"`
+	// 双通道测试组（守卫探测专用）：两者皆空 = legacy 单组行为（零回归）。
+	MihomoTestGroupName string `yaml:"mihomoTestGroupName"`
+	MihomoTestProxyURL  string `yaml:"mihomoTestProxyURL"`
+	// 主动延迟探测端点：留空 = 禁用（生产路径保持"回退首可用节点"现状）。
+	MihomoDelayProbeURL string `yaml:"mihomoDelayProbeURL"`
 }
 
 type ConsoleProviderConfig struct {
@@ -807,6 +832,11 @@ func defaultConfig() Config {
 				VideoTimeout:     Duration(15 * time.Minute),
 				MediaConcurrency: 4, RecoveryBackoffBase: Duration(30 * time.Second),
 				RecoveryBackoffMax: Duration(30 * time.Minute),
+				MihomoEnabled:      false, MihomoAPIURL: DefaultMihomoAPIURL, MihomoGroupName: DefaultMihomoGroupName,
+				MihomoExitProbeProxyURL: DefaultMihomoExitProbeProxyURL, MihomoIPProbeURL: DefaultMihomoIPProbeURL,
+				MihomoMaxAttempts: DefaultMihomoMaxAttempts, MihomoVerifyTimeout: Duration(DefaultMihomoVerifyTimeout),
+				MihomoTestGroupName: DefaultMihomoTestGroupName, MihomoTestProxyURL: DefaultMihomoTestProxyURL,
+				MihomoDelayProbeURL: DefaultMihomoDelayProbeURL,
 			},
 			Console: ConsoleProviderConfig{BaseURL: "https://console.x.ai", ChatTimeout: Duration(5 * time.Minute), StreamIdleTimeout: Duration(settingsdomain.DefaultConsoleStreamIdleTimeout)},
 		},

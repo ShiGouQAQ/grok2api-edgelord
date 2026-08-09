@@ -29,6 +29,7 @@ import (
 	updatecheckapp "github.com/chenyme/grok2api/backend/internal/application/updatecheck"
 	"github.com/chenyme/grok2api/backend/internal/buildinfo"
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
+	egressdomain "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/config"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	inframedia "github.com/chenyme/grok2api/backend/internal/infra/media"
@@ -60,31 +61,33 @@ const (
 
 // Application 管理后端进程生命周期和本地后台任务。
 type Application struct {
-	logger          *slog.Logger
-	database        *relational.Database
-	server          *http.Server
-	audits          *auditapp.Service
-	responses       repository.ResponseRepository
-	cleanupLock     repository.DistributedLock
-	runtime         io.Closer
-	settingsBus     repository.SettingsChangeBus
-	invalidationBus repository.InvalidationBus
-	settings        *settingsapp.Service
-	gateway         *gateway.Service
-	media           *mediaapp.Service
-	quotaRecovery   *quotarecoveryapp.Service
-	accounts        *accountapp.Service
-	models          *modelapp.Service
-	clientKeys      *clientkeyapp.Service
-	updates         *updatecheckapp.Service
-	invalidations   *invalidationapp.Service
-	accountRepo     repository.AccountRepository
-	modelRepo       repository.ModelRepository
-	providers       *provider.Registry
-	web             *webprovider.Adapter
-	egress          *infraegress.Manager
-	egressOps       *egressapp.Service
-	startup         *startupState
+	logger           *slog.Logger
+	database         *relational.Database
+	server           *http.Server
+	audits           *auditapp.Service
+	responses        repository.ResponseRepository
+	cleanupLock      repository.DistributedLock
+	runtime          io.Closer
+	settingsBus      repository.SettingsChangeBus
+	invalidationBus  repository.InvalidationBus
+	egressBus        repository.EgressEventBus
+	egressInstanceID string
+	settings         *settingsapp.Service
+	gateway          *gateway.Service
+	media            *mediaapp.Service
+	quotaRecovery    *quotarecoveryapp.Service
+	accounts         *accountapp.Service
+	models           *modelapp.Service
+	clientKeys       *clientkeyapp.Service
+	updates          *updatecheckapp.Service
+	invalidations    *invalidationapp.Service
+	accountRepo      repository.AccountRepository
+	modelRepo        repository.ModelRepository
+	providers        *provider.Registry
+	web              *webprovider.Adapter
+	egress           *infraegress.Manager
+	egressOps        *egressapp.Service
+	startup          *startupState
 }
 
 // New 完成数据库、Provider、应用服务和 HTTP 路由装配。
@@ -153,11 +156,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	var reasoningReplayStore repository.ReasoningReplayRepository
 	var deviceSessions repository.DeviceSessionRepository
 	var refreshLock repository.DistributedLock
+	var epochStore repository.EgressEpochStore
 	var settingsBus repository.SettingsChangeBus
 	var quotaQueue repository.QuotaRecoveryQueue
 	var quotaRefreshState repository.QuotaRefreshCoordinator
 	var observedModelStore repository.ObservedModelStateRepository
 	var invalidationBus repository.InvalidationBus
+	var egressEventBus repository.EgressEventBus
 	var runtimeStore io.Closer
 	runtimeHealth := func(context.Context) error { return nil }
 	switch cfg.RuntimeStore.Driver {
@@ -174,6 +179,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		}
 		runtimeStore = redisStore
 		invalidationBus = redisStore
+		egressEventBus = redisStore
 		runtimeHealth = redisStore.Ping
 		rateLimiter = redisStore
 		concurrency = redisruntime.NewConcurrencyLimiter(redisStore)
@@ -181,6 +187,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		reasoningReplayStore = redisruntime.NewReasoningReplayStore(redisStore)
 		deviceSessions = redisruntime.NewDeviceSessionStore(redisStore)
 		refreshLock = redisruntime.NewLockStore(redisStore)
+		epochStore = redisStore
 		settingsBus = redisStore
 		quotaQueue = redisStore
 		quotaRefreshState = redisStore
@@ -192,6 +199,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		reasoningReplayStore = memory.NewReasoningReplayStore(cfg.Routing.ReasoningReplayMaxEntries)
 		deviceSessions = memory.NewDeviceSessionStore()
 		refreshLock = memory.NewLockStore()
+		epochStore = memory.NewEgressEpochStore()
 		quotaQueue = memory.NewQuotaRecoveryQueue()
 		quotaRefreshState = memory.NewQuotaRefreshCoordinator()
 	default:
@@ -204,7 +212,40 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	egressManager := infraegress.NewManager(egressRepo, cipher)
 	egressManager.SetLogger(logger)
 	egressManager.SetClearanceLock(refreshLock)
+	// 多实例部署（redis）：epochStore 与 switchLock 均共享同一 refreshLock 通道，
+	// 出口 epoch 跨实例一致；单实例（memory）：epochStore 为本地实现、switchLock
+	// 为本地锁，Mihomo 客户端对 nil 注入同样安全回退。
+	egressManager.SetEpochStore(epochStore)
+	egressManager.SetSwitchLock(refreshLock)
+	// P2-4/P1-9：多实例部署（redis 事件总线）且 Mihomo 启用时装配跨实例出口
+	// 协调——ExitChangeCoordinator 在本地 OnExitChanged 之外发布出口变更事件，
+	// 其他实例订阅后应用本地等价动作（client 池失效 / 黑名单合并）；黑名单
+	// 操作（ban/unban/clear）同步发布供他实例合并。Mihomo 未启用或单实例
+	// （memory，egressEventBus 为 nil）时保持现状：coordinator 为 nil（调用点
+	// 回退直接 OnExitChanged），不发布/不订阅任何事件，行为零变化。
+	mihomoEnabled := cfg.Provider.Web.MihomoEnabled && strings.TrimSpace(cfg.Provider.Web.MihomoAPIURL) != ""
+	var wiredEgressBus repository.EgressEventBus
+	var egressInstanceID string
+	if egressEventBus != nil && mihomoEnabled {
+		wiredEgressBus = egressEventBus
+		egressInstanceID = invalidationSourceInstance(cfg)
+		egressManager.SetExitChangeCoordinator(func(scope egressdomain.Scope) {
+			egressManager.OnExitChanged(scope)
+			publishCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := egressEventBus.PublishEgressEvent(publishCtx, repository.EgressEvent{
+				Kind: repository.EgressEventExitChanged, Scope: string(scope), SourceInstance: egressInstanceID,
+			}); err != nil {
+				logger.Warn("egress_event_publish_failed", "kind", string(repository.EgressEventExitChanged), "error", err)
+			}
+		})
+		egressManager.SetBlacklistEventPublisher(func(publishCtx context.Context, event repository.EgressEvent) error {
+			event.SourceInstance = egressInstanceID
+			return egressEventBus.PublishEgressEvent(publishCtx, event)
+		})
+	}
 	egressManager.UpdateClearanceConfig(clearanceConfig(cfg))
+	applyMihomoConfig(logger, egressManager, cfg)
 	egressManager.UpdateBuildResponseHeaderTimeout(cfg.Provider.Build.ResponseHeaderTimeout.Value())
 	egressManager.UpdateBuildStreamIdleTimeout(cfg.Provider.Build.StreamIdleTimeout.Value())
 	cliAdapter := cliprovider.NewAdapter(cliprovider.Config{
@@ -309,8 +350,19 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 	accountSyncService.UpdateConcurrency(cfg.Batch.ImportConcurrency)
 	egressService := egressapp.NewService(egressRepo, cipher, infraegress.DefaultUserAgent, accountRepo)
 	egressService.SetClearanceManager(egressManager)
+	egressService.SetMihomoManager(egressMihomoManager{manager: egressManager})
 	egressService.SetNodeProber(egressManager)
 	egressService.SetOperationsConfigInvalidator(egressManager)
+	// Mihomo 测试组成员同步器：guardStatePath 与 HTTP handler 的
+	// QualityGuardStatePath 同源（qualityGuardPath("state.json")），使同步器
+	// 能识别被守护隔离的节点并跳过定向 enable。环境未配置 guard 目录时
+	// 同步器 fail-closed（绝不启用成员），此处显式告警而非静默失效。
+	guardStatePath := qualityGuardPath("state.json")
+	if guardStatePath == "" {
+		logger.Error("quality_guard_dir_unset",
+			"hint", "GROK2API_QUALITY_GUARD_DIR 未配置，同步器不尊重 guard 隔离（fail-closed：测试组成员不会自动启用）")
+	}
+	egressService.SetMihomoSyncer(egressapp.NewMihomoSyncer(egressRepo, cipher, guardStatePath, mihomoTestProxyURL(cfg)))
 	egressManager.SetFailureProber(egressService.TestNode)
 	clientKeyService := clientkeyapp.NewService(clientKeyRepo, rateLimiter, concurrency, cfg.ClientKeyDefaults.RPMLimit, cfg.ClientKeyDefaults.MaxConcurrent, cipher)
 	qualityGuardIdentity, err := clientKeyService.EnsureQualityGuardIdentity(ctx, cfg.QualityGuard.Enabled)
@@ -391,6 +443,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		egressManager.UpdateBuildStreamIdleTimeout(next.Provider.Build.StreamIdleTimeout.Value())
 		webAdapter.UpdateConfig(webProviderConfig(next))
 		egressManager.UpdateClearanceConfig(clearanceConfig(next))
+		applyMihomoConfig(logger, egressManager, next)
 		consoleAdapter.UpdateConfig(consoleProviderConfig(next))
 		mediaService.UpdateConfig(mediaConfig(next))
 		quotaRecoveryService.UpdateConfig(next.Provider.Web.RecoveryBackoffBase.Value(), next.Provider.Web.RecoveryBackoffMax.Value())
@@ -424,12 +477,20 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 			MaxOutputTokens: cfg.QualityGuard.MaxOutputTokens,
 		}
 	}
-	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, QualityGuardStatePath: qualityGuardPath("state.json"), QualityGuardConfigPath: qualityGuardPath("runtime-config.json"), QualityGuardToken: qualityGuardToken, QualityGuardProbe: qualityGuardProbe, Updates: updateService})
+	// Mihomo 切换成功后的模型质量验证，镜像 transport handler 的
+	// qualityGuardProbe 调用：守护启用时携带真实 probe 身份；未启用时字段为
+	// 零值，验证仅记录日志（见 verifyNodeAfterSwitch），不影响冷却决策。
+	egressManager.SetQualityVerifier(func(ctx context.Context, nodeID uint64) error {
+		_, err := egressService.ProbeQuality(ctx, nodeID, qualityGuardProbe)
+		return err
+	})
+	router := httpserver.New(httpserver.Dependencies{Logger: logger, RequestTimeout: cfg.Server.RequestTimeout.Value(), MaxBodyBytes: cfg.Server.MaxBodyBytes, ConcurrencyGate: inferenceConcurrency, SecureCookies: cfg.Auth.SecureCookies, SwaggerEnabled: cfg.Server.SwaggerEnabled, PublicAPIBaseURL: cfg.Frontend.EffectivePublicAPIBaseURL(), FrontendStaticPath: cfg.Frontend.StaticPath, Readiness: readiness, TrafficReady: startup.acceptsTraffic, AdminAuth: adminService, Accounts: accountService, AccountSync: accountSyncService, Models: modelService, ClientKeys: clientKeyService, Audits: auditService, Dashboard: dashboardService, Gateway: gatewayService, Media: mediaService, Settings: settingsService, Egress: egressService, QualityGuardStatePath: qualityGuardPath("state.json"), QualityGuardConfigPath: qualityGuardPath("runtime-config.json"), QualityGuardBootstrapPath: qualityGuardPath("bootstrap.json"), QualityGuardToken: qualityGuardToken, QualityGuardProbe: qualityGuardProbe, Updates: updateService})
 	server := &http.Server{Addr: cfg.Server.Listen, Handler: router, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: cfg.Server.ReadTimeout.Value(), IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 64 << 10}
 	return &Application{
 		logger: logger, database: database, server: server,
 		audits: auditService, responses: responseRepo, cleanupLock: refreshLock, runtime: runtimeStore,
 		settingsBus: settingsBus, invalidationBus: invalidationBus, settings: settingsService, gateway: gatewayService, media: mediaService, quotaRecovery: quotaRecoveryService, accounts: accountService, models: modelService, clientKeys: clientKeyService, updates: updateService, invalidations: invalidationService,
+		egressBus: wiredEgressBus, egressInstanceID: egressInstanceID,
 		accountRepo: accountRepo, modelRepo: modelRepo, providers: providers, web: webAdapter, egress: egressManager, egressOps: egressService, startup: startup,
 	}, nil
 }
@@ -463,6 +524,153 @@ func clearanceConfig(cfg config.Config) infraegress.ClearanceConfig {
 		TargetURL: cfg.Provider.Web.BaseURL, Timeout: cfg.Provider.Web.ClearanceTimeout.Value(),
 		RefreshInterval: cfg.Provider.Web.ClearanceRefresh.Value(),
 	}
+}
+
+// applyMihomoConfig 应用 Mihomo 配置并做启用预检（启动与热更新共用）。
+// APIURL 显式留空但 Enabled=true 视为配置错误：记 Error 并禁用 Mihomo
+// 功能（不 crash）；Enabled 时对 APIURL 做一次 5s 可达性检查，失败仅记
+// Error —— 容器内默认 127.0.0.1 指向自身回环时在此暴露，而非同步器
+// 静默跳过/guard 探测全失败。状态接口的 reachable=false 与 LastError 呈现。
+func applyMihomoConfig(logger *slog.Logger, manager *infraegress.Manager, cfg config.Config) {
+	value := mihomoConfig(cfg)
+	if cfg.Provider.Web.MihomoEnabled && strings.TrimSpace(cfg.Provider.Web.MihomoAPIURL) == "" {
+		logger.Error("mihomo_api_url_missing",
+			"hint", "mihomoEnabled=true 但 Mihomo API URL 未配置，Mihomo 功能已禁用（请先配置 API 地址）")
+		value.Enabled = false
+		value.APIURL = ""
+	}
+	manager.UpdateMihomoConfig(value)
+	if !value.Enabled {
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(value.APIURL)
+	if err != nil {
+		logger.Error("mihomo_api_unreachable",
+			"api_url", value.APIURL, "error", err,
+			"hint", "Mihomo API 不可达，Mihomo 功能将静默失效（同步器跳过、guard 探测失败、切换 403 仅记 Warn）")
+		return
+	}
+	_ = resp.Body.Close()
+}
+
+func mihomoTestProxyURL(cfg config.Config) string {
+	return strings.TrimSpace(cfg.Provider.Web.MihomoTestProxyURL)
+}
+
+func mihomoConfig(cfg config.Config) infraegress.MihomoConfig {
+	apiURL := cfg.Provider.Web.MihomoAPIURL
+	if strings.TrimSpace(apiURL) == "" {
+		apiURL = config.DefaultMihomoAPIURL
+	}
+	groupName := cfg.Provider.Web.MihomoGroupName
+	if strings.TrimSpace(groupName) == "" {
+		groupName = config.DefaultMihomoGroupName
+	}
+	exitProbeProxyURL := cfg.Provider.Web.MihomoExitProbeProxyURL
+	if strings.TrimSpace(exitProbeProxyURL) == "" {
+		exitProbeProxyURL = config.DefaultMihomoExitProbeProxyURL
+	}
+	ipProbeURL := cfg.Provider.Web.MihomoIPProbeURL
+	if strings.TrimSpace(ipProbeURL) == "" {
+		ipProbeURL = config.DefaultMihomoIPProbeURL
+	}
+	maxAttempts := cfg.Provider.Web.MihomoMaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = config.DefaultMihomoMaxAttempts
+	}
+	verifyTimeout := cfg.Provider.Web.MihomoVerifyTimeout.Value()
+	if verifyTimeout <= 0 {
+		verifyTimeout = config.DefaultMihomoVerifyTimeout
+	}
+	testGroupName := strings.TrimSpace(cfg.Provider.Web.MihomoTestGroupName)
+	if testGroupName == "" {
+		testGroupName = config.DefaultMihomoTestGroupName
+	}
+	// TestProxyURL 留空 = 显式禁用测试通道（sentinel，不再回填默认
+	// 127.0.0.1:7891 —— 容器内该地址指向自身回环，回填只会产生假语义，
+	// 与 config.example"留空禁用测试通道"注释一致）。从未配置时的默认值
+	// 由 defaultConfig 兜底，与显式留空区分。
+	testProxyURL := mihomoTestProxyURL(cfg)
+	// DelayProbeURL 为空 = 禁用主动延迟探测（回退首可用节点，保持现状安全）。
+	delayProbeURL := strings.TrimSpace(cfg.Provider.Web.MihomoDelayProbeURL)
+	if delayProbeURL == "" {
+		delayProbeURL = config.DefaultMihomoDelayProbeURL
+	}
+	return infraegress.MihomoConfig{
+		Enabled: cfg.Provider.Web.MihomoEnabled, APIURL: apiURL, GroupName: groupName,
+		ExitProbeProxyURL: exitProbeProxyURL, IPProbeURL: ipProbeURL, MaxAttempts: maxAttempts,
+		VerifyTimeout: verifyTimeout,
+		TestGroupName: testGroupName, TestProxyURL: testProxyURL,
+		DelayProbeURL: delayProbeURL,
+	}
+}
+
+// egressMihomoManager 桥接 infraegress.MihomoStatus 与应用层状态类型，避免
+// application/egress 反向导入 infra/egress 造成导入环。
+type egressMihomoManager struct {
+	manager *infraegress.Manager
+}
+
+func (value egressMihomoManager) MihomoStatus(ctx context.Context) egressapp.MihomoStatus {
+	return mapMihomoStatus(value.manager.MihomoStatus(ctx))
+}
+
+// MihomoRefreshDelays 清空两客户端缓存后重新拉取状态（成员组装触发实时
+// 延迟探测），返回最新状态。
+func (value egressMihomoManager) MihomoRefreshDelays(ctx context.Context) egressapp.MihomoStatus {
+	return mapMihomoStatus(value.manager.RefreshMihomoDelays(ctx))
+}
+
+// mapMihomoStatus 转换 infra 层状态快照为应用层镜像类型。
+func mapMihomoStatus(status infraegress.MihomoStatus) egressapp.MihomoStatus {
+	return egressapp.MihomoStatus{
+		Enabled: status.Enabled, APIURL: status.APIURL, GroupName: status.GroupName,
+		CurrentNode: status.CurrentNode, BannedNodes: status.BannedNodes, SwitchCount: status.SwitchCount,
+		Epoch: status.Epoch, Reachable: status.Reachable, LastError: status.LastError,
+		TestEnabled: status.TestEnabled, TestGroupName: status.TestGroupName, TestCurrentNode: status.TestCurrentNode,
+		TestEpoch: status.TestEpoch,
+		Members:   mapMihomoMembers(status.Members), TestMembers: mapMihomoMembers(status.TestMembers),
+	}
+}
+
+// mapMihomoMembers 逐元素转换 infra 层成员快照为应用层镜像类型。
+func mapMihomoMembers(in []infraegress.MihomoMemberStatus) []egressapp.MihomoMemberStatus {
+	if in == nil {
+		return nil
+	}
+	out := make([]egressapp.MihomoMemberStatus, len(in))
+	for i, member := range in {
+		out[i] = egressapp.MihomoMemberStatus{
+			Name: member.Name, DelayMS: member.DelayMS, Banned: member.Banned,
+			Current: member.Current, Provider: member.Provider,
+		}
+	}
+	return out
+}
+
+func (value egressMihomoManager) MihomoSwitch(ctx context.Context) (string, error) {
+	return value.manager.MihomoSwitch(ctx)
+}
+
+func (value egressMihomoManager) MihomoClearBlacklist() (int, error) {
+	return value.manager.MihomoClearBlacklist()
+}
+
+func (value egressMihomoManager) Rotate(ctx context.Context) (egressapp.MihomoRotation, error) {
+	return value.manager.MihomoRotate(ctx)
+}
+
+func (value egressMihomoManager) MihomoTestSelect(ctx context.Context, nodeName string) (string, error) {
+	return value.manager.MihomoTestSelect(ctx, nodeName)
+}
+
+func (value egressMihomoManager) MihomoTestBan(nodeName string) (int, error) {
+	return value.manager.MihomoTestBan(nodeName)
+}
+
+func (value egressMihomoManager) MihomoTestUnban(nodeName string) (int, error) {
+	return value.manager.MihomoTestUnban(nodeName)
 }
 
 func consoleProviderConfig(cfg config.Config) consoleprovider.Config {
@@ -645,6 +853,20 @@ func (a *Application) Run(ctx context.Context) error {
 				if err := a.settings.ReloadPersisted(reloadCtx); err != nil {
 					a.logger.Warn("settings_reload_failed", "error", err)
 				}
+				return nil
+			})
+		})
+	}
+	// 跨实例出口协调订阅：仅多实例（redis 总线）+ Mihomo 启用时装配（egressBus
+	// 非 nil）。忽略自己发布的事件（SourceInstance 过滤），避免重复 OnExitChanged。
+	// 订阅生命周期跟随 runCtx（runSupervisedTask 在 ctx 取消后退出，pubsub 关闭）。
+	if a.egressBus != nil {
+		startBackground("egress_event_listener", func(taskCtx context.Context) error {
+			return a.egressBus.ListenEgressEvents(taskCtx, func(eventCtx context.Context, event repository.EgressEvent) error {
+				if event.SourceInstance != "" && event.SourceInstance == a.egressInstanceID {
+					return nil
+				}
+				a.egress.ApplyEgressEvent(event)
 				return nil
 			})
 		})

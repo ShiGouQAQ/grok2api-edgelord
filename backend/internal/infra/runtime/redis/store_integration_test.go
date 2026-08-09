@@ -216,6 +216,66 @@ func TestRedisRuntimeStoreIntegration(t *testing.T) {
 	}
 	unlock()
 
+	if epoch, err := store.GetEpoch(ctx, "mihomo:web"); err != nil || epoch != 0 {
+		t.Fatalf("missing egress epoch = %d, err = %v", epoch, err)
+	}
+	if epoch, err := store.BumpEpoch(ctx, "mihomo:web"); err != nil || epoch != 1 {
+		t.Fatalf("first egress epoch bump = %d, err = %v", epoch, err)
+	}
+	if epoch, err := store.BumpEpoch(ctx, "mihomo:web"); err != nil || epoch != 2 {
+		t.Fatalf("second egress epoch bump = %d, err = %v", epoch, err)
+	}
+	if epoch, err := store.GetEpoch(ctx, "mihomo:web"); err != nil || epoch != 2 {
+		t.Fatalf("read egress epoch = %d, err = %v", epoch, err)
+	}
+	if epoch, err := store.BumpEpoch(ctx, "mihomo:build"); err != nil || epoch != 1 {
+		t.Fatalf("isolated egress epoch bump = %d, err = %v", epoch, err)
+	}
+	epochKey := store.key("egress-epoch", "mihomo:web")
+	if ttl, err := store.client.PTTL(ctx, epochKey).Result(); err != nil || ttl != -1 {
+		t.Fatalf("egress epoch key must not expire: ttl = %s, err = %v", ttl, err)
+	}
+	const epochWorkers = 16
+	const epochBumpsPerWorker = 50
+	epochStart := make(chan struct{})
+	epochResults := make(chan uint64, epochWorkers)
+	epochErrors := make(chan error, epochWorkers)
+	var epochGroup sync.WaitGroup
+	for range epochWorkers {
+		epochGroup.Add(1)
+		go func() {
+			defer epochGroup.Done()
+			<-epochStart
+			for range epochBumpsPerWorker {
+				if _, err := store.BumpEpoch(ctx, "mihomo:race"); err != nil {
+					epochErrors <- err
+					return
+				}
+			}
+			epoch, err := store.GetEpoch(ctx, "mihomo:race")
+			epochResults <- epoch
+			epochErrors <- err
+		}()
+	}
+	close(epochStart)
+	epochGroup.Wait()
+	close(epochResults)
+	close(epochErrors)
+	maxEpoch := uint64(0)
+	for err := range epochErrors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for epoch := range epochResults {
+		if epoch > maxEpoch {
+			maxEpoch = epoch
+		}
+	}
+	if maxEpoch != epochWorkers*epochBumpsPerWorker {
+		t.Fatalf("concurrent egress epoch bumps = %d, want %d", maxEpoch, epochWorkers*epochBumpsPerWorker)
+	}
+
 	dueAt := time.Now().UTC().Add(-time.Second)
 	event := account.QuotaRecoveryEvent{AccountID: 42, Mode: "fast", DueAt: dueAt, Attempts: 3}
 	if err := store.ScheduleQuotaRecovery(ctx, event); err != nil {
@@ -482,6 +542,57 @@ func TestRedisInvalidationBusIntegration(t *testing.T) {
 	}
 	cancel()
 	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	egressCtx, egressCancel := context.WithCancel(ctx)
+	defer egressCancel()
+	egressReceived := make(chan repository.EgressEvent, 4)
+	egressDone := make(chan error, 1)
+	go func() {
+		egressDone <- store.ListenEgressEvents(egressCtx, func(_ context.Context, event repository.EgressEvent) error {
+			egressReceived <- event
+			return nil
+		})
+	}()
+	egressEvent := repository.EgressEvent{Kind: repository.EgressEventNodeBanned, Group: "XAI-GROUP", NodeName: "fast", SourceInstance: "instance-b"}
+	egressDeadline := time.NewTimer(3 * time.Second)
+	egressTicker := time.NewTicker(25 * time.Millisecond)
+	defer egressDeadline.Stop()
+	defer egressTicker.Stop()
+	var receivedEgress repository.EgressEvent
+	waitingEgress := true
+	for waitingEgress {
+		select {
+		case <-egressTicker.C:
+			if err := store.PublishEgressEvent(ctx, egressEvent); err != nil {
+				t.Fatal(err)
+			}
+		case receivedEgress = <-egressReceived:
+			waitingEgress = false
+		case <-egressDeadline.C:
+			t.Fatal("egress event was not delivered")
+		}
+	}
+	if receivedEgress.Kind != repository.EgressEventNodeBanned || receivedEgress.Group != "XAI-GROUP" || receivedEgress.NodeName != "fast" || receivedEgress.SourceInstance != "instance-b" || receivedEgress.PublishedAt.IsZero() {
+		t.Fatalf("egress event = %#v", receivedEgress)
+	}
+	if err := store.client.Publish(ctx, store.key("events", "egress"), "not-json").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PublishEgressEvent(ctx, repository.EgressEvent{Kind: repository.EgressEventExitChanged, SourceInstance: "instance-b"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case second := <-egressReceived:
+		if second.Kind != repository.EgressEventExitChanged {
+			t.Fatalf("second egress event = %#v", second)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second egress event was not delivered")
+	}
+	egressCancel()
+	if err := <-egressDone; err != nil {
 		t.Fatal(err)
 	}
 }

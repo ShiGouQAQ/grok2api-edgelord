@@ -1,6 +1,9 @@
 package egress
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Mode string
 
@@ -22,10 +25,34 @@ const (
 	ScopeConsoleAsset Scope = "grok_console_asset"
 )
 
+// NodeType 区分普通出口节点与 Mihomo 组通道节点。通道节点由操作员显式
+// 声明（ProxyURL 指向本地 Mihomo 端口），多个节点共享同一条组出口，质量
+// 守卫必须隐藏它们（探测/隔离单节点无效），转而操作 Mihomo 实际成员。
+type NodeType string
+
+const (
+	// NodeTypeStandard 是普通独立出口节点（零值，兼容历史数据）。
+	NodeTypeStandard NodeType = ""
+	// NodeTypeMihomo 是 Mihomo 组通道节点：流量经本地 Mihomo 混合端口
+	// 进入组出口，探测与隔离必须以组为单位而非节点。
+	NodeTypeMihomo NodeType = "mihomo"
+)
+
+// Normalized 将历史空值/未知值归一到标准节点。
+func (value NodeType) Normalized() NodeType {
+	switch value {
+	case NodeTypeStandard, NodeTypeMihomo:
+		return value
+	default:
+		return NodeTypeStandard
+	}
+}
+
 type Node struct {
 	ID                          uint64
 	Name                        string
 	Scope                       Scope
+	Type                        NodeType
 	Enabled                     bool
 	ProxyPool                   bool
 	SourceID                    uint64
@@ -54,14 +81,34 @@ type Node struct {
 	UpdatedAt                   time.Time
 }
 
+// IsMihomoSynced 报告该节点是否由 Mihomo 测试组成员同步器维护。同步节点
+// 默认禁用、仅供质量守卫逐成员探测，绝不可作为生产出口或固定回退节点。
+func (n Node) IsMihomoSynced() bool {
+	return strings.HasPrefix(n.SourceKey, "mihomo:")
+}
+
+// IsMihomoChannel 报告该节点是否为操作员显式声明的 Mihomo 组通道节点。
+// 通道节点共享同一条组出口，质量守卫必须隐藏它们（探测/隔离单节点无效）。
+func (n Node) IsMihomoChannel() bool {
+	return n.Type == NodeTypeMihomo
+}
+
+// IsMihomoSynced 报告该公开节点是否由 Mihomo 测试组成员同步器维护（与
+// Node.IsMihomoSynced 同判据，供 handler 等只持有 PublicNode 的调用方使用）。
+func (n PublicNode) IsMihomoSynced() bool {
+	return strings.HasPrefix(n.SourceKey, "mihomo:")
+}
+
 type PublicNode struct {
 	ID                   uint64
 	Name                 string
 	Scope                Scope
+	Type                 NodeType
 	Enabled              bool
 	ProxyConfigured      bool
 	ProxyPool            bool
 	SourceID             uint64
+	SourceKey            string
 	AccountCapacity      int
 	UserAgent            string
 	CookieConfigured     bool
@@ -153,6 +200,7 @@ type PublicSubscriptionSource struct {
 	NextSyncAt             *time.Time
 	LastSyncImported       int
 	LastSyncError          string
+	Managed                bool
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 }

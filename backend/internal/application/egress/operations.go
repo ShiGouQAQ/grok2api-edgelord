@@ -181,6 +181,9 @@ func (s *Service) CreateSource(ctx context.Context, input SubscriptionSourceInpu
 	if err != nil {
 		return domain.PublicSubscriptionSource{}, err
 	}
+	if IsManagedSourceName(input.Name) {
+		return domain.PublicSubscriptionSource{}, ErrManagedSource
+	}
 	value, err := s.applySourceInput(domain.SubscriptionSource{}, input, true)
 	if err != nil {
 		return domain.PublicSubscriptionSource{}, err
@@ -203,6 +206,9 @@ func (s *Service) UpdateSource(ctx context.Context, id uint64, input Subscriptio
 	}
 	if err != nil {
 		return domain.PublicSubscriptionSource{}, err
+	}
+	if IsManagedSourceName(value.Name) {
+		return domain.PublicSubscriptionSource{}, ErrManagedSource
 	}
 	previousScope := value.Scope
 	value, err = s.applySourceInput(value, input, false)
@@ -229,6 +235,16 @@ func (s *Service) DeleteSource(ctx context.Context, id uint64) error {
 	if err != nil {
 		return err
 	}
+	value, err := operations.GetEgressSource(ctx, id)
+	if errors.Is(err, repository.ErrNotFound) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if IsManagedSourceName(value.Name) {
+		return ErrManagedSource
+	}
 	err = operations.DeleteEgressSource(ctx, id)
 	if errors.Is(err, repository.ErrNotFound) {
 		return ErrNotFound
@@ -247,6 +263,9 @@ func (s *Service) SyncSource(ctx context.Context, id uint64) (ImportResult, erro
 	}
 	if err != nil {
 		return ImportResult{}, err
+	}
+	if IsManagedSourceName(source.Name) {
+		return ImportResult{}, ErrManagedSource
 	}
 	return s.syncSource(ctx, operations, source)
 }
@@ -487,6 +506,9 @@ func (s *Service) validateFallbacks(ctx context.Context, current domain.Operatio
 }
 
 func (s *Service) validateFixedFallbackNode(scope domain.Scope, node domain.Node, rejectCooldown bool) error {
+	if node.IsMihomoSynced() {
+		return ErrFallbackNodeIsMihomoSynced
+	}
 	if !domain.SupportsScope(node.Scope, scope) {
 		return fmt.Errorf("%w: 固定回退节点与 %s 作用域不兼容", ErrInvalidInput, scope)
 	}
@@ -565,7 +587,7 @@ func publicSource(value domain.SubscriptionSource) domain.PublicSubscriptionSour
 		ID: value.ID, Name: value.Name, Scope: value.Scope, Enabled: value.Enabled, URLConfigured: value.EncryptedURL != "",
 		RefreshIntervalSeconds: value.RefreshIntervalSeconds, DefaultAccountCapacity: value.DefaultAccountCapacity,
 		LastSyncedAt: value.LastSyncedAt, NextSyncAt: value.NextSyncAt, LastSyncImported: value.LastSyncImported, LastSyncError: value.LastSyncError,
-		CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
+		Managed: IsManagedSourceName(value.Name), CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
 }
 

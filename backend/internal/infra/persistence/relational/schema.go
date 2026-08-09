@@ -164,6 +164,9 @@ func (d *Database) initializeSchema(ctx context.Context) error {
 	if err := d.ensureEgressAssetScopeConstraints(ctx); err != nil {
 		return fmt.Errorf("迁移资源出口数据库约束: %w", err)
 	}
+	if err := d.ensureEgressNodeTypeConstraints(ctx); err != nil {
+		return fmt.Errorf("迁移出口节点类型约束: %w", err)
+	}
 	if err := d.ensureAuditOperationConstraints(ctx); err != nil {
 		return fmt.Errorf("迁移请求审计操作约束: %w", err)
 	}
@@ -383,6 +386,15 @@ func (d *Database) ensureEgressAssetScopeConstraints(ctx context.Context) error 
 		{model: &egressSubscriptionSourceModel{}, table: "egress_subscription_sources", name: "chk_egress_subscription_sources_scope"},
 		{model: &requestAuditModel{}, table: "request_audits", name: "chk_request_audits_egress_scope"},
 	}, "grok_console_asset")
+}
+
+// ensureEgressNodeTypeConstraints 升级既有数据库，为 egress_nodes.type 列
+// 建立允许空串（标准节点）与 mihomo（组通道节点）的 CHECK 约束。
+// AutoMigrate 不会可靠替换已有 PostgreSQL CHECK，因此启动时幂等检测并重建。
+func (d *Database) ensureEgressNodeTypeConstraints(ctx context.Context) error {
+	return d.ensureNamedConstraints(ctx, []consoleConstraint{
+		{model: &egressNodeModel{}, table: "egress_nodes", name: "chk_egress_nodes_type"},
+	}, "mihomo")
 }
 
 // ensureAuditOperationConstraints upgrades existing databases so Codex remote

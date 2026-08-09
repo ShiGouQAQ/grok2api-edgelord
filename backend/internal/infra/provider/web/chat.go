@@ -204,11 +204,16 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 					lease.Release()
 					continue
 				}
+				// 仅 NODE_BANNED（出口 IP 被封）才反馈切换；CHALLENGE/FORBIDDEN
+				// 只作废缓存等待同节点重解，避免无意义的出口轮换。
+				nodeBanned := provider.IsNodeBannedBody(body)
 				return &provider.Response{
 					StatusCode: upstream.StatusCode, Status: upstream.Status, Header: http.Header(upstream.Header),
 					UpstreamURL: responseUpstreamURL(upstream),
 					Body: &releaseBody{ReadCloser: io.NopCloser(bytes.NewReader(body)), release: func() {
-						a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, upstream.StatusCode, nil)
+						if nodeBanned {
+							a.egress.FeedbackNodeBanned(context.WithoutCancel(ctx), lease.NodeID)
+						}
 						lease.Release()
 					}},
 				}, nil

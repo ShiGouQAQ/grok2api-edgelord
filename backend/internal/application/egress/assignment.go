@@ -175,6 +175,10 @@ func (s *Service) eligibleNodesForProvider(values []domain.Node, provider accoun
 	result := make([]domain.Node, 0, len(values))
 	maxAge := max(probeInterval*2, time.Minute)
 	for _, value := range values {
+		// 同步节点仅 guard 探测用，禁止进入生产调度候选（auto-assign/auto-balance）。
+		if value.IsMihomoSynced() {
+			continue
+		}
 		if !value.Enabled || value.EncryptedProxyURL == "" || !scopeSupportsProvider(value.Scope, provider) || value.ProbeStatus != domain.ProbeStatusHealthy || value.LastProbedAt == nil || now.Sub(value.LastProbedAt.UTC()) > maxAge {
 			continue
 		}
@@ -338,6 +342,23 @@ func (s *Service) RunMaintenance(ctx context.Context) error {
 			s.mu.Unlock()
 			if balanceErr != nil {
 				resultErr = errors.Join(resultErr, balanceErr)
+			}
+		}
+	}
+	// Mihomo 测试组成员同步：测试组启用且有成员时，把成员镜像为 DB 节点
+	// 供质量守卫逐成员探测。频率跟随本维护循环（1 分钟）。
+	s.mu.RLock()
+	syncer := s.mihomoSyncer
+	s.mu.RUnlock()
+	if syncer != nil {
+		status, statusErr := s.MihomoStatus(ctx)
+		if statusErr == nil && status.TestEnabled && len(status.TestMembers) > 0 {
+			names := make([]string, 0, len(status.TestMembers))
+			for _, member := range status.TestMembers {
+				names = append(names, member.Name)
+			}
+			if _, _, syncErr := syncer.Sync(ctx, names, status.TestGroupName); syncErr != nil {
+				resultErr = errors.Join(resultErr, syncErr)
 			}
 		}
 	}

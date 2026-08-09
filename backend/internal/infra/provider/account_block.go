@@ -58,6 +58,21 @@ func IsDPoPProofRequiredText(value string) bool {
 	return strings.Contains(normalized, "unauthorized_dpop_required") || strings.Contains(normalized, "dpop_proof_required")
 }
 
+// IsNodeBannedBody reports a NODE_BANNED Cloudflare response: the egress exit
+// IP itself is blocked, not a transient challenge. Python-main rotates the
+// Mihomo node only for this classification; CHALLENGE re-solves on the same
+// node and FORBIDDEN never rotates.
+func IsNodeBannedBody(body []byte) bool {
+	return IsNodeBannedText(string(body))
+}
+
+func IsNodeBannedText(value string) bool {
+	value = strings.ToLower(value)
+	return strings.Contains(value, "attention-required") ||
+		strings.Contains(value, "you-have-been-blocked") ||
+		strings.Contains(value, "ddos-protection")
+}
+
 func jsonStringField(value map[string]any, key string) string {
 	result, _ := value[key].(string)
 	return result

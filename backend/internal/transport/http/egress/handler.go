@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
@@ -22,10 +24,51 @@ import (
 )
 
 type Handler struct {
-	service         *egressapp.Service
-	guardStatePath  string
-	guardConfigPath string
-	guardProbe      egressapp.QualityProbeInput
+	service            *egressapp.Service
+	guardStatePath     string
+	guardConfigPath    string
+	guardBootstrapPath string
+	guardProbe         egressapp.QualityProbeInput
+	// mihomoOps 是 Mihomo 写操作（rotate/switch/blacklist-clear）的 HTTP 层
+	// 限流闸，admin JWT 与 internal token 两条路径共用（同一 Handler 实例）。
+	mihomoOps *mihomoOpLimiter
+}
+
+// mihomoOpRateLimitWindow 是 Mihomo 写操作的调用面限流窗口。与后端切换
+// 节流闸配合：本闸只限调用频率，出口切换的耗散/冷却仍由 Manager 自身
+// 保证（单飞合并），不会因限流产生双重切换语义。
+const mihomoOpRateLimitWindow = 30 * time.Second
+
+// mihomoOpLimiter 是每 key（操作+客户端 IP）的轻量内存限流闸（1 次/窗口，
+// map+mutex，不引新依赖）。多实例部署下各实例独立计数，仅作滥用防护，
+// 非精确配额。
+type mihomoOpLimiter struct {
+	mu     sync.Mutex
+	window time.Duration
+	last   map[string]time.Time
+}
+
+func newMihomoOpLimiter(window time.Duration) *mihomoOpLimiter {
+	return &mihomoOpLimiter{window: window, last: make(map[string]time.Time)}
+}
+
+func (l *mihomoOpLimiter) Allow(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if last, ok := l.last[key]; ok && now.Sub(last) < l.window {
+		return false
+	}
+	l.last[key] = now
+	// 有界：key 数超限时清理过期条目，防止恶意 IP 轮换撑爆内存。
+	if len(l.last) > 1024 {
+		cutoff := now.Add(-2 * l.window)
+		for k, v := range l.last {
+			if v.Before(cutoff) {
+				delete(l.last, k)
+			}
+		}
+	}
+	return true
 }
 
 func NewHandler(service *egressapp.Service, guardStatePath ...string) *Handler {
@@ -37,7 +80,14 @@ func NewHandler(service *egressapp.Service, guardStatePath ...string) *Handler {
 	if len(guardStatePath) > 1 {
 		configPath = strings.TrimSpace(guardStatePath[1])
 	}
-	return &Handler{service: service, guardStatePath: path, guardConfigPath: configPath}
+	bootstrapPath := ""
+	if len(guardStatePath) > 2 {
+		bootstrapPath = strings.TrimSpace(guardStatePath[2])
+	}
+	return &Handler{
+		service: service, guardStatePath: path, guardConfigPath: configPath, guardBootstrapPath: bootstrapPath,
+		mihomoOps: newMihomoOpLimiter(mihomoOpRateLimitWindow),
+	}
 }
 
 // WithQualityGuardProbe pins the sidecar probe to server-owned credentials and
@@ -59,7 +109,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.POST("/egress-nodes/:id/quality-test", h.testQuality)
 	router.GET("/egress-quality-guard", h.qualityGuardStatus)
 	router.PUT("/egress-quality-guard/config", h.updateQualityGuardConfig)
-	router.POST("/egress-quality-guard/nodes/:id/test", h.testQualityGuardNode)
+	router.POST("/egress-quality-guard/nodes/:id/test", h.testQualityGuardNodeManual)
 	router.POST("/egress-nodes/:id/accounts", h.assignAccounts)
 	router.DELETE("/egress-nodes/accounts", h.unassignAccounts)
 	router.PUT("/egress-nodes/:id", h.update)
@@ -74,6 +124,14 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/egress-operations", h.operationsConfig)
 	router.PUT("/egress-operations", h.updateOperationsConfig)
 	router.POST("/egress-operations/rebalance", h.rebalance)
+	router.GET("/egress-mihomo/status", h.mihomoStatus)
+	router.POST("/egress-mihomo/switch", h.mihomoSwitch)
+	router.POST("/egress-mihomo/blacklist/clear", h.mihomoClearBlacklist)
+	router.POST("/egress-mihomo/rotate", h.mihomoRotate)
+	router.POST("/egress-mihomo/select", h.mihomoTestSelect)
+	router.POST("/egress-mihomo/ban", h.mihomoTestBan)
+	router.POST("/egress-mihomo/unban", h.mihomoTestUnban)
+	router.POST("/egress-mihomo/refresh-delays", h.mihomoRefreshDelays)
 }
 
 // RegisterQualityGuard exposes the minimum egress surface required by the
@@ -85,11 +143,194 @@ func (h *Handler) RegisterQualityGuard(router *gin.RouterGroup) {
 	router.POST("/egress-nodes/:id/test", h.testNode)
 	router.POST("/egress-nodes/:id/quality-test", h.testQualityGuardNode)
 	router.GET("/egress-operations", h.operationsConfig)
+	router.GET("/egress-mihomo/status", h.mihomoStatus)
+	router.POST("/egress-mihomo/rotate", h.mihomoRotate)
+	router.POST("/egress-mihomo/select", h.mihomoTestSelect)
+	router.POST("/egress-mihomo/ban", h.mihomoTestBan)
+	router.POST("/egress-mihomo/unban", h.mihomoTestUnban)
 }
 
 // A fully populated 2,000-node guard state is slightly larger than 1 MiB.
 // Keep a bounded limit while leaving headroom for audit cursors and events.
 const maxQualityGuardStateBytes = 8 << 20
+
+// mihomoRefreshDelays 手动触发 Mihomo 测活并刷新延迟展示：清空延迟探测
+// 缓存后重新拉取状态（成员组装时实时探测生产组与测试组），返回与
+// mihomoStatus 相同的状态结构。与 switch 一样经 mihomoOpAllowed 限频
+// （1 次/30s/IP），避免手动刷新打爆探测端点。
+func (h *Handler) mihomoRefreshDelays(c *gin.Context) {
+	if !h.mihomoOpAllowed(c, "refresh-delays") {
+		return
+	}
+	value, err := h.service.MihomoRefreshDelays(c.Request.Context())
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	h.writeMihomoStatus(c, value)
+}
+
+func (h *Handler) mihomoStatus(c *gin.Context) {
+	value, err := h.service.MihomoStatus(c.Request.Context())
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	h.writeMihomoStatus(c, value)
+}
+
+// writeMihomoStatus 输出 Mihomo 状态快照（mihomoStatus 与
+// mihomoRefreshDelays 共用同一响应结构）。
+func (h *Handler) writeMihomoStatus(c *gin.Context, value egressapp.MihomoStatus) {
+	bannedNodes := value.BannedNodes
+	if bannedNodes == nil {
+		bannedNodes = []string{}
+	}
+	members := value.Members
+	if members == nil {
+		members = []egressapp.MihomoMemberStatus{}
+	}
+	testMembers := value.TestMembers
+	if testMembers == nil {
+		testMembers = []egressapp.MihomoMemberStatus{}
+	}
+	response.Success(c, http.StatusOK, gin.H{
+		"enabled": value.Enabled, "apiUrl": value.APIURL, "groupName": value.GroupName,
+		"currentNode": value.CurrentNode, "bannedNodes": bannedNodes, "switchCount": value.SwitchCount,
+		"epoch": value.Epoch, "reachable": value.Reachable, "lastError": value.LastError,
+		"testEnabled": value.TestEnabled, "testGroupName": value.TestGroupName, "testCurrentNode": value.TestCurrentNode,
+		"testEpoch": value.TestEpoch,
+		"members":   members, "testMembers": testMembers,
+	})
+}
+
+// mihomoOpAllowed 对写操作做调用面限流（key = 操作+客户端 IP，1 次/30s）。
+// 被限流时直接写 429 并返回 false。
+func (h *Handler) mihomoOpAllowed(c *gin.Context, op string) bool {
+	if !h.mihomoOps.Allow("mihomo:"+op+":"+c.ClientIP(), time.Now()) {
+		response.Error(c, http.StatusTooManyRequests, "rateLimited", "Mihomo 操作过于频繁，请 30 秒后重试")
+		return false
+	}
+	return true
+}
+
+func (h *Handler) mihomoSwitch(c *gin.Context) {
+	if !h.mihomoOpAllowed(c, "switch") {
+		return
+	}
+	node, err := h.service.MihomoSwitch(c.Request.Context())
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"switched": true, "node": node})
+}
+
+func (h *Handler) mihomoClearBlacklist(c *gin.Context) {
+	if !h.mihomoOpAllowed(c, "blacklist-clear") {
+		return
+	}
+	cleared, err := h.service.MihomoClearBlacklist()
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"cleared": cleared})
+}
+
+// mihomoRotateRequest 镜像 quality_guard.py rotate_node 的请求体
+// （{"nodeId": "...", "oldExitIp": "..."}，字段大小写兼容 camelCase）。
+type mihomoRotateRequest struct {
+	NodeID    string `json:"nodeId"`
+	OldExitIP string `json:"oldExitIp"`
+}
+
+// mihomoRotate 实现质量守护 rotate_node 契约：组模型下所有 DB 节点共享
+// 同一个 Mihomo 组出口，nodeId 仅作契约校验、不参与选路。响应只读字段是
+// changed（guard 要求 changed==true 否则判定轮换失败）。
+//
+// 白名单防护（G3）：rotate 是组级操作，会轮换整组出口（包括 protected 的固定
+// 回退节点），因此不能由任意 internal token 持有者触发。nodeId 必须命中
+// bootstrap rotatable_node_ids 白名单：白名单为空 → 一律 403（未配置可轮换
+// 节点即不允许轮换，fail-closed）；白名单非空且 nodeId 不在其中 → 403。
+// 白名单只限制谁能触发组级 rotate，不参与选路。空 nodeId 保持 400。
+// 与 switch 一样经 mihomoOpAllowed 限频（1 次/30s/IP），与后端 doSwitch
+// 节流闸配合：guard 的轮换失败会按 quarantine_seconds 退避重试。
+func (h *Handler) mihomoRotate(c *gin.Context) {
+	if !h.mihomoOpAllowed(c, "rotate") {
+		return
+	}
+	var request mihomoRotateRequest
+	if c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.NodeID) == "" {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	nodeID := strings.TrimSpace(request.NodeID)
+	if !slices.Contains(h.guardBootstrapRotatableNodeIDs(), nodeID) {
+		response.Error(c, http.StatusForbidden, "nodeNotRotatable", "节点不在可轮换白名单内")
+		return
+	}
+	value, err := h.service.Rotate(c.Request.Context())
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{
+		"changed": value.Changed, "nodeId": nodeID, "oldExitIp": request.OldExitIP,
+		"newExitIp": "", "newNode": value.NewNode,
+	})
+}
+
+type mihomoTestNodeRequest struct {
+	NodeID string `json:"nodeId"`
+}
+
+// mihomoTestSelect 实现测试组 select_node 契约：显式切换测试组到指定节点
+// （节点名由 Mihomo 组节点提供，body 的 nodeId 即节点名）。测试组与生产出口
+// 隔离，切换零扰动生产。changed 恒为 true（成功或单飞合并）。
+func (h *Handler) mihomoTestSelect(c *gin.Context) {
+	var request mihomoTestNodeRequest
+	if c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.NodeID) == "" {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	current, err := h.service.MihomoTestSelect(c.Request.Context(), strings.TrimSpace(request.NodeID))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"changed": true, "currentNode": current})
+}
+
+// mihomoTestBan 封禁测试组内一个节点，返回当前测试组黑名单节点数。
+func (h *Handler) mihomoTestBan(c *gin.Context) {
+	var request mihomoTestNodeRequest
+	if c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.NodeID) == "" {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	banned, err := h.service.MihomoTestBan(strings.TrimSpace(request.NodeID))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"bannedNodes": banned})
+}
+
+// mihomoTestUnban 解禁测试组内一个节点，返回剩余黑名单节点数。
+func (h *Handler) mihomoTestUnban(c *gin.Context) {
+	var request mihomoTestNodeRequest
+	if c.ShouldBindJSON(&request) != nil || strings.TrimSpace(request.NodeID) == "" {
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		return
+	}
+	banned, err := h.service.MihomoTestUnban(strings.TrimSpace(request.NodeID))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	response.Success(c, http.StatusOK, gin.H{"bannedNodes": banned})
+}
 
 type qualityGuardState struct {
 	Version           int                              `json:"version"`
@@ -194,6 +435,7 @@ func (h *Handler) qualityGuardStatus(c *gin.Context) {
 			"hard_tps": state.Guard.HardTPS, "consecutive_soft": state.Guard.ConsecutiveSoft,
 			"consecutive_errors": state.Guard.ConsecutiveErrors, "quarantine_seconds": state.Guard.QuarantineSeconds,
 			"min_healthy_nodes": state.Guard.MinHealthyNodes, "max_output_tokens": state.Guard.MaxOutputTokens,
+			"rotation_url": h.guardBootstrapRotationURL(), "rotatable_node_ids": h.guardBootstrapRotatableNodeIDs(),
 		},
 		"nodes": state.Nodes, "protectedNodeIds": state.ProtectedNodeIDs, "recentEvents": state.RecentEvents,
 	}
@@ -204,15 +446,17 @@ func (h *Handler) qualityGuardStatus(c *gin.Context) {
 }
 
 type qualityGuardConfigRequest struct {
-	Mode                  string  `json:"mode"`
-	ActiveIntervalSeconds int     `json:"activeIntervalSeconds"`
-	PassivePollSeconds    int     `json:"passivePollSeconds"`
-	SoftTPS               float64 `json:"softTPS"`
-	HardTPS               float64 `json:"hardTPS"`
-	ConsecutiveSoft       int     `json:"consecutiveSoft"`
-	ConsecutiveErrors     int     `json:"consecutiveErrors"`
-	QuarantineSeconds     int     `json:"quarantineSeconds"`
-	MinHealthyNodes       int     `json:"minHealthyNodes"`
+	Mode                  string   `json:"mode"`
+	ActiveIntervalSeconds int      `json:"activeIntervalSeconds"`
+	PassivePollSeconds    int      `json:"passivePollSeconds"`
+	SoftTPS               float64  `json:"softTPS"`
+	HardTPS               float64  `json:"hardTPS"`
+	ConsecutiveSoft       int      `json:"consecutiveSoft"`
+	ConsecutiveErrors     int      `json:"consecutiveErrors"`
+	QuarantineSeconds     int      `json:"quarantineSeconds"`
+	MinHealthyNodes       int      `json:"minHealthyNodes"`
+	RotationURL           string   `json:"rotationUrl"`
+	RotatableNodeIDs      []string `json:"rotatableNodeIds"`
 }
 
 type qualityGuardRuntimeConfigFile struct {
@@ -263,6 +507,10 @@ func (h *Handler) updateQualityGuardConfig(c *gin.Context) {
 		response.Error(c, http.StatusServiceUnavailable, "qualityGuardConfigWriteFailed", "质量守护策略保存失败")
 		return
 	}
+	if err := h.updateQualityGuardBootstrap(request); err != nil {
+		response.Error(c, http.StatusServiceUnavailable, "qualityGuardConfigWriteFailed", "质量守护轮换配置保存失败")
+		return
+	}
 	response.Success(c, http.StatusOK, gin.H{"saved": true})
 }
 
@@ -288,6 +536,12 @@ func (r qualityGuardConfigRequest) validate(nodeCount int) error {
 	if r.MinHealthyNodes < 1 || r.MinHealthyNodes > nodeCount {
 		return errors.New("最少保留节点必须在受管节点数量范围内")
 	}
+	if len(r.RotatableNodeIDs) > 0 && strings.TrimSpace(r.RotationURL) == "" {
+		return errors.New("可轮换节点非空时必须配置轮换接口 URL")
+	}
+	if url := strings.TrimSpace(r.RotationURL); url != "" && (strings.Contains(url, "://") == false || !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://")) {
+		return errors.New("轮换接口 URL 必须是无凭据的 HTTP(S) URL")
+	}
 	return nil
 }
 
@@ -301,6 +555,138 @@ func saveQualityGuardRuntimeConfig(path string, value qualityGuardRuntimeConfigF
 		return err
 	}
 	temporary, err := os.CreateTemp(directory, ".runtime-config-")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(append(data, '\n')); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
+}
+
+// qualityGuardBootstrapFile mirrors bootstrap.json; only rotation fields are runtime-editable.
+type qualityGuardBootstrapFile struct {
+	Version       int                         `json:"version"`
+	Enabled       bool                        `json:"enabled"`
+	InternalToken string                      `json:"internal_token,omitempty"`
+	Config        qualityGuardBootstrapConfig `json:"config"`
+}
+
+type qualityGuardBootstrapConfig struct {
+	Model                   string   `json:"model"`
+	Prompt                  string   `json:"prompt"`
+	Expected                string   `json:"expected"`
+	NodeIDs                 []string `json:"node_ids"`
+	Mode                    string   `json:"mode"`
+	ActiveIntervalSeconds   int      `json:"active_interval_seconds"`
+	PassivePollSeconds      int      `json:"passive_poll_seconds"`
+	SoftTPS                 float64  `json:"soft_tps"`
+	HardTPS                 float64  `json:"hard_tps"`
+	ConsecutiveSoft         int      `json:"consecutive_soft"`
+	ConsecutiveErrors       int      `json:"consecutive_errors"`
+	QuarantineSeconds       int      `json:"quarantine_seconds"`
+	NoAccountBackoffSeconds int      `json:"no_account_backoff_seconds"`
+	MinHealthyNodes         int      `json:"min_healthy_nodes"`
+	MaxOutputTokens         int      `json:"max_output_tokens"`
+	FailClosed              bool     `json:"fail_closed"`
+	MinGenerationMS         int      `json:"min_generation_ms"`
+	RotationURL             string   `json:"rotation_url"`
+	RotationToken           string   `json:"rotation_token"`
+	RotationTimeoutSeconds  int      `json:"rotation_timeout_seconds"`
+	RotatableNodeIDs        []string `json:"rotatable_node_ids"`
+}
+
+func (h *Handler) readQualityGuardBootstrap() (qualityGuardBootstrapFile, error) {
+	if h.guardBootstrapPath == "" {
+		return qualityGuardBootstrapFile{}, nil
+	}
+	data, err := os.ReadFile(h.guardBootstrapPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return qualityGuardBootstrapFile{}, nil
+		}
+		return qualityGuardBootstrapFile{}, err
+	}
+	var file qualityGuardBootstrapFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return qualityGuardBootstrapFile{}, err
+	}
+	return file, nil
+}
+
+func (h *Handler) guardBootstrapRotationURL() string {
+	file, err := h.readQualityGuardBootstrap()
+	if err != nil {
+		return ""
+	}
+	return file.Config.RotationURL
+}
+
+func (h *Handler) guardBootstrapRotatableNodeIDs() []string {
+	file, err := h.readQualityGuardBootstrap()
+	if err != nil {
+		return nil
+	}
+	return file.Config.RotatableNodeIDs
+}
+
+func (h *Handler) updateQualityGuardBootstrap(request qualityGuardConfigRequest) error {
+	if h.guardBootstrapPath == "" {
+		return nil
+	}
+	file, err := h.readQualityGuardBootstrap()
+	if err != nil {
+		return err
+	}
+	file.Version = bootstrapVersionFallback(file.Version)
+	file.Config.RotationURL = strings.TrimSpace(request.RotationURL)
+	file.Config.RotatableNodeIDs = compactStrings(request.RotatableNodeIDs)
+	return writeQualityGuardBootstrap(h.guardBootstrapPath, file)
+}
+
+const bootstrapVersionFallbackValue = 1
+
+func bootstrapVersionFallback(value int) int {
+	if value == 0 {
+		return bootstrapVersionFallbackValue
+	}
+	return value
+}
+
+func compactStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+func writeQualityGuardBootstrap(path string, value qualityGuardBootstrapFile) error {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(directory, ".quality-guard-bootstrap-")
 	if err != nil {
 		return err
 	}
@@ -351,6 +737,30 @@ func (h *Handler) readQualityGuardState() (qualityGuardState, bool, error) {
 		state.ProtectedNodeIDs = []string{}
 	}
 	return state, true, nil
+}
+
+// testQualityGuardNodeManual 是管理端手动质量检测入口。Mihomo 同步节点的
+// ProxyURL 共享同一测试通道（127.0.0.1:7891），探测结果取决于测试组当前
+// 成员；因此先切换测试组到目标节点，再走公共探测，保证测的就是点击的节点。
+// 内部守卫路径（RegisterQualityGuard）保持 testQualityGuardNode：守卫主动
+// 探测前已自行 select，重复切换会污染其 epoch 变化检测。
+func (h *Handler) testQualityGuardNodeManual(c *gin.Context) {
+	nodeID, ok := pathID(c)
+	if !ok {
+		return
+	}
+	node, err := h.service.GetNode(c.Request.Context(), nodeID)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	if node.IsMihomoSynced() {
+		if _, err := h.service.MihomoTestSelect(c.Request.Context(), node.Name); err != nil {
+			h.writeError(c, err)
+			return
+		}
+	}
+	h.testQualityGuardNode(c)
 }
 
 func (h *Handler) testQualityGuardNode(c *gin.Context) {
@@ -414,6 +824,7 @@ func (h *Handler) refreshClearance(c *gin.Context) {
 type nodeRequest struct {
 	Name              string  `json:"name"`
 	Scope             string  `json:"scope"`
+	Type              string  `json:"type"`
 	Enabled           bool    `json:"enabled"`
 	ProxyPool         *bool   `json:"proxyPool"`
 	AccountCapacity   *int    `json:"accountCapacity"`
@@ -428,10 +839,12 @@ type nodeResponse struct {
 	ID                   uint64              `json:"id,string"`
 	Name                 string              `json:"name"`
 	Scope                string              `json:"scope"`
+	Type                 string              `json:"type"`
 	Enabled              bool                `json:"enabled"`
 	ProxyConfigured      bool                `json:"proxyConfigured"`
 	ProxyPool            bool                `json:"proxyPool"`
 	SourceID             uint64              `json:"sourceId,omitempty,string"`
+	SourceKey            string              `json:"sourceKey,omitempty"`
 	AccountCapacity      int                 `json:"accountCapacity"`
 	UserAgent            string              `json:"userAgent"`
 	CookieConfigured     bool                `json:"cookieConfigured"`
@@ -603,7 +1016,7 @@ func (h *Handler) unassignAccounts(c *gin.Context) {
 
 func (value nodeRequest) input() egressapp.Input {
 	return egressapp.Input{
-		Name: value.Name, Scope: egressdomain.Scope(value.Scope), Enabled: value.Enabled, ProxyPool: value.ProxyPool,
+		Name: value.Name, Scope: egressdomain.Scope(value.Scope), Type: egressdomain.NodeType(value.Type), Enabled: value.Enabled, ProxyPool: value.ProxyPool,
 		AccountCapacity: value.AccountCapacity,
 		ProxyURL:        value.ProxyURL, ClearProxyURL: value.ClearProxyURL, UserAgent: value.UserAgent,
 		CloudflareCookies: value.CloudflareCookies, ClearCookies: value.ClearCookies,
@@ -708,10 +1121,10 @@ func (h *Handler) update(c *gin.Context) {
 
 func newNodeResponse(value egressdomain.PublicNode) nodeResponse {
 	return nodeResponse{
-		ID: value.ID, Name: value.Name, Scope: string(value.Scope), Enabled: value.Enabled,
+		ID: value.ID, Name: value.Name, Scope: string(value.Scope), Type: string(value.Type), Enabled: value.Enabled,
 		ProxyConfigured: value.ProxyConfigured, ProxyPool: value.ProxyPool, UserAgent: value.UserAgent, CookieConfigured: value.CookieConfigured,
 		AccountBoundProxy: value.AccountBoundProxy,
-		SourceID:          value.SourceID, AccountCapacity: value.AccountCapacity,
+		SourceID:          value.SourceID, SourceKey: value.SourceKey, AccountCapacity: value.AccountCapacity,
 		Health: value.Health, FailureCount: value.FailureCount, CooldownUntil: value.CooldownUntil, LastError: value.LastError,
 		ProbeStatus: string(value.ProbeStatus), LastProbedAt: value.LastProbedAt, ProbeLatencyMS: value.ProbeLatencyMS, ExitIP: value.ExitIP, ProbeError: value.ProbeError,
 		ProbeProvider: string(value.ProbeProvider),
@@ -816,6 +1229,7 @@ type sourceResponse struct {
 	NextSyncAt             *time.Time `json:"nextSyncAt,omitempty"`
 	LastSyncImported       int        `json:"lastSyncImported"`
 	LastSyncError          string     `json:"lastSyncError,omitempty"`
+	Managed                bool       `json:"managed"`
 }
 
 type importRequest struct {
@@ -904,6 +1318,7 @@ func newSourceResponse(value egressdomain.PublicSubscriptionSource) sourceRespon
 		ID: value.ID, Name: value.Name, Scope: string(value.Scope), Enabled: value.Enabled, URLConfigured: value.URLConfigured,
 		RefreshIntervalSeconds: value.RefreshIntervalSeconds, DefaultAccountCapacity: value.DefaultAccountCapacity,
 		LastSyncedAt: value.LastSyncedAt, NextSyncAt: value.NextSyncAt, LastSyncImported: value.LastSyncImported, LastSyncError: value.LastSyncError,
+		Managed: value.Managed,
 	}
 }
 
@@ -1149,6 +1564,16 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 		response.Error(c, http.StatusBadGateway, "egressSubscriptionSyncFailed", "代理订阅同步失败")
 	case errors.Is(err, egressapp.ErrClearanceUnavailable):
 		response.Error(c, http.StatusConflict, "clearanceRefreshUnavailable", err.Error())
+	case errors.Is(err, egressapp.ErrMihomoUnavailable):
+		response.Error(c, http.StatusServiceUnavailable, "egressMihomoUnavailable", err.Error())
+	case errors.Is(err, egressapp.ErrManagedSource):
+		response.Error(c, http.StatusForbidden, "managedSourceProtected", err.Error())
+	case errors.Is(err, egressapp.ErrManagedMihomoNode):
+		response.Error(c, http.StatusForbidden, "mihomoNodeProtected", err.Error())
+	case errors.Is(err, egressapp.ErrCannotBindMihomoSyncedNode):
+		response.Error(c, http.StatusConflict, "mihomoNodeProtected", err.Error())
+	case errors.Is(err, egressapp.ErrFallbackNodeIsMihomoSynced):
+		response.Error(c, http.StatusConflict, "mihomoNodeFallbackProtected", err.Error())
 	case errors.Is(err, egressapp.ErrQualityProbeUnavailable):
 		response.Error(c, http.StatusServiceUnavailable, "egressQualityProbeUnavailable", err.Error())
 	case strings.Contains(err.Error(), "FlareSolverr") || strings.Contains(err.Error(), "Clearance"):
